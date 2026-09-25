@@ -57,7 +57,7 @@ class MuseEngine:
             return
         env = dict(os.environ)
         env.setdefault("HOME", self.cfg.home_dir)
-        env["PATH"] = self.cfg.extra_path + ":" + env.get("PATH", "")
+        env["PATH"] = (self.cfg.extra_path + os.pathsep + env.get("PATH", "")) if self.cfg.extra_path else env.get("PATH", "")
         args = [
             self.cfg.chromium,
             "--headless=new", "--no-sandbox", "--disable-gpu",
@@ -91,8 +91,9 @@ class MuseEngine:
 
         os.makedirs(self.cfg.data_dir, exist_ok=True)
         self._log = open(os.path.join(self.cfg.data_dir, "chromium.log"), "ab", buffering=0)
+        cwd_dir = self.cfg.home_dir if (self.cfg.home_dir and os.path.isdir(self.cfg.home_dir)) else None
         self.proc = subprocess.Popen(args, stdout=self._log, stderr=subprocess.STDOUT,
-                                     env=env, cwd=self.cfg.home_dir)
+                                     env=env, cwd=cwd_dir)
         last = None
         for _ in range(90):
             try:
