@@ -1,0 +1,26 @@
+[Unit]
+Description=muse2api - Muse(muse.ai) web quota reverse proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/muse2api
+Environment=HOME=/home/ubuntu
+Environment=PATH=/snap/bin:/usr/local/bin:/usr/bin:/bin
+Environment=MUSE2API_HOME=/opt/muse2api
+Environment=MUSE2API_PORT=18610
+Environment=MUSE2API_CDP_PORT=19210
+Environment=MUSE2API_CHROMIUM=/snap/bin/chromium
+Environment=MUSE2API_HOME_DIR=/home/ubuntu
+EnvironmentFile=-/opt/muse2api/.env
+ExecStart=/opt/muse2api/venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 18610
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

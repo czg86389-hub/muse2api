@@ -1,0 +1,21 @@
+[
+  {
+    "id": "example_acc_01",
+    "label": "演示账号01",
+    "created_at": 1790140000,
+    "last_used_at": 1790140000,
+    "last_status": "ok",
+    "last_error": null,
+    "enabled": true,
+    "cookies": {
+      "hatch_sess": "your_hatch_sess_here",
+      "hatch_gw": "your_hatch_gw_here",
+      "hatch_vml": "your_hatch_vml_here",
+      "hatch_native_auth_device": "your_auth_device_here"
+    },
+    "expires_at": 1790312800,
+    "plan": "Free plan",
+    "extra_left": "2B tokens left",
+    "weekly_used_pct": 0
+  }
+]

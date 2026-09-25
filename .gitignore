@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Environment & Credentials
+.env
+.env.local
+*.key
+*.pem
+
+# Runtime & User Data
+data/accounts.json
+data/tasks.json
+data/media/*
+!data/media/.gitkeep
+data/downloads/*
+!data/downloads/.gitkeep
+chrome-profile/
+muse2api-profiles/
+
+# Logs & Backups
+*.log
+*.bak
+*.bak*
+*.swp
+*~
+
+# IDE & OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Archives
+*.zip
+*.tar.gz
+*.tar

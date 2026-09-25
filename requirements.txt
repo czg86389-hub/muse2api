@@ -1,0 +1,5 @@
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pydantic>=2.9
+requests>=2.32
+websocket-client>=1.8
