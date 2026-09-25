@@ -47,7 +47,7 @@
 
 1. **克隆代码并进入目录**：
    ```bash
-   git clone https://github.com/your-username/muse2api.git
+   git clone https://github.com/czg86389-hub/muse2api.git
    cd muse2api
    ```
 
