@@ -16,9 +16,9 @@ Environment=MUSE2API_CDP_PORT=19210
 Environment=MUSE2API_CHROMIUM=/snap/bin/chromium
 Environment=MUSE2API_HOME_DIR=/home/ubuntu
 EnvironmentFile=-/opt/muse2api/.env
-ExecStart=/opt/muse2api/venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 18610
+ExecStart=/opt/muse2api/venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 18610
 Restart=always
-RestartSec=5
+RestartSec=2
 NoNewPrivileges=true
 LimitNOFILE=65535
 

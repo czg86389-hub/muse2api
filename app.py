@@ -56,7 +56,7 @@ if not log.handlers:
     log.addHandler(_h)
 
 CFG.ensure_dirs()
-app = FastAPI(title="muse2api", version="1.4.0")
+app = FastAPI(title="muse2api", version="1.5.0")
 
 # Cookie 助手脚本从 muse.ai 页面发起导入请求，需要放行该来源；
 # 浏览器扩展从 chrome-extension:// 发起，也一并放行。
@@ -1797,7 +1797,7 @@ TRACKED_REPO_PATHS = [
     "app.py", "engine.py", "store.py", "cdp.py", "config.py",
     "admin.html", "README.md", "version.json", "requirements.txt",
     "Dockerfile", "docker-compose.yml", ".env.example", ".gitignore",
-    "LICENSE", "extension", "deploy",
+    "LICENSE", "extension", "deploy", "tools",
 ]
 _UPDATE_CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 
@@ -1839,7 +1839,7 @@ def _git(args: list[str], timeout: int = 30):
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
     return subprocess.run(
-        ["git", *args],
+        ["git", "-c", f"safe.directory={BASE_DIR}", *args],
         cwd=BASE_DIR,
         capture_output=True,
         text=True,
@@ -1858,8 +1858,7 @@ def _ensure_git_repo(token: str = ""):
         _git(["fetch", "origin", "main"], timeout=45)
         _git(["reset", "--mixed", "origin/main"])
     else:
-        if token:
-            _git(["remote", "set-url", "origin", remote_url])
+        _git(["remote", "set-url", "origin", remote_url])
     _git(["config", "user.name", "czg86389-hub"])
     _git(["config", "user.email", "czg86389-hub@users.noreply.github.com"])
 
@@ -1993,8 +1992,7 @@ def _upgrade_from_github_sync() -> dict:
         _ensure_git_repo(token)
         f_res = _git(["fetch", "origin", "main"], timeout=45)
         if f_res.returncode == 0:
-            existing_paths = [p for p in TRACKED_REPO_PATHS if os.path.exists(os.path.join(BASE_DIR, p)) or p == "version.json"]
-            _git(["checkout", "origin/main", "--", *existing_paths])
+            _git(["checkout", "-f", "origin/main", "--", "."])
             _git(["reset", "--mixed", "origin/main"])
             upgraded_via = "git"
     except Exception as e:
@@ -2007,15 +2005,14 @@ def _upgrade_from_github_sync() -> dict:
         )
         if resp.status_code != 200:
             raise HTTPException(502, f"下载 GitHub 更新包失败 (HTTP {resp.status_code})")
-        allowed = set(TRACKED_REPO_PATHS)
+        protected_files = {".env", "data/accounts.json", "data/tasks.json"}
         with tarfile.open(fileobj=io.BytesIO(resp.content), mode="r:gz") as tar:
             for member in tar.getmembers():
                 parts = member.name.split("/", 1)
                 if len(parts) < 2 or not parts[1]:
                     continue
-                rel = parts[1]
-                top = rel.split("/", 1)[0]
-                if top not in allowed or ".." in rel:
+                rel = parts[1].replace("\\", "/")
+                if ".." in rel or rel in protected_files:
                     continue
                 target_path = os.path.join(BASE_DIR, rel)
                 if member.isdir():

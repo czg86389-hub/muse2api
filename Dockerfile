@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-freefont-ttf \
     procps \
     curl \
+    git \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -26,7 +27,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制代码与必要目录
-COPY admin.html app.py cdp.py config.py engine.py store.py ./
+COPY admin.html app.py cdp.py config.py engine.py store.py version.json ./
 COPY deploy/ ./deploy/
 COPY extension/ ./extension/
 COPY tools/ ./tools/

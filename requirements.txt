@@ -3,3 +3,4 @@ uvicorn[standard]>=0.32
 pydantic>=2.9
 requests>=2.32
 websocket-client>=1.8
+python-multipart>=0.0.9

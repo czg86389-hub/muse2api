@@ -2,21 +2,74 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass, field
+
+_DEFAULT_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_dotenv():
+    """自动加载项目根目录下的 .env 文件（不覆盖已存在的系统环境变量）。"""
+    base = os.environ.get("MUSE2API_HOME") or _DEFAULT_BASE_DIR
+    env_path = os.path.join(base, ".env")
+    if not os.path.isfile(env_path):
+        return
+    try:
+        with open(env_path, encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#") or "=" not in s:
+                    continue
+                k, v = s.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip("'\"")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+    except OSError:
+        pass
+
+
+_load_dotenv()
 
 
 def _env(key: str, default: str) -> str:
     return os.environ.get(key, default)
 
 
+def _detect_chromium() -> str:
+    """优先使用 MUSE2API_CHROMIUM；若未设置或路径不存在，则自动探测系统已安装的 Chromium/Chrome。"""
+    configured = os.environ.get("MUSE2API_CHROMIUM", "").strip()
+    if configured and (os.path.isfile(configured) or shutil.which(configured)):
+        return configured
+    candidates = [
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+        "google-chrome",
+        "chrome",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    ]
+    for c in candidates:
+        if os.path.isfile(c) or shutil.which(c):
+            return c
+    return configured or "chromium"
+
+
 @dataclass
 class Config:
-    base_dir: str = field(default_factory=lambda: _env("MUSE2API_HOME", "/opt/muse2api"))
-    host: str = field(default_factory=lambda: _env("MUSE2API_HOST", "127.0.0.1"))
+    base_dir: str = field(default_factory=lambda: _env("MUSE2API_HOME", _DEFAULT_BASE_DIR))
+    host: str = field(default_factory=lambda: _env("MUSE2API_HOST", "0.0.0.0"))
     port: int = field(default_factory=lambda: int(_env("MUSE2API_PORT", "18610")))
 
     # 浏览器
-    chromium: str = field(default_factory=lambda: _env("MUSE2API_CHROMIUM", "chromium"))
+    chromium: str = field(default_factory=_detect_chromium)
     cdp_port: int = field(default_factory=lambda: int(_env("MUSE2API_CDP_PORT", "19210")))
     home_dir: str = field(default_factory=lambda: _env("MUSE2API_HOME_DIR", os.path.expanduser("~")))
     extra_path: str = field(default_factory=lambda: _env("MUSE2API_EXTRA_PATH", "/snap/bin"))
