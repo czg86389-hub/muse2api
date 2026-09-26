@@ -186,7 +186,19 @@
 
 <header>
   <div class="hwrap">
-    <div class="logo"><span class="dot"></span>muse2api <small>Muse 网页额度 · 反代 API</small></div>
+    <div class="logo">
+      <span class="dot"></span>muse2api <small>Muse 网页额度 · 反代 API</small>
+      <a href="https://github.com/czg86389-hub/muse2api" target="_blank" class="pill" style="margin-left:10px;text-decoration:none;color:var(--text);border-color:var(--line2);cursor:pointer" title="打开 GitHub 开源仓库 (https://github.com/czg86389-hub/muse2api)">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" style="vertical-align:-2px"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+        <b>GitHub 仓库</b>
+      </a>
+      <a href="https://linux.do/" target="_blank" class="pill" style="text-decoration:none;color:var(--text);border-color:var(--line2);cursor:pointer" title="社区认可与友情链接：LINUX DO 社区 (https://linux.do/)">
+        🤝 <b>LINUX DO</b>
+      </a>
+      <button class="ghost mini" onclick="toggleRepoPanel()" id="btnRepoTop" style="display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:4px 11px;font-size:12px" title="一键推送或拉取 GitHub 仓库代码更新">
+        🚀 <span id="repoTopTxt">仓库同步</span>
+      </button>
+    </div>
     <div class="pills">
       <span class="pill" id="pSvc"><span class="led"></span>服务 <b>—</b></span>
       <span class="pill" id="pAcc"><span class="led"></span>账号 <b>—</b></span>
@@ -202,6 +214,31 @@
 </header>
 
 <main>
+  <div class="card" id="repoPanel" style="display:none;border-color:rgba(167,139,250,.45);margin-bottom:16px">
+    <h3>
+      <svg viewBox="0 0 16 16" width="15" height="15" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+      GitHub 仓库同步与自动推送更新
+      <a href="https://github.com/czg86389-hub/muse2api" target="_blank" class="tag" style="color:var(--accent)">czg86389-hub/muse2api ↗</a>
+      <span id="repoBadge" class="badge info" style="margin-left:auto">检测中…</span>
+    </h3>
+    <div class="hint" id="repoStatusDesc">正在查询本地与 GitHub 远端仓库版本状态…（自动忽略 <code>.env</code> 密钥与 <code>data/</code> 隐私数据）</div>
+    <div class="row" style="margin-top:10px">
+      <div style="flex:2">
+        <label>更新说明（Commit Message，选填）</label>
+        <input type="text" id="repoCommitMsg" placeholder="例如：perf: 优化对话响应速度与稳定性（留空自动生成）">
+      </div>
+      <div style="flex:2" id="repoTokenWrap">
+        <label>GitHub Token（首次推送填一次自动保存，已配置可留空）</label>
+        <input type="password" id="repoToken" placeholder="ghp_... 或 github_pat_...（已配置则无需填写）" autocomplete="off">
+      </div>
+      <div style="flex:0 0 auto;display:flex;gap:8px">
+        <button onclick="pushRepoUpdate()" id="btnRepoPush">🚀 一键推送更新到 GitHub</button>
+        <button class="ghost" onclick="pullRepoUpdate()" id="btnRepoPull">⬇️ 从 GitHub 拉取最新</button>
+        <button class="ghost mini" onclick="loadRepoStatus()">刷新状态</button>
+      </div>
+    </div>
+  </div>
+
   <div class="banner" id="authBanner">
     <span class="ic">🔑</span>
     <div>
@@ -684,6 +721,12 @@ t = requests.post(<span class="s">"BASE/v1/videos"</span>, json={<span class="s"
   </section>
 </main>
 
+<footer style="max-width:1280px;margin:18px auto 32px;padding:12px 24px;text-align:center;color:var(--muted);font-size:12px;border-top:1px solid var(--line)">
+  <span>开源仓库：<a href="https://github.com/czg86389-hub/muse2api" target="_blank" style="color:var(--acc);text-decoration:none">GitHub · muse2api</a></span>
+  <span style="margin:0 10px">·</span>
+  <span>社区认可与友情链接：<a href="https://linux.do/" target="_blank" style="color:var(--acc);text-decoration:none;font-weight:600">LINUX DO 社区 (https://linux.do/)</a></span>
+</footer>
+
 <div id="toasts"></div>
 
 <script>
@@ -1097,7 +1140,7 @@ async function loadTasks(){
     $('taskCount').textContent = ts.length;
     if (!ts.length){ $('taskBody').innerHTML = '<tr><td colspan="8" class="empty">暂无任务记录</td></tr>'; return; }
     $('taskBody').innerHTML = ts.map(t => {
-      const cls = t.status === 'succeeded' ? 'ok' : t.status === 'failed' ? 'bad'
+      const cls = (t.status === 'succeeded' || t.status === 'completed') ? 'ok' : t.status === 'failed' ? 'bad'
                 : t.status === 'processing' ? 'info' : 'warn';
       let out = '—';
       if (t.result && t.result.url) out = `<a href="${esc(t.result.url)}" target="_blank">查看结果</a> <span class="mono">${fmtBytes(t.result.bytes)}</span>`;
@@ -1191,10 +1234,12 @@ async function runVideo(){
     const tick = async () => {
       const s = await api('/v1/videos/' + t.id);
       const el = ((Date.now()-t0)/1000).toFixed(0);
-      if (s.status === 'succeeded'){
+      if (s.status === 'succeeded' || s.status === 'completed'){
+        const vurl = (s.result && s.result.url) || s.url || '';
+        const vbytes = (s.result && s.result.bytes) || 0;
         box.innerHTML = `<b style="color:var(--ok)">✓ 生成成功</b>
-          <span class="mono" style="color:var(--muted);margin-left:10px">${el}s · ${fmtBytes(s.result.bytes)}</span>
-          <video src="${esc(s.result.url)}" controls playsinline></video>
+          <span class="mono" style="color:var(--muted);margin-left:10px">${el}s · ${fmtBytes(vbytes)}</span>
+          <video src="${esc(vurl)}" controls playsinline></video>
           <pre class="out">${esc(JSON.stringify(s, null, 2))}</pre>`;
         btn.disabled = false; btn.textContent = '开始生成视频';
         loadMedia(); loadTasks();
@@ -1210,6 +1255,80 @@ async function runVideo(){
   }catch(e){
     box.innerHTML = `<b style="color:var(--bad)">✗ 创建任务失败</b><pre class="out">${esc(e.message)}</pre>`;
     btn.disabled = false; btn.textContent = '开始生成视频';
+  }
+}
+
+/* ================= GitHub 仓库同步与自动推送 ================= */
+function toggleRepoPanel(){
+  const el = $('repoPanel');
+  if (!el) return;
+  const show = el.style.display === 'none';
+  el.style.display = show ? 'block' : 'none';
+  if (show) loadRepoStatus();
+}
+
+async function loadRepoStatus(){
+  try{
+    const s = await api('/admin/repo/status');
+    const badge = $('repoBadge');
+    const topTxt = $('repoTopTxt');
+    const desc = $('repoStatusDesc');
+    const dirtyCnt = (s.dirty_files || []).length;
+    if (s.up_to_date){
+      badge.className = 'badge ok';
+      badge.textContent = `✓ 已同步 (${s.local_sha || 'main'})`;
+      topTxt.textContent = `仓库已同步 · ${s.local_sha || 'main'}`;
+    } else if (dirtyCnt > 0) {
+      badge.className = 'badge warn';
+      badge.textContent = `● ${dirtyCnt} 个文件待推送`;
+      topTxt.textContent = `仓库有改动 (${dirtyCnt})`;
+    } else {
+      badge.className = 'badge info';
+      badge.textContent = `本地 ${s.local_sha || '—'} / 远端 ${s.remote_sha || '—'}`;
+      topTxt.textContent = `仓库同步 · ${s.local_sha || 'main'}`;
+    }
+    const credTxt = s.has_push_cred ? '✓ 已配置推送凭证' : '⚠️ 首次推送需填一次 GitHub Token';
+    desc.innerHTML = `本地版本：<code>${esc(s.local_sha || '未初始化')}</code>（${esc(s.local_msg || '—')}） · ` +
+      `GitHub 远端：<code>${esc(s.remote_sha || '—')}</code>（${esc(s.remote_msg || '—')}） · ` +
+      `状态：<b>${dirtyCnt ? ('有 ' + dirtyCnt + ' 个文件已修改待推送') : '工作区干净'}</b> · ${credTxt}`;
+  }catch(e){
+    if ($('repoBadge')) { $('repoBadge').className = 'badge mute'; $('repoBadge').textContent = '待鉴权'; }
+  }
+}
+
+async function pushRepoUpdate(){
+  const btn = $('btnRepoPush');
+  const msg = ($('repoCommitMsg').value || '').trim();
+  const tok = ($('repoToken').value || '').trim();
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span>正在推送到 GitHub…'; }
+  try{
+    const r = await api('/admin/repo/push', {
+      method: 'POST',
+      body: JSON.stringify({message: msg, github_token: tok})
+    });
+    toast('✓ ' + (r.message || '已推送更新到 GitHub'), 'ok');
+    $('repoCommitMsg').value = '';
+    $('repoToken').value = '';
+    loadRepoStatus();
+  }catch(e){
+    toast('推送失败：' + e.message, 'bad');
+  }finally{
+    if (btn) { btn.disabled = false; btn.textContent = '🚀 一键推送更新到 GitHub'; }
+  }
+}
+
+async function pullRepoUpdate(){
+  if (!confirm('确定从 GitHub 仓库 (czg86389-hub/muse2api) 拉取最新代码覆盖本地核心文件？（.env 密钥与 data 账号数据不受影响）')) return;
+  const btn = $('btnRepoPull');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span>正在拉取…'; }
+  try{
+    const r = await api('/admin/repo/pull', {method: 'POST'});
+    toast('✓ ' + (r.message || '已拉取最新代码'), 'ok');
+    loadRepoStatus();
+  }catch(e){
+    toast('拉取失败：' + e.message, 'bad');
+  }finally{
+    if (btn) { btn.disabled = false; btn.textContent = '⬇️ 从 GitHub 拉取最新'; }
   }
 }
 
@@ -1234,7 +1353,7 @@ async function loadStatus(){
   }
 }
 
-function refreshAll(){ loadStatus(); loadPool(); loadApikey(); }
+function refreshAll(){ loadStatus(); loadPool(); loadApikey(); loadRepoStatus(); }
 
 refreshAll();
 setInterval(() => {

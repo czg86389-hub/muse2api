@@ -1789,6 +1789,188 @@ def get_keepalive_status(_=Depends(auth)):
     return KEEPALIVE_STATE
 
 
+# ------------------------- 仓库同步与一键推送/拉取更新 -------------------------
+REPO_URL = "https://github.com/czg86389-hub/muse2api"
+TRACKED_REPO_PATHS = [
+    "app.py", "engine.py", "store.py", "cdp.py", "config.py",
+    "admin.html", "README.md", "requirements.txt", "Dockerfile",
+    "docker-compose.yml", ".env.example", ".gitignore", "LICENSE",
+    "extension", "deploy",
+]
+
+
+def _read_env_key(key: str) -> str:
+    val = os.environ.get(key, "").strip()
+    if val:
+        return val
+    path = os.path.join(CFG.base_dir, ".env")
+    try:
+        with open(path, encoding="utf-8") as f:
+            for ln in f.read().splitlines():
+                s = ln.strip()
+                if s.startswith(key + "="):
+                    return s.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def _git(args: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
+    import subprocess
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return subprocess.run(
+        ["git", *args],
+        cwd=BASE_DIR,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+    )
+
+
+def _ensure_git_repo(token: str = ""):
+    """确保 BASE_DIR 已初始化为绑定 czg86389-hub/muse2api 的 Git 仓库。"""
+    git_dir = os.path.join(BASE_DIR, ".git")
+    remote_url = f"https://x-access-token:{token}@github.com/czg86389-hub/muse2api.git" if token else f"{REPO_URL}.git"
+    if not os.path.isdir(git_dir):
+        _git(["init", "-b", "main"])
+        _git(["remote", "add", "origin", remote_url])
+        _git(["fetch", "origin", "main"], timeout=45)
+        _git(["reset", "--mixed", "origin/main"])
+    else:
+        if token:
+            _git(["remote", "set-url", "origin", remote_url])
+    _git(["config", "user.name", "czg86389-hub"])
+    _git(["config", "user.email", "czg86389-hub@users.noreply.github.com"])
+
+
+def _repo_status_sync() -> dict:
+    import requests
+    token = _read_env_key("GITHUB_TOKEN")
+    has_git = os.path.isdir(os.path.join(BASE_DIR, ".git"))
+    local_sha, local_msg, local_ts = "", "", 0
+    dirty_files = []
+    has_push_cred = bool(token)
+
+    if has_git:
+        r_sha = _git(["rev-parse", "--short", "HEAD"])
+        if r_sha.returncode == 0:
+            local_sha = r_sha.stdout.strip()
+        r_log = _git(["log", "-1", "--format=%s||%ct"])
+        if r_log.returncode == 0 and "||" in r_log.stdout:
+            parts = r_log.stdout.strip().split("||", 1)
+            local_msg = parts[0]
+            try:
+                local_ts = int(parts[1])
+            except ValueError:
+                pass
+        existing_paths = [p for p in TRACKED_REPO_PATHS if os.path.exists(os.path.join(BASE_DIR, p))]
+        r_st = _git(["status", "--porcelain", "--", *existing_paths])
+        if r_st.returncode == 0:
+            for ln in r_st.stdout.splitlines():
+                if ln.strip():
+                    dirty_files.append(ln.strip())
+        r_rem = _git(["remote", "get-url", "origin"])
+        if r_rem.returncode == 0 and "@" in r_rem.stdout:
+            has_push_cred = True
+
+    remote_sha, remote_msg = "", ""
+    try:
+        headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "muse2api"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        resp = requests.get("https://api.github.com/repos/czg86389-hub/muse2api/commits/main",
+                            headers=headers, timeout=6)
+        if resp.status_code == 200:
+            rj = resp.json()
+            remote_sha = (rj.get("sha") or "")[:7]
+            remote_msg = ((rj.get("commit") or {}).get("message") or "").splitlines()[0]
+    except Exception:
+        pass
+
+    return {
+        "repo_url": REPO_URL,
+        "has_git": has_git,
+        "local_sha": local_sha,
+        "local_msg": local_msg,
+        "local_ts": local_ts,
+        "remote_sha": remote_sha,
+        "remote_msg": remote_msg,
+        "up_to_date": bool(local_sha and remote_sha and local_sha == remote_sha and not dirty_files),
+        "has_unpushed_changes": bool(dirty_files) or bool(local_sha and remote_sha and local_sha != remote_sha),
+        "dirty_files": dirty_files,
+        "has_push_cred": has_push_cred,
+    }
+
+
+@app.get("/admin/repo/status")
+async def admin_repo_status(_=Depends(auth)):
+    """查询本地代码与 GitHub 仓库 (czg86389-hub/muse2api) 的同步状态。"""
+    return await asyncio.to_thread(_repo_status_sync)
+
+
+@app.post("/admin/repo/push")
+async def admin_repo_push(payload: dict = Body(default={}), _=Depends(auth)):
+    """一键将当前节点的核心代码更新提交并推送到 GitHub 仓库 (自动过滤 .env 与 data 目录)。"""
+    msg = (payload.get("message") or "").strip() or f"chore: sync update ({time.strftime('%Y-%m-%d %H:%M:%S')})"
+    new_token = (payload.get("github_token") or "").strip()
+    if new_token:
+        _persist_env("GITHUB_TOKEN", new_token)
+        os.environ["GITHUB_TOKEN"] = new_token
+    token = new_token or _read_env_key("GITHUB_TOKEN")
+
+    def _do_push():
+        _ensure_git_repo(token)
+        existing_paths = [p for p in TRACKED_REPO_PATHS if os.path.exists(os.path.join(BASE_DIR, p))]
+        _git(["add", "--", *existing_paths])
+        st = _git(["status", "--porcelain", "--", *existing_paths])
+        committed = False
+        if st.stdout.strip():
+            c_res = _git(["commit", "-m", msg])
+            if c_res.returncode != 0:
+                raise HTTPException(500, f"Git commit 失败: {c_res.stderr or c_res.stdout}")
+            committed = True
+        p_res = _git(["push", "origin", "HEAD:main"], timeout=60)
+        if p_res.returncode != 0:
+            err = (p_res.stderr or p_res.stdout or "").strip()
+            if "Authentication failed" in err or "could not read Username" in err or "403" in err:
+                raise HTTPException(400, "推送需要 GitHub Personal Access Token（请在弹窗中填入 Token，仅需填一次自动保存）")
+            raise HTTPException(500, f"Git push 失败: {err[:300]}")
+        status = _repo_status_sync()
+        return {
+            "ok": True,
+            "committed": committed,
+            "message": "已成功提交并推送到 GitHub 仓库" if committed else "已是最新状态，已同步推送至 GitHub 仓库",
+            "status": status,
+        }
+
+    return await asyncio.to_thread(_do_push)
+
+
+@app.post("/admin/repo/pull")
+async def admin_repo_pull(_=Depends(auth)):
+    """从 GitHub 仓库拉取最新核心代码（保留本地 .env 和 data 数据目录）。"""
+    token = _read_env_key("GITHUB_TOKEN")
+
+    def _do_pull():
+        _ensure_git_repo(token)
+        f_res = _git(["fetch", "origin", "main"], timeout=45)
+        if f_res.returncode != 0:
+            raise HTTPException(500, f"Git fetch 失败: {(f_res.stderr or f_res.stdout)[:300]}")
+        existing_paths = [p for p in TRACKED_REPO_PATHS if os.path.exists(os.path.join(BASE_DIR, p))]
+        _git(["checkout", "origin/main", "--", *existing_paths])
+        _git(["reset", "--mixed", "origin/main"])
+        status = _repo_status_sync()
+        return {
+            "ok": True,
+            "message": f"已成功同步到仓库最新版本 ({status.get('local_sha')})",
+            "status": status,
+        }
+
+    return await asyncio.to_thread(_do_pull)
+
+
 @app.on_event("startup")
 async def _startup():
     if not CFG.api_key:

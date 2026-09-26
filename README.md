@@ -6,38 +6,44 @@
   <img src="https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker" alt="Docker" />
   <img src="https://img.shields.io/badge/API-OpenAI%20Compatible-green" alt="OpenAI API Compatible" />
   <img src="https://img.shields.io/badge/License-MIT-orange" alt="License" />
+  <a href="https://linux.do/" target="_blank"><img src="https://img.shields.io/badge/Community-LINUX%20DO-111827?logo=linux&logoColor=white" alt="LINUX DO" /></a>
 </p>
 
-将 **[muse.ai](https://muse.ai/)** 网页端的前沿多模态能力逆向工程封装为标准的 **OpenAI 兼容 RESTful API**。通过无头浏览器 CDP 协议穿透与动态 Session 管理，原生支持文本对话、文生图、文生视频、首帧图生视频，并提供多账号池轮转、全自动 48 小时会话保活以及配套 Chrome 导号扩展。
+<p align="center">
+  🤝 本开源项目已链接并认可 <b><a href="https://linux.do/" target="_blank">LINUX DO 社区 (https://linux.do/)</a></b> —— 新的理想型社区（真诚、友善、团结、专业）
+</p>
+
+将 **[muse.ai](https://muse.ai/)** 网页端的前沿多模态能力逆向工程封装为标准的 **OpenAI 兼容 RESTful API**。通过无头浏览器 CDP 协议穿透、热备 WebSocket 隧道复用与动态 Session 管理，原生支持文本对话（2~3 秒级流式首字响应）、文生图、图生图编辑、文生视频、首帧图生视频，并提供多账号池亲和轮转、全自动 48 小时会话续期与云端 VM 唤醒保活，以及配套 Chrome 一键导号扩展。
 
 ---
 
 ## 🌟 核心特性
 
-- 💬 **标准对话接口（Chat Completions）**
-  - 完全兼容 `/v1/chat/completions` 标准协议。
-  - 原生支持 SSE 流式打字机输出（`stream=True`）与同步完整返回。
+- 💬 **标准对话接口（Chat Completions & Responses API）**
+  - 完全兼容 `/v1/chat/completions` 与新版 Codex 默认使用的 `/v1/responses` 标准协议。
+  - 原生支持 SSE 流式打字机输出（`stream=True`）与同步完整返回，内置热标签页与 Noise WebSocket 隧道亲和复用，**连续对话首字延迟仅需 2~3 秒**。
   - 支持多轮对话上下文、System Prompt 设定。
-  - 内置模型智能别名映射，`gpt-4o`、`claude-3-5-sonnet`、`deepseek-chat` 等常用模型名自动路由。
-- 🎨 **高质量生图（Images Generations）**
-  - 完全兼容 `/v1/images/generations` 接口。
-  - 支持 `1:1`、`16:9`、`9:16`、`4:3` 等多画幅生成。
-  - 支持 `url` 直链或 `b64_json` 两种返回格式。
+  - 内置模型智能别名映射，`gpt-4o`、`gpt-5`、`claude-sonnet-4`、`deepseek-chat` 等常用模型名自动路由。
+- 🎨 **高质量生图与图像编辑（Images Generations & Edits）**
+  - 完全兼容 `/v1/images/generations`（文生图）与 `/v1/images/edits`（图生图/参考图编辑）接口。
+  - 支持 `1:1`、`16:9`、`9:16`、`4:3`、`3:4` 等多画幅生成，支持参考图直传与去水印纯净输出。
+  - 支持 `url` 直链或 `b64_json` 两种返回格式，内置纯文本拒答秒级快速检测，杜绝队列死锁。
 - 🎬 **文生视频 / 图生视频（Videos）**
-  - 原生对接 Muse 顶配视频生成模型，支持 5 秒 / 10 秒多画幅视频生成。
+  - 原生对接 Muse 顶配视频生成模型，支持 5 秒 / 6 秒 / 10 秒及 `9:16` 竖屏 / `16:9` 横屏视频生成。
+  - 支持上传首帧参考图（Data URL / HTTP URL）进行严格首帧图生视频创作。
   - 异步任务架构（`/v1/videos` 创建任务 + `/v1/videos/{task_id}` 状态轮询）。
   - 内置媒体资源服务 `/v1/media/{filename}`，自动持久化存储生成的 MP4 / WebP 资源。
-- 🔄 **多账号池与负载均衡**
+- 🔄 **多账号池与热连接亲和调度**
   - 支持导入无上限的 Muse 账号矩阵。
-  - 基于 LRU（最久未使用）算法自动分发任务，均衡消耗额度。
-  - 遇到单号额度耗尽或异常时，自动标记并隔离，无感故障转移。
-- 🛡️ **48 小时会话全自动保活续期**
-  - 独创后台心跳协程，定时静默校验会话活性并自动刷新 Meta Session 令牌。
-  - 解决 Meta Cookie 静态 48 小时到期难题，无需频繁重新登录。
+  - 基于热连接亲和（Warm-Tab Affinity）与 LRU 策略智能分发，兼顾 2 秒级极速响应与多号均衡消耗。
+  - 遇到单号额度耗尽或会话异常时，自动标记并 0 秒无感故障转移至备用健康账号。
+- 🛡️ **48 小时会话全自动续期与云端 VM 保活**
+  - 独创后台心跳协程，直连 `/api/session` 自动续签 `hatch_vml`（+48h）与 `hatch_sess`（+30d），并自动调用 `/api/hatch/vm/wake` 保持云端工作区 VM 热备。
+  - 彻底解决 Meta Cookie 静态 48 小时到期与 VM 休眠断连难题，无需频繁重新登录。
 - 🧩 **配套 Chrome 一键导号扩展**
-  - 无需手工 F12 抓包，点一下扩展图标即刻将当前浏览器登录态提取并安全推送至账号池。
+  - 无需手工 F12 抓包，点一下扩展图标即刻将当前浏览器登录态（含 `HttpOnly` 核心 Cookie 与真实过期时间）提取并安全推送至账号池。
 - 🖥️ **现代化深色运维面板（Web Console）**
-  - 内置开箱即用的 Web UI，支持实时查看服务健康度、账号池额度与状态、任务进度回放、媒体库管理与在线接口调试。
+  - 内置开箱即用的 Web UI，支持实时查看服务健康度、账号池额度与状态、一键全池保活、任务进度回放、媒体库管理与在线接口调试。
 
 ---
 
@@ -209,6 +215,14 @@ curl -X POST "http://localhost:18610/v1/images/generations" \
 
 - **零数据外泄**：本软件全部数据（包括账号凭据、任务队列、媒体文件）均持久化在本地 `data/` 目录中，不依赖任何第三方遥测或外部中转服务。
 - **开源合规**：本项目仅供技术交流、系统自动化运维研究与自动化测试。请勿将本项目用于违反 Meta 平台服务条款或任何国家法律法规之用途。
+
+---
+
+## 🤝 社区认可与友情链接
+
+本项目已链接并高度认可 **[LINUX DO 社区](https://linux.do/)**，感谢社区佬友的交流、反馈与支持：
+
+- 🌐 **[LINUX DO 社区 (https://linux.do/)](https://linux.do/)** —— 新的理想型社区（真诚、友善、团结、专业，共建你我引以为荣之社区）
 
 ---
 
