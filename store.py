@@ -98,6 +98,10 @@ class Store:
     def __init__(self, cfg):
         self.cfg = cfg
         self.accounts: list[dict] = _read(cfg.accounts_file, [])
+        for a in self.accounts:
+            ce = a.get("cookies_exp") or {}
+            if _is_pos(ce.get("hatch_vml")):
+                a["expires_at"] = int(ce["hatch_vml"])
         self.tasks: dict[str, dict] = _read(cfg.tasks_file, {})
 
     # ---------- 账号 ----------
@@ -122,12 +126,14 @@ class Store:
         out = []
         for a in self.accounts:
             item = {k: v for k, v in a.items() if k != "cookies"}
+            ce = a.get("cookies_exp") or {}
+            if _is_pos(ce.get("hatch_vml")):
+                item["expires_at"] = int(ce["hatch_vml"])
             item["cookie_count"] = len(a.get("cookies", {}))
             item["essential_ok"] = all(
                 a.get("cookies", {}).get(n) for n in ESSENTIAL_COOKIES)
             # 有效期是 hatch_vml 的实测 expires，还是按「2 天寿命」推算的
-            item["expires_estimated"] = not _is_pos(
-                (a.get("cookies_exp") or {}).get("hatch_vml"))
+            item["expires_estimated"] = not _is_pos(ce.get("hatch_vml"))
             out.append(item)
         return out
 

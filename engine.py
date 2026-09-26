@@ -142,25 +142,84 @@ class MuseEngine:
                   {"behavior": "allow", "downloadPath": self.cfg.download_dir})
         return page
 
+    @staticmethod
+    def renew_session_http(cookies: dict, expires: dict | None = None,
+                           wake_vm: bool = True) -> dict:
+        """直接调用 muse.ai/api/session 续签 hatch_vml (+48h) / hatch_sess (+30d) / hatch_gw (+1y)，
+        并按需调用 /api/hatch/vm/wake 唤醒云端工作区 VM。"""
+        import requests
+        cur_cookies = dict(cookies or {})
+        cur_exp = dict(expires or {})
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+            "Origin": "https://muse.ai",
+            "Referer": "https://muse.ai/thread/new",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Dest": "empty",
+            "Cookie": "; ".join(f"{k}={v}" for k, v in cur_cookies.items() if v),
+        }
+        r = requests.get("https://muse.ai/api/session", headers=headers, timeout=12)
+        if r.status_code in (401, 403):
+            raise MuseAuthError(f"会话已失效 (/api/session HTTP {r.status_code})，请重新导入 cookie")
+        sj = r.json() if r.status_code == 200 else {}
+        for c in r.cookies:
+            if c.value:
+                cur_cookies[c.name] = c.value
+            if c.expires:
+                cur_exp[c.name] = int(float(c.expires))
+        vm_id = sj.get("vm_id")
+        vm_state = sj.get("vm_state")
+        wake_ok = False
+        if wake_vm and vm_id and vm_state != "DISABLED":
+            try:
+                headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cur_cookies.items() if v)
+                rw = requests.post("https://muse.ai/api/hatch/vm/wake", headers=headers, json={
+                    "vm_id": vm_id,
+                    "retry_count": 0,
+                    "connect_attempt_id": str(uuid.uuid4()),
+                }, timeout=8)
+                wake_ok = rw.status_code == 200
+            except Exception:
+                pass
+        return {
+            "ok": sj.get("status") == "assigned",
+            "status": sj.get("status"),
+            "vm_id": vm_id,
+            "vm_state": vm_state,
+            "wake_ok": wake_ok,
+            "cookies": cur_cookies,
+            "cookies_exp": cur_exp,
+        }
+
     def _apply_cookies(self, page: CDP, cookies: dict, expires: dict | None = None):
-        """注入 cookie。带上真实 expires，并在注入前彻底清空旧账号 cookie，保证账号隔离。"""
+        """注入 cookie。彻底清空旧账号 cookie 保证隔离，且绝不传入过去时间的 expires 防止 Chromium 丢弃 hatch_vml。"""
         try:
             page.send("Network.clearBrowserCookies")
         except Exception:
             pass
+        now = time.time()
         for name, value in cookies.items():
-            params = {"name": name, "value": value, "domain": ".muse.ai",
-                      "path": "/", "secure": True}
+            if not value:
+                continue
             exp = (expires or {}).get(name)
             try:
-                if exp and float(exp) > 0:
-                    params["expires"] = float(exp)
+                exp_val = float(exp) if exp and float(exp) > now + 3600 else (now + 7 * 86400)
             except (TypeError, ValueError):
-                pass
-            try:
-                page.send("Network.setCookie", params)
-            except Exception:  # noqa: BLE001
-                pass
+                exp_val = now + 7 * 86400
+            for dom in (".muse.ai", "muse.ai"):
+                params = {
+                    "name": name,
+                    "value": value,
+                    "domain": dom,
+                    "path": "/",
+                    "secure": True,
+                    "expires": exp_val,
+                }
+                try:
+                    page.send("Network.setCookie", params)
+                except Exception:  # noqa: BLE001
+                    pass
 
     def read_cookies(self) -> dict[str, dict]:
         """从当前页面读回 cookie（**包含 httpOnly**，这是网页 JS 做不到的）。
@@ -188,24 +247,63 @@ class MuseEngine:
             out[name] = {"value": c.get("value", ""), "expires": exp}
         return out
 
+    def _wait_ws_ready(self, page: CDP, timeout: float = 15.0) -> bool:
+        """等待 muse.ai 页面完成 React hydration 且不再处于 Connecting... 状态。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                st = page.js("""(function(){
+                    if (document.readyState !== 'complete') return 'loading';
+                    if (!document.querySelector('textarea')) return 'no-ta';
+                    var h = document.querySelector('[data-hatch-shell-hydration-state]');
+                    if (h && h.getAttribute('data-hatch-shell-hydration-state') !== 'hydrated') return 'hydrating';
+                    var b = document.body ? (document.body.innerText || '') : '';
+                    if (b.indexOf('Connecting...') !== -1) return 'connecting';
+                    return 'ready';
+                })()""")
+                if st == "ready":
+                    time.sleep(0.35)
+                    still_ok = page.js("!(document.body && (document.body.innerText||'').indexOf('Connecting...') !== -1)")
+                    if still_ok:
+                        return True
+            except Exception:
+                pass
+            time.sleep(0.25)
+        return False
+
     def reset_thread(self):
-        """关闭残留弹窗并导航到全新空白会话，防止历史任务/弹窗阻塞后续请求。"""
+        """关闭残留弹窗并确保处于全新空白 /thread/new 会话且 WebSocket 已就绪。"""
         if not self.page:
             return
         try:
             self.page.send("Input.dispatchKeyEvent", {"type": "rawKeyDown", "windowsVirtualKeyCode": 27, "key": "Escape", "code": "Escape"})
             self.page.send("Input.dispatchKeyEvent", {"type": "keyUp", "windowsVirtualKeyCode": 27, "key": "Escape", "code": "Escape"})
-            self.page.js("""(function(){
+            needs_nav = self.page.js("""(function(){
                 var d = document.querySelector('[role="dialog"]');
                 if (d) {
                     var b = d.querySelector('button[aria-label*="close" i], button');
                     if (b) b.click();
                 }
-                if (window.location.pathname !== '/thread/new') {
-                    window.location.href = 'https://muse.ai/thread/new';
-                }
+                var hasBubbles = document.querySelectorAll('div[class*="hatch-chat-groupable-bubble"]').length > 0;
+                var hasAtts = document.querySelectorAll('[data-testid^="hatch-chat-attachment-presentation-"]').length > 0;
+                var hasStop = !!document.querySelector('button[aria-label*="Stop" i]');
+                var bodyTxt = document.body ? (document.body.innerText || '') : '';
+                var hasStuck = bodyTxt.indexOf('Still sending') !== -1 || bodyTxt.indexOf('Connecting...') !== -1;
+                return (window.location.pathname !== '/thread/new') || hasBubbles || hasAtts || hasStop || hasStuck;
             })()""")
-            time.sleep(0.5)
+            if needs_nav:
+                self.page.send("Page.navigate", {"url": "https://muse.ai/thread/new"})
+                t_end = time.time() + 12.0
+                while time.time() < t_end:
+                    time.sleep(0.25)
+                    ready = self.page.js("""(function(){
+                        return document.readyState === 'complete'
+                            && !!document.querySelector('textarea')
+                            && document.querySelectorAll('div[class*="hatch-chat-groupable-bubble"]').length === 0;
+                    })()""")
+                    if ready:
+                        break
+                self._wait_ws_ready(self.page, timeout=15.0)
         except Exception:
             pass
 
@@ -222,6 +320,18 @@ class MuseEngine:
             except Exception:
                 pass
             self.page = None
+        # 注入前先通过 /api/session 续签最新 hatch_vml 并唤醒云端 VM
+        try:
+            renewed = self.renew_session_http(cookies, expires, wake_vm=True)
+            if renewed.get("cookies"):
+                cookies = renewed["cookies"]
+            if renewed.get("cookies_exp"):
+                expires = renewed["cookies_exp"]
+        except MuseAuthError:
+            raise
+        except Exception as e:
+            log.warning("预续签 /api/session 失败（继续尝试浏览器加载）: %s", e)
+
         page = self._open_page()
         self._apply_cookies(page, cookies, expires)
         page.send("Page.navigate", {"url": "https://muse.ai/thread/new"})
@@ -231,6 +341,7 @@ class MuseEngine:
                 if page.js("!!document.querySelector('textarea')"):
                     self.page = page
                     self.current_acc_id = account_id
+                    self._wait_ws_ready(page, timeout=20.0)
                     return page
             except Exception:
                 pass
@@ -238,6 +349,7 @@ class MuseEngine:
             if page.js("!!document.querySelector('textarea')"):
                 self.page = page
                 self.current_acc_id = account_id
+                self._wait_ws_ready(page, timeout=20.0)
                 return page
         except Exception:  # noqa: BLE001
             pass
@@ -410,7 +522,7 @@ class MuseEngine:
             })()""")
         except Exception:
             pass
-        time.sleep(0.15)
+        time.sleep(0.1)
 
         rect = self.page.js(
             "(function(){var t=document.querySelector('textarea');if(!t)return null;"
@@ -424,19 +536,23 @@ class MuseEngine:
             self.page.send("Input.dispatchMouseEvent",
                            {"type": t, "x": c["x"], "y": c["y"],
                             "button": "left", "clickCount": 1})
-        time.sleep(0.15)
-        self.page.send("Input.insertText", {"text": prompt})
+        time.sleep(0.1)
 
         # 触发 React 18 原型 setter 以及 input/change 事件以同步发送按钮状态
+        # （对于 DeepSeek/Codex 等 100KB+ 超长上下文，直接走原型 setter 仅需 <1s，避免 Input.insertText 逐字注入卡死）
         _SETTER_JS = (
             "(function(t){var ta=document.querySelector('textarea');"
-            "if(!ta) return false;"
+            "if(!ta) return 0;"
+            "ta.focus();"
             "var s=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set;"
             "s.call(ta,t);"
             "ta.dispatchEvent(new Event('input',{bubbles:true}));"
             "ta.dispatchEvent(new Event('change',{bubbles:true}));"
-            "return ta.value;})(%s)")
-        self.page.js(_SETTER_JS % json.dumps(prompt))
+            "return (ta.value||'').length;})(%s)")
+        val_len = self.page.js(_SETTER_JS % json.dumps(prompt)) or 0
+        if not val_len and len(prompt) < 500:
+            self.page.send("Input.insertText", {"text": prompt})
+            self.page.js(_SETTER_JS % json.dumps(prompt))
 
         # 等待发送按钮就绪并点击
         clicked = "no-button"
@@ -474,7 +590,7 @@ class MuseEngine:
                         break
                 except Exception:
                     pass
-        time.sleep(0.5)
+        time.sleep(0.3)
         return clicked
 
     # ---------------- 等待生成 ----------------
@@ -531,8 +647,8 @@ class MuseEngine:
                         stable_src, stable_n = check_src, 0
                     if stable_n >= 1:
                         return att
+            elapsed = time.time() - t_start
             if on_progress:
-                elapsed = time.time() - t_start
                 prog = min(92, int(25 + elapsed * 1.0))
                 try:
                     on_progress(prog)
@@ -544,6 +660,8 @@ class MuseEngine:
                 tail = ""
             if re.search(r"额度不足|积分不足|out of credits|达到上限|token limit", tail):
                 raise MuseGenerationError("账号额度不足")
+            if elapsed > 18.0 and ("Still sending" in tail or "Connecting..." in tail):
+                raise MuseGenerationError("云端 VM 连接超时 (Still sending)")
         return None
 
     # ---------------- 取字节 ----------------
@@ -639,7 +757,8 @@ class MuseEngine:
             return 0
 
     def chat_stream(self, cookies: dict, prompt: str, expires: dict | None = None,
-                    timeout: int | None = None, account_id: str | None = None):
+                    timeout: int | None = None, account_id: str | None = None,
+                    stop_event=None):
         """发一条消息，流式 yield 增量文本。"""
         timeout = int(timeout or getattr(self.cfg, "chat_timeout", 300))
         self.ensure_page(cookies, expires, account_id=account_id)
@@ -649,21 +768,40 @@ class MuseEngine:
         base_agent = self._agent_count()
         self._send(prompt)
 
-        deadline = time.time() + timeout
+        t_sent = time.time()
+        deadline = t_sent + timeout
+        first_token_deadline = min(deadline, t_sent + 35.0)
+        got_first = False
 
-        # 等新回复出现：只要助手最新文本变化，或者助手气泡增加且不为空，代表开始吐字
-        while time.time() < deadline:
-            time.sleep(0.1)
+        # 等新回复出现：限制首字超时为 35s，且若卡在 Still sending / Connecting... 超过 14s 立即快速失败以触发切号
+        while time.time() < first_token_deadline:
+            if stop_event is not None and stop_event.is_set():
+                return
+            time.sleep(0.12)
             self._scroll_bottom()
             cur = self._agent_text()
             if cur and cur != base_text:
+                got_first = True
                 break
             if self._agent_count() > base_agent and cur != "":
+                got_first = True
                 break
+            if time.time() - t_sent > 14.0:
+                try:
+                    tail = self.page.js("document.body.innerText.slice(-500)") or ""
+                except Exception:
+                    tail = ""
+                if "Still sending" in tail or "Connecting..." in tail:
+                    raise MuseGenerationError("云端 VM 连接超时 (Still sending)")
+
+        if not got_first:
+            raise MuseGenerationError("等待助手首字响应超时")
 
         # 流式输出增量文本
         sent, last, stable = "", None, 0
         while time.time() < deadline:
+            if stop_event is not None and stop_event.is_set():
+                return
             time.sleep(0.15)
             self._scroll_bottom()
             cur = self._agent_text()
@@ -845,6 +983,7 @@ class MuseEngine:
                  timeout: int = 240, expires: dict | None = None, account_id: str | None = None,
                  on_progress=None, reference_image: str | None = None) -> dict:
         self.ensure_page(cookies, expires, account_id=account_id)
+        self.reset_thread()
         self._scroll_bottom()
         base = self._last_attachment() or {}
         baseline_src = base.get("src") or ""

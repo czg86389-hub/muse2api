@@ -176,34 +176,108 @@ def auth(authorization: str | None = Header(default=None)):
 
 # ------------------------- 请求模型 -------------------------
 
+def _renew_and_persist(acc_id: str, wake_vm: bool = True) -> dict | None:
+    """调用 /api/session 续签账号 cookie 并写回 store，返回最新账号 dict。"""
+    acc = store.get_account(acc_id)
+    if not acc or not acc.get("cookies"):
+        return acc
+    try:
+        res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"), wake_vm=wake_vm)
+        if res.get("cookies"):
+            store.update_account(acc_id, cookies=res["cookies"],
+                                 cookies_exp=res.get("cookies_exp"),
+                                 ok=True if res.get("ok") else acc.get("ok"),
+                                 synced_at=int(time.time()))
+            store.touch_keepalive(acc_id, True, f"会话正常 (VM: {res.get('vm_state') or 'RUNNING'})")
+    except MuseAuthError as exc:
+        store.mark(acc_id, False, str(exc))
+        raise
+    except Exception as exc:
+        log.warning("HTTP 预续签账号 %s 异常: %s", acc_id, exc)
+    return store.get_account(acc_id)
+
+
 def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
                      timeout: int, account_id: str | None):
     """在独立线程中执行 chat_stream 并持有 GEN_LOCK，通过 Queue 往外吐。
-    无论下游客户端何时断连、异常或超时，finally 块保证 100% 立即释放 GEN_LOCK，绝不死锁。"""
+    无论下游客户端何时断连、异常或超时，stop_event + finally 块保证 100% 立即释放 GEN_LOCK，绝不死锁。
+    若首字前遇到单账号 VM 卡死或会话异常，自动切换下一个健康账号重试一次。"""
     import queue
     q = queue.Queue(maxsize=100)
+    stop_event = threading.Event()
 
     def worker():
+        cur_id = account_id
+        cur_cookies = cookies
+        cur_exp = expires
+        last_exc = None
         try:
-            with GEN_LOCK:
-                engine.start()
-                for chunk in engine.chat_stream(cookies, prompt, expires, timeout, account_id=account_id):
-                    q.put(("data", chunk))
-        except Exception as exc:
-            q.put(("error", exc))
+            for attempt in range(2):
+                if stop_event.is_set():
+                    return
+                if attempt > 0:
+                    alt = store.pick_account(rotate=True)
+                    if not alt or alt["id"] == cur_id:
+                        break
+                    cur_id = alt["id"]
+                    cur_cookies = alt["cookies"]
+                    cur_exp = alt.get("cookies_exp")
+                    log.info("【对话自动切号】切换到备用账号 %s (%s) 重试...", alt.get("label"), cur_id)
+                yielded = False
+                try:
+                    if cur_id:
+                        refreshed = _renew_and_persist(cur_id, wake_vm=True)
+                        if refreshed:
+                            cur_cookies = refreshed["cookies"]
+                            cur_exp = refreshed.get("cookies_exp")
+                    with GEN_LOCK:
+                        if stop_event.is_set():
+                            return
+                        engine.start()
+                        for chunk in engine.chat_stream(
+                            cur_cookies, prompt, cur_exp, timeout,
+                            account_id=cur_id, stop_event=stop_event
+                        ):
+                            yielded = True
+                            q.put(("data", chunk))
+                            if stop_event.is_set():
+                                return
+                    if cur_id:
+                        store.mark(cur_id, True, "")
+                        _sync_cookies(cur_id)
+                    return
+                except MuseAuthError as exc:
+                    last_exc = exc
+                    if cur_id:
+                        store.mark(cur_id, False, str(exc))
+                    if yielded:
+                        break
+                except Exception as exc:
+                    last_exc = exc
+                    try:
+                        engine.reset_thread()
+                    except Exception:
+                        pass
+                    if yielded:
+                        break
+            if last_exc is not None:
+                q.put(("error", last_exc))
         finally:
             q.put(("done", None))
 
     threading.Thread(target=worker, daemon=True).start()
 
-    while True:
-        kind, val = q.get()
-        if kind == "data":
-            yield val
-        elif kind == "error":
-            raise val
-        else:
-            break
+    try:
+        while True:
+            kind, val = q.get()
+            if kind == "data":
+                yield val
+            elif kind == "error":
+                raise val
+            else:
+                break
+    finally:
+        stop_event.set()
 
 
 class ImageRequest(BaseModel):
@@ -652,30 +726,44 @@ def _run_generation(prompt: str, kind: str, timeout: int,
         acc = store.pick_account(rotate=True)
     if not acc:
         raise MuseAuthError("没有可用账号，请先在管理页面导入 cookie")
-    with GEN_LOCK:
+
+    last_exc = None
+    cur_acc = acc
+    for attempt in range(2):
+        if attempt > 0:
+            alt = store.pick_account(rotate=True)
+            if not alt or alt["id"] == cur_acc["id"]:
+                break
+            cur_acc = alt
+            log.info("【生图/视频自动切号】切换到备用账号 %s (%s) 重试...", cur_acc.get("label"), cur_acc["id"])
         try:
-            engine.start()
-            res = engine.generate(acc["cookies"], prompt, expect=kind,
-                                  timeout=timeout, expires=acc.get("cookies_exp"),
-                                  account_id=acc["id"], on_progress=on_progress,
-                                  reference_image=reference_image)
-            store.mark(acc["id"], True, "")
-            _sync_cookies(acc["id"])          # 顺手把可能被续期的 cookie 存回来
-            return res, acc["id"]
+            refreshed = _renew_and_persist(cur_acc["id"], wake_vm=True)
+            if refreshed:
+                cur_acc = refreshed
+            with GEN_LOCK:
+                engine.start()
+                res = engine.generate(cur_acc["cookies"], prompt, expect=kind,
+                                      timeout=timeout, expires=cur_acc.get("cookies_exp"),
+                                      account_id=cur_acc["id"], on_progress=on_progress,
+                                      reference_image=reference_image)
+                store.mark(cur_acc["id"], True, "")
+                _sync_cookies(cur_acc["id"])
+                return res, cur_acc["id"]
         except MuseAuthError as exc:
-            store.mark(acc["id"], False, str(exc))
+            last_exc = exc
+            store.mark(cur_acc["id"], False, str(exc))
             engine.stop()
-            raise
         except MuseGenerationError as exc:
-            store.mark(acc["id"], True, f"任务异常: {str(exc)[:60]}")
+            last_exc = exc
+            store.mark(cur_acc["id"], True, f"任务异常: {str(exc)[:60]}")
             try:
                 engine.reset_thread()
             except Exception:
                 pass
-            raise
         except Exception as exc:  # noqa: BLE001
             engine.stop()
-            raise MuseGenerationError(f"生成失败: {exc}") from exc
+            last_exc = MuseGenerationError(f"生成失败: {exc}")
+    raise last_exc
 
 
 # ------------------------- 基础接口 -------------------------
@@ -1006,26 +1094,14 @@ async def chat_completions(req: ChatRequest, _=Depends(auth)):
         return StreamingResponse(sync_stream(), media_type="text/event-stream")
 
     def run() -> str:
-        with GEN_LOCK:
-            engine.start()
-            return engine.chat(cookies, prompt, expires, timeout, account_id=acc_id)
+        return "".join(safe_chat_stream(cookies, prompt, expires, timeout, account_id=acc_id))
 
     try:
         text = await asyncio.to_thread(run)
     except MuseAuthError as exc:
-        store.mark(acc_id, False, str(exc))
         raise HTTPException(401, str(exc))
     except MuseGenerationError as exc:
-        store.mark(acc_id, True, f"助手超时: {str(exc)[:60]}")
-        try:
-            engine.reset_thread()
-        except Exception:
-            pass
         raise HTTPException(502, str(exc))
-
-    store.mark(acc_id, True, "")
-    # 顺手把可能被续期/新下发的 cookie 存回去（失败不影响本次回复）
-    asyncio.create_task(asyncio.to_thread(_sync_cookies, acc_id))
 
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     if tool_note:
@@ -1115,72 +1191,54 @@ async def responses_api(req: ResponsesRequest, _=Depends(auth)):
 
     if req.stream:
         def sync_stream():
-            with GEN_LOCK:
-                try:
-                    engine.start()
-                    yield _sse_event("response.created", {
-                        "type": "response.created",
-                        "response": envelope("in_progress")})
-                    yield _sse_event("response.output_item.added", {
-                        "type": "response.output_item.added", "output_index": 0,
-                        "item": {"id": mid, "type": "message", "role": "assistant",
-                                 "status": "in_progress", "content": []}})
-                    yield _sse_event("response.content_part.added", {
-                        "type": "response.content_part.added", "item_id": mid,
-                        "output_index": 0, "content_index": 0,
-                        "part": {"type": "output_text", "text": "",
-                                 "annotations": []}})
-                    full = ""
-                    for chunk in engine.chat_stream(cookies, prompt, expires, timeout, account_id=acc_id):
-                        full += chunk
-                        yield _sse_event("response.output_text.delta", {
-                            "type": "response.output_text.delta", "item_id": mid,
-                            "output_index": 0, "content_index": 0, "delta": chunk})
-                    yield _sse_event("response.output_text.done", {
-                        "type": "response.output_text.done", "item_id": mid,
-                        "output_index": 0, "content_index": 0, "text": full})
-                    yield _sse_event("response.output_item.done", {
-                        "type": "response.output_item.done", "output_index": 0,
-                        "item": {"id": mid, "type": "message", "role": "assistant",
-                                 "status": "completed",
-                                 "content": [{"type": "output_text", "text": full,
-                                              "annotations": []}]}})
-                    yield _sse_event("response.completed", {
-                        "type": "response.completed",
-                        "response": envelope("completed", full)})
-                    store.mark(acc_id, True, "")
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("responses 流式失败: %s", exc)
-                    store.mark(acc_id, True, f"流式失败: {str(exc)[:60]}")
-                    try:
-                        engine.reset_thread()
-                    except Exception:
-                        pass
-                    yield _sse_event("response.failed", {
-                        "type": "response.failed",
-                        "response": envelope("failed")})
+            try:
+                yield _sse_event("response.created", {
+                    "type": "response.created",
+                    "response": envelope("in_progress")})
+                yield _sse_event("response.output_item.added", {
+                    "type": "response.output_item.added", "output_index": 0,
+                    "item": {"id": mid, "type": "message", "role": "assistant",
+                             "status": "in_progress", "content": []}})
+                yield _sse_event("response.content_part.added", {
+                    "type": "response.content_part.added", "item_id": mid,
+                    "output_index": 0, "content_index": 0,
+                    "part": {"type": "output_text", "text": "",
+                             "annotations": []}})
+                full = ""
+                for chunk in safe_chat_stream(cookies, prompt, expires, timeout, account_id=acc_id):
+                    full += chunk
+                    yield _sse_event("response.output_text.delta", {
+                        "type": "response.output_text.delta", "item_id": mid,
+                        "output_index": 0, "content_index": 0, "delta": chunk})
+                yield _sse_event("response.output_text.done", {
+                    "type": "response.output_text.done", "item_id": mid,
+                    "output_index": 0, "content_index": 0, "text": full})
+                yield _sse_event("response.output_item.done", {
+                    "type": "response.output_item.done", "output_index": 0,
+                    "item": {"id": mid, "type": "message", "role": "assistant",
+                             "status": "completed",
+                             "content": [{"type": "output_text", "text": full,
+                                          "annotations": []}]}})
+                yield _sse_event("response.completed", {
+                    "type": "response.completed",
+                    "response": envelope("completed", full)})
+            except Exception as exc:  # noqa: BLE001
+                log.warning("responses 流式失败: %s", exc)
+                yield _sse_event("response.failed", {
+                    "type": "response.failed",
+                    "response": envelope("failed")})
         return StreamingResponse(sync_stream(), media_type="text/event-stream")
 
     def run() -> str:
-        with GEN_LOCK:
-            engine.start()
-            return engine.chat(cookies, prompt, expires, timeout)
+        return "".join(safe_chat_stream(cookies, prompt, expires, timeout, account_id=acc_id))
 
     try:
         text = await asyncio.to_thread(run)
     except MuseAuthError as exc:
-        store.mark(acc_id, False, str(exc))
         raise HTTPException(401, str(exc))
     except MuseGenerationError as exc:
-        store.mark(acc_id, True, f"响应失败: {str(exc)[:60]}")
-        try:
-            engine.reset_thread()
-        except Exception:
-            pass
         raise HTTPException(502, str(exc))
 
-    store.mark(acc_id, True, "")
-    asyncio.create_task(asyncio.to_thread(_sync_cookies, acc_id))
     return envelope("completed", text)
 
 
@@ -1557,40 +1615,51 @@ KEEPALIVE_STATE = {
 }
 
 
-def _probe_account_sync(aid: str) -> dict:
-    """真实打开 muse.ai 唤醒会话、触发 Meta 网关签发新令牌并同步写回。"""
+def _probe_account_sync(aid: str, check_quota: bool = False) -> dict:
+    """通过 muse.ai/api/session 触发 Meta 网关签发新 hatch_vml (+48h) / hatch_sess (+30d) 并唤醒云端 VM。"""
     acc = store.get_account(aid)
     if not acc or not acc.get("cookies"):
         return {"ok": False, "id": aid, "label": (acc or {}).get("label", aid), "error": "账号无有效 cookie"}
-    with GEN_LOCK:
-        try:
-            engine.start()
-            engine.refresh(acc["cookies"], acc.get("cookies_exp"))
-            synced = _sync_cookies(aid)
-            quota = None
+    try:
+        res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"), wake_vm=True)
+        store.update_account(
+            aid,
+            cookies=res["cookies"],
+            cookies_exp=res["cookies_exp"],
+            ok=True if res.get("ok") else False,
+            synced_at=int(time.time()),
+        )
+        vm_state = res.get("vm_state") or "RUNNING"
+        store.touch_keepalive(aid, True, f"会话有效 · 自动保活 (VM: {vm_state})")
+        quota = acc.get("quota")
+        if check_quota and GEN_LOCK.acquire(blocking=False):
             try:
-                quota = engine.quota(acc["cookies"], acc.get("cookies_exp"))
+                engine.start()
+                quota = engine.quota(res["cookies"], res["cookies_exp"])
                 quota["checked_at"] = int(time.time())
                 store.update_account(aid, quota=quota)
             except Exception as qe:  # noqa: BLE001
                 log.warning("读取账号 %s 额度失败: %s", aid, qe)
-            store.touch_keepalive(aid, True, "会话有效 · 自动保活")
-            updated = store.get_account(aid) or {}
-            return {
-                "ok": True,
-                "id": aid,
-                "label": acc.get("label", aid),
-                "synced": synced,
-                "expires_at": updated.get("expires_at"),
-                "quota": quota,
-            }
-        except Exception as exc:  # noqa: BLE001
-            store.touch_keepalive(aid, False, f"保活异常: {str(exc)[:50]}")
-            return {"ok": False, "id": aid, "label": acc.get("label", aid), "error": str(exc)}
+            finally:
+                GEN_LOCK.release()
+        updated = store.get_account(aid) or {}
+        return {
+            "ok": True,
+            "id": aid,
+            "label": acc.get("label", aid),
+            "vm_id": res.get("vm_id"),
+            "vm_state": vm_state,
+            "wake_ok": res.get("wake_ok"),
+            "expires_at": updated.get("expires_at"),
+            "quota": quota,
+        }
+    except Exception as exc:  # noqa: BLE001
+        store.touch_keepalive(aid, False, f"保活异常: {str(exc)[:50]}")
+        return {"ok": False, "id": aid, "label": acc.get("label", aid), "error": str(exc)}
 
 
 async def run_keepalive_all(force: bool = False) -> dict:
-    """执行账号保活：force=True 时强制刷新所有启用账号，否则仅刷新临期/超期未检账号。"""
+    """执行账号保活：force=True 时强制刷新所有启用账号，否则刷新临期/未检账号并保持 VM 热备。"""
     async with KEEPALIVE_LOCK:
         now = int(time.time())
         KEEPALIVE_STATE["running"] = True
@@ -1606,16 +1675,22 @@ async def run_keepalive_all(force: bool = False) -> dict:
                 exp_at = a.get("expires_at")
                 last_ka = a.get("last_keepalive") or 0
 
-                needs_run = force or (exp_at and (exp_at - now < 12 * 3600)) or ((now - last_ka) > 12 * 3600) or (a.get("ok") is None)
+                needs_run = (
+                    force
+                    or not exp_at
+                    or (exp_at - now < 36 * 3600)
+                    or ((now - last_ka) > 15 * 60)
+                    or (a.get("ok") is not True)
+                )
                 if not needs_run:
                     skipped.append({"id": aid, "label": label, "reason": "会话充足且近期已保活"})
                     continue
 
-                log.info("【自动保活】正在为账号 %s (%s) 执行静默续期...", label, aid)
-                res = await asyncio.to_thread(_probe_account_sync, aid)
+                log.info("【自动保活】正在为账号 %s (%s) 执行静默续期与 VM 唤醒...", label, aid)
+                res = await asyncio.to_thread(_probe_account_sync, aid, False)
                 results.append(res)
-                log.info("【自动保活】账号 %s 执行结果: %s", label, res.get("ok"))
-                await asyncio.sleep(4)
+                log.info("【自动保活】账号 %s 执行结果: ok=%s expires_at=%s", label, res.get("ok"), res.get("expires_at"))
+                await asyncio.sleep(0.5)
 
             summary = {
                 "checked_at": now,
@@ -1625,22 +1700,22 @@ async def run_keepalive_all(force: bool = False) -> dict:
                 "skipped": skipped,
             }
             KEEPALIVE_STATE["last_result"] = summary
-            KEEPALIVE_STATE["next_run"] = now + 1800
+            KEEPALIVE_STATE["next_run"] = now + 900
             return summary
         finally:
             KEEPALIVE_STATE["running"] = False
 
 
 async def _keepalive_loop():
-    """后台常驻守护任务：每 30 分钟轮询一次账号健康状态。"""
-    log.info("【自动保活守护进程】已启动，检测周期: 30 分钟")
-    await asyncio.sleep(15)
+    """后台常驻守护任务：每 15 分钟轮询一次账号健康状态并保持 VM 热备。"""
+    log.info("【自动保活守护进程】已启动，检测周期: 15 分钟")
+    await asyncio.sleep(3)
     while True:
         try:
             await run_keepalive_all(force=False)
         except Exception as e:  # noqa: BLE001
             log.error("【自动保活守护进程】轮询异常: %s", e)
-        await asyncio.sleep(1800)
+        await asyncio.sleep(900)
 
 
 @app.post("/admin/accounts/keepalive")
@@ -1654,7 +1729,7 @@ async def trigger_keepalive_all(force: bool = True, _=Depends(auth)):
 @app.post("/admin/accounts/{aid}/keepalive")
 async def trigger_keepalive_single(aid: str, _=Depends(auth)):
     """手动针对单个账号执行保活续期。"""
-    return await asyncio.to_thread(_probe_account_sync, aid)
+    return await asyncio.to_thread(_probe_account_sync, aid, False)
 
 
 @app.get("/admin/keepalive/status")
@@ -1670,7 +1745,7 @@ async def _startup():
         new_key = "m2a_" + secrets.token_hex(24)
         CFG.api_key = new_key
         _persist_env("MUSE2API_KEY", new_key)
-        logger.info(f"🔑 未检测到 MUSE2API_KEY，已自动生成初始密钥: {new_key}")
+        log.info("🔑 未检测到 MUSE2API_KEY，已自动生成初始密钥: %s", new_key)
     asyncio.create_task(_keepalive_loop())
 
 
