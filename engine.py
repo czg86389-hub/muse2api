@@ -45,6 +45,8 @@ class MuseEngine:
         self.proc: subprocess.Popen | None = None
         self.browser: CDP | None = None
         self.page: CDP | None = None
+        self.current_acc_id: str | None = None
+        self._last_http_renew: dict[str, float] = {}
         self._log = None
         os.makedirs(cfg.profile_dir, exist_ok=True)
 
@@ -262,40 +264,40 @@ class MuseEngine:
                     return 'ready';
                 })()""")
                 if st == "ready":
-                    time.sleep(0.35)
-                    still_ok = page.js("!(document.body && (document.body.innerText||'').indexOf('Connecting...') !== -1)")
-                    if still_ok:
-                        return True
+                    return True
             except Exception:
                 pass
-            time.sleep(0.25)
+            time.sleep(0.08)
         return False
 
-    def reset_thread(self):
-        """关闭残留弹窗并确保处于全新空白 /thread/new 会话且 WebSocket 已就绪。"""
+    def reset_thread(self, for_chat: bool = False):
+        """关闭残留弹窗并确保处于干净会话且 WebSocket 已就绪。
+        对于纯文本对话（for_chat=True），若当前热页面无附件、无卡死且气泡数较少，直接复用现有热连接以实现 2s 级秒回。"""
         if not self.page:
             return
         try:
-            self.page.send("Input.dispatchKeyEvent", {"type": "rawKeyDown", "windowsVirtualKeyCode": 27, "key": "Escape", "code": "Escape"})
-            self.page.send("Input.dispatchKeyEvent", {"type": "keyUp", "windowsVirtualKeyCode": 27, "key": "Escape", "code": "Escape"})
-            needs_nav = self.page.js("""(function(){
+            needs_nav = self.page.js("""(function(forChat){
                 var d = document.querySelector('[role="dialog"]');
                 if (d) {
                     var b = d.querySelector('button[aria-label*="close" i], button');
                     if (b) b.click();
                 }
-                var hasBubbles = document.querySelectorAll('div[class*="hatch-chat-groupable-bubble"]').length > 0;
+                var bubbleCount = document.querySelectorAll('div[class*="hatch-chat-groupable-bubble"]').length;
                 var hasAtts = document.querySelectorAll('[data-testid^="hatch-chat-attachment-presentation-"]').length > 0;
                 var hasStop = !!document.querySelector('button[aria-label*="Stop" i]');
                 var bodyTxt = document.body ? (document.body.innerText || '') : '';
                 var hasStuck = bodyTxt.indexOf('Still sending') !== -1 || bodyTxt.indexOf('Connecting...') !== -1;
-                return (window.location.pathname !== '/thread/new') || hasBubbles || hasAtts || hasStop || hasStuck;
-            })()""")
+                if (hasStop || hasStuck || hasAtts) return true;
+                if (forChat) {
+                    return bubbleCount >= 16;
+                }
+                return (window.location.pathname !== '/thread/new') || bubbleCount > 0;
+            })(%s)""" % ("true" if for_chat else "false"))
             if needs_nav:
                 self.page.send("Page.navigate", {"url": "https://muse.ai/thread/new"})
-                t_end = time.time() + 12.0
+                t_end = time.time() + 10.0
                 while time.time() < t_end:
-                    time.sleep(0.25)
+                    time.sleep(0.08)
                     ready = self.page.js("""(function(){
                         return document.readyState === 'complete'
                             && !!document.querySelector('textarea')
@@ -303,7 +305,7 @@ class MuseEngine:
                     })()""")
                     if ready:
                         break
-                self._wait_ws_ready(self.page, timeout=15.0)
+                self._wait_ws_ready(self.page, timeout=12.0)
         except Exception:
             pass
 
@@ -320,28 +322,36 @@ class MuseEngine:
             except Exception:
                 pass
             self.page = None
-        # 注入前先通过 /api/session 续签最新 hatch_vml 并唤醒云端 VM
-        try:
-            renewed = self.renew_session_http(cookies, expires, wake_vm=True)
-            if renewed.get("cookies"):
-                cookies = renewed["cookies"]
-            if renewed.get("cookies_exp"):
-                expires = renewed["cookies_exp"]
-        except MuseAuthError:
-            raise
-        except Exception as e:
-            log.warning("预续签 /api/session 失败（继续尝试浏览器加载）: %s", e)
+        # 仅当距离上次 HTTP 续签超过 10 分钟时才在主链路调用 /api/session，避免每次切号重复阻塞
+        last_map = getattr(self, "_last_http_renew", None)
+        if last_map is None:
+            last_map = {}
+            self._last_http_renew = last_map
+        now_ts = time.time()
+        if not account_id or (now_ts - last_map.get(account_id, 0) > 600):
+            try:
+                renewed = self.renew_session_http(cookies, expires, wake_vm=True)
+                if renewed.get("cookies"):
+                    cookies = renewed["cookies"]
+                if renewed.get("cookies_exp"):
+                    expires = renewed["cookies_exp"]
+                if account_id:
+                    last_map[account_id] = now_ts
+            except MuseAuthError:
+                raise
+            except Exception as e:
+                log.warning("预续签 /api/session 失败（继续尝试浏览器加载）: %s", e)
 
         page = self._open_page()
         self._apply_cookies(page, cookies, expires)
         page.send("Page.navigate", {"url": "https://muse.ai/thread/new"})
-        for _ in range(self.cfg.login_wait):
-            time.sleep(0.3)
+        for _ in range(self.cfg.login_wait * 2):
+            time.sleep(0.15)
             try:
                 if page.js("!!document.querySelector('textarea')"):
                     self.page = page
                     self.current_acc_id = account_id
-                    self._wait_ws_ready(page, timeout=20.0)
+                    self._wait_ws_ready(page, timeout=15.0)
                     return page
             except Exception:
                 pass
@@ -349,7 +359,7 @@ class MuseEngine:
             if page.js("!!document.querySelector('textarea')"):
                 self.page = page
                 self.current_acc_id = account_id
-                self._wait_ws_ready(page, timeout=20.0)
+                self._wait_ws_ready(page, timeout=15.0)
                 return page
         except Exception:  # noqa: BLE001
             pass
@@ -618,14 +628,19 @@ class MuseEngine:
             pass
 
     def _wait_attachment(self, baseline_src: str, timeout: int, expect: str,
-                         on_progress=None) -> dict | None:
+                         on_progress=None, base_agent_cnt: int = 0,
+                         base_att_cnt: int = 0, stop_event=None) -> dict | None:
         deadline = time.time() + timeout
         t_start = time.time()
         stable_src, stable_n = "", 0
+        last_txt, txt_stable = "", 0
         while time.time() < deadline:
-            time.sleep(0.8)
+            if stop_event is not None and stop_event.is_set():
+                raise MuseGenerationError("客户端已断开连接，终止生成任务")
+            time.sleep(0.6)
             self._scroll_bottom()
-            att = self._last_attachment()
+            atts = self.attachments()
+            att = atts[-1] if atts else None
             if att:
                 src = att.get("src") or ""
                 v_src = att.get("vSrc") or ""
@@ -638,7 +653,7 @@ class MuseEngine:
                 else:
                     want = ("image" in tid) or (not has_video)
                 check_src = v_src if (expect == "video" and v_src) else src
-                if check_src and check_src != baseline_src and want:
+                if check_src and (check_src != baseline_src or len(atts) > base_att_cnt) and want:
                     if w > 0 and h > 0:
                         return att
                     if check_src == stable_src:
@@ -655,13 +670,35 @@ class MuseEngine:
                 except Exception:
                     pass
             try:
-                tail = self.page.js("document.body.innerText.slice(-700)") or ""
+                st_raw = self.page.js("""(function(){
+                    var bs=[].slice.call(document.querySelectorAll('div[class*="hatch-chat-groupable-bubble"]'))
+                        .filter(function(b){return /hatch-agent-bubble-bg/.test(b.className||'');});
+                    var lastTxt = bs.length ? (bs[bs.length-1].innerText||'').trim() : '';
+                    var hasStop = !!document.querySelector('button[aria-label*="Stop" i]');
+                    var tail = document.body ? (document.body.innerText||'').slice(-700) : '';
+                    return JSON.stringify({cnt: bs.length, txt: lastTxt, stop: hasStop, tail: tail});
+                })()""")
+                st = json.loads(st_raw) if st_raw else {}
             except Exception:
-                tail = ""
+                st = {}
+            tail = st.get("tail") or ""
             if re.search(r"额度不足|积分不足|out of credits|达到上限|token limit", tail):
                 raise MuseGenerationError("账号额度不足")
-            if elapsed > 18.0 and ("Still sending" in tail or "Connecting..." in tail):
+            if elapsed > 16.0 and ("Still sending" in tail or "Connecting..." in tail):
                 raise MuseGenerationError("云端 VM 连接超时 (Still sending)")
+            # 快速失败：如果助手已经完成了纯文字回复（无 Stop 按钮且无新附件），不再傻等 240 秒
+            cur_cnt = st.get("cnt") or 0
+            cur_txt = st.get("txt") or ""
+            has_stop = bool(st.get("stop"))
+            if cur_cnt > base_agent_cnt and cur_txt and not has_stop and len(atts) <= base_att_cnt:
+                if cur_txt == last_txt:
+                    txt_stable += 1
+                else:
+                    last_txt, txt_stable = cur_txt, 0
+                if txt_stable >= 6 and elapsed > 6.0:
+                    raise MuseGenerationError(f"模型未生成媒体，仅返回文本: {cur_txt[:120]}")
+            else:
+                txt_stable = 0
         return None
 
     # ---------------- 取字节 ----------------
@@ -702,15 +739,6 @@ class MuseEngine:
     """ % (ATT_SEL, "%s", "%s")
 
     # ---------------- 文本 / 代码对话 ----------------
-    # 实测（2026-09-23）：muse.ai 网页助手（自称 Koda，底层是 Muse 系列语言模型）
-    # 支持完整的文本/代码对话，且回复本身就是流式吐字的。
-    #
-    # DOM 判据（两类气泡都带 hatch-chat-groupable-bubble）：
-    #   - 用户消息气泡：class 含 chat-user-bubble，innerText 以 "You:" 开头
-    #   - 助手回复气泡：class 含 hatch-agent-bubble-bg
-    # 气泡按时间顺序排列 → 「最后一个助手气泡」就是最新回复。
-    #
-    # 注意：聊天是虚拟列表，必须先 _scroll_bottom()，否则新消息根本不在 DOM 里。
     _AGENT_TEXT_JS = (
         "(function(){"
         "var bs=[].slice.call(document.querySelectorAll("
@@ -736,6 +764,19 @@ class MuseEngine:
         "if(/hatch-agent-bubble-bg/.test(bs[i].className||''))n++;}"
         "return String(n);})()"
     )
+    _POLL_CHAT_JS = (
+        "(function(){"
+        "var els=[...document.querySelectorAll('*')].filter(function(e){"
+        "var s=getComputedStyle(e);"
+        "return (s.overflowY==='auto'||s.overflowY==='scroll')&&e.scrollHeight>e.clientHeight+100;});"
+        "els.sort(function(a,b){return b.scrollHeight-a.scrollHeight;});"
+        "if(els[0])els[0].scrollTop=els[0].scrollHeight;"
+        "var bs=[].slice.call(document.querySelectorAll('div[class*=\"hatch-chat-groupable-bubble\"]'))"
+        ".filter(function(b){return /hatch-agent-bubble-bg/.test(b.className||'');});"
+        "var txt=bs.length?(bs[bs.length-1].innerText||'').trim():'';"
+        "var stop=!!document.querySelector('button[aria-label*=\"Stop\" i]');"
+        "return JSON.stringify({cnt:bs.length,txt:txt,stop:stop});})()"
+    )
 
     def _agent_text(self) -> str:
         """最后一个助手气泡的文本（取不到就返回空串）。"""
@@ -756,37 +797,44 @@ class MuseEngine:
         except Exception:  # noqa: BLE001
             return 0
 
+    def _poll_chat(self) -> tuple[int, str, bool]:
+        try:
+            raw = self.page.js(self._POLL_CHAT_JS)
+            if raw:
+                d = json.loads(raw)
+                return int(d.get("cnt") or 0), (d.get("txt") or "").strip(), bool(d.get("stop"))
+        except Exception:
+            pass
+        return 0, "", False
+
     def chat_stream(self, cookies: dict, prompt: str, expires: dict | None = None,
                     timeout: int | None = None, account_id: str | None = None,
                     stop_event=None):
         """发一条消息，流式 yield 增量文本。"""
         timeout = int(timeout or getattr(self.cfg, "chat_timeout", 300))
         self.ensure_page(cookies, expires, account_id=account_id)
-        self.reset_thread()
-        self._scroll_bottom()
-        base_text = self._agent_text()
-        base_agent = self._agent_count()
+        self.reset_thread(for_chat=True)
+        base_agent, base_text, _ = self._poll_chat()
         self._send(prompt)
 
         t_sent = time.time()
         deadline = t_sent + timeout
-        first_token_deadline = min(deadline, t_sent + 35.0)
+        first_token_deadline = min(deadline, t_sent + 30.0)
         got_first = False
 
-        # 等新回复出现：限制首字超时为 35s，且若卡在 Still sending / Connecting... 超过 14s 立即快速失败以触发切号
+        # 等新回复出现：单次 CDP 轮询合并滚动+气泡检测，80ms 极速响应
         while time.time() < first_token_deadline:
             if stop_event is not None and stop_event.is_set():
                 return
-            time.sleep(0.12)
-            self._scroll_bottom()
-            cur = self._agent_text()
+            time.sleep(0.08)
+            cnt, cur, _ = self._poll_chat()
+            if cnt > base_agent and cur:
+                got_first = True
+                break
             if cur and cur != base_text:
                 got_first = True
                 break
-            if self._agent_count() > base_agent and cur != "":
-                got_first = True
-                break
-            if time.time() - t_sent > 14.0:
+            if time.time() - t_sent > 12.0:
                 try:
                     tail = self.page.js("document.body.innerText.slice(-500)") or ""
                 except Exception:
@@ -797,15 +845,14 @@ class MuseEngine:
         if not got_first:
             raise MuseGenerationError("等待助手首字响应超时")
 
-        # 流式输出增量文本
+        # 流式输出增量文本：当无 Stop 按钮且文本连续 3 次（~0.3s）稳定即立刻结束，消除尾部 1.2s 卡顿
         sent, last, stable = "", None, 0
         while time.time() < deadline:
             if stop_event is not None and stop_event.is_set():
                 return
-            time.sleep(0.15)
-            self._scroll_bottom()
-            cur = self._agent_text()
-            if not cur or cur == base_text:
+            time.sleep(0.10)
+            cnt, cur, has_stop = self._poll_chat()
+            if not cur or (cnt <= base_agent and cur == base_text):
                 continue
             if cur != last:
                 delta = cur[len(sent):] if cur.startswith(sent) else cur
@@ -815,7 +862,7 @@ class MuseEngine:
                 last, stable = cur, 0
             else:
                 stable += 1
-                if stable >= 8:
+                if (not has_stop and stable >= 3) or stable >= 7:
                     return
         raise MuseGenerationError("等待助手回复超时")
 
@@ -981,18 +1028,25 @@ class MuseEngine:
     # ---------------- 主流程 ----------------
     def generate(self, cookies: dict, prompt: str, expect: str = "image",
                  timeout: int = 240, expires: dict | None = None, account_id: str | None = None,
-                 on_progress=None, reference_image: str | None = None) -> dict:
+                 on_progress=None, reference_image: str | None = None,
+                 stop_event=None) -> dict:
         self.ensure_page(cookies, expires, account_id=account_id)
-        self.reset_thread()
+        self.reset_thread(for_chat=False)
         self._scroll_bottom()
-        base = self._last_attachment() or {}
+        atts_before = self.attachments()
+        base = atts_before[-1] if atts_before else {}
         baseline_src = base.get("src") or ""
+        base_agent_cnt = self._agent_count()
         if reference_image:
             self._attach_image(reference_image)
         else:
             self._clear_attachments()
         self._send(prompt)
-        att = self._wait_attachment(baseline_src, timeout, expect, on_progress=on_progress)
+        att = self._wait_attachment(
+            baseline_src, timeout, expect, on_progress=on_progress,
+            base_agent_cnt=base_agent_cnt, base_att_cnt=len(atts_before),
+            stop_event=stop_event
+        )
         if not att:
             self._debug_dump("no-attachment")
             raise MuseGenerationError("等待生成超时，未出现新的生成结果")

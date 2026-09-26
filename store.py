@@ -144,23 +144,32 @@ class Store:
             _write(self.cfg.accounts_file, self.accounts)
             return len(self.accounts) != n
 
-    def pick_account(self, preferred_id: str | None = None, rotate: bool = True) -> dict | None:
-        """选择可用账号：按最久未用排序，实现公平轮转。健康账号优先。"""
+    def pick_account(self, preferred_id: str | None = None, rotate: bool = True,
+                     force_rotate: bool = False, exclude_id: str | None = None) -> dict | None:
+        """选择可用账号：优先复用当前已预热的健康账号（减少切号重连耗时），每满 15 次或遇错自动轮转。"""
         with _LOCK:
             live = [a for a in self.accounts if a.get("enabled", True) and a.get("cookies")]
             if not live:
                 return None
-            if preferred_id and not rotate:
+            if exclude_id and len(live) > 1:
+                live = [a for a in live if a["id"] != exclude_id] or live
+            if preferred_id and not force_rotate:
                 for a in live:
                     if a["id"] == preferred_id and a.get("ok") is not False:
-                        a["last_used"] = int(time.time())
-                        a["use_count"] = a.get("use_count", 0) + 1
-                        _write(self.cfg.accounts_file, self.accounts)
-                        return a
+                        sticky_n = getattr(self, "_sticky_count", 0) if getattr(self, "_sticky_id", None) == preferred_id else 0
+                        if not rotate or sticky_n < 15:
+                            self._sticky_id = preferred_id
+                            self._sticky_count = sticky_n + 1
+                            a["last_used"] = time.time()
+                            a["use_count"] = a.get("use_count", 0) + 1
+                            _write(self.cfg.accounts_file, self.accounts)
+                            return a
             healthy = [a for a in live if a.get("ok") is not False]
             candidates = healthy if healthy else live
             candidates.sort(key=lambda a: (a.get("last_used") or 0.0, a.get("use_count") or 0))
             acc = candidates[0]
+            self._sticky_id = acc["id"]
+            self._sticky_count = 1
             acc["last_used"] = time.time()
             acc["use_count"] = acc.get("use_count", 0) + 1
             _write(self.cfg.accounts_file, self.accounts)

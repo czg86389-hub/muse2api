@@ -176,18 +176,29 @@ def auth(authorization: str | None = Header(default=None)):
 
 # ------------------------- 请求模型 -------------------------
 
-def _renew_and_persist(acc_id: str, wake_vm: bool = True) -> dict | None:
-    """调用 /api/session 续签账号 cookie 并写回 store，返回最新账号 dict。"""
+def _renew_and_persist(acc_id: str, wake_vm: bool = True, force: bool = False) -> dict | None:
+    """调用 /api/session 续签账号 cookie 并写回 store，返回最新账号 dict。
+    近期（10分钟内）已续签且状态正常的账号直接复用，避免每次请求阻塞 2~3 秒 HTTP 往返。"""
     acc = store.get_account(acc_id)
     if not acc or not acc.get("cookies"):
         return acc
+    now = time.time()
+    last_sync = max(
+        int(acc.get("synced_at") or 0),
+        int(acc.get("last_keepalive") or 0),
+        int(engine._last_http_renew.get(acc_id, 0)),
+    )
+    if not force and acc.get("ok") is True and (now - last_sync) < 600:
+        engine._last_http_renew[acc_id] = last_sync
+        return acc
     try:
         res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"), wake_vm=wake_vm)
+        engine._last_http_renew[acc_id] = now
         if res.get("cookies"):
             store.update_account(acc_id, cookies=res["cookies"],
                                  cookies_exp=res.get("cookies_exp"),
                                  ok=True if res.get("ok") else acc.get("ok"),
-                                 synced_at=int(time.time()))
+                                 synced_at=int(now))
             store.touch_keepalive(acc_id, True, f"会话正常 (VM: {res.get('vm_state') or 'RUNNING'})")
     except MuseAuthError as exc:
         store.mark(acc_id, False, str(exc))
@@ -216,7 +227,7 @@ def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
                 if stop_event.is_set():
                     return
                 if attempt > 0:
-                    alt = store.pick_account(rotate=True)
+                    alt = store.pick_account(rotate=True, force_rotate=True, exclude_id=cur_id)
                     if not alt or alt["id"] == cur_id:
                         break
                     cur_id = alt["id"]
@@ -226,7 +237,7 @@ def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
                 yielded = False
                 try:
                     if cur_id:
-                        refreshed = _renew_and_persist(cur_id, wake_vm=True)
+                        refreshed = _renew_and_persist(cur_id, wake_vm=True, force=(attempt > 0))
                         if refreshed:
                             cur_cookies = refreshed["cookies"]
                             cur_exp = refreshed.get("cookies_exp")
@@ -363,7 +374,11 @@ class AccountPatch(BaseModel):
 
 # ------------------------- 提示词构造 -------------------------
 def build_image_prompt(r: ImageRequest) -> str:
-    parts = [f"生成一张图片：{r.prompt.strip()}"]
+    has_ref = bool(r.reference_image or r.image or r.images)
+    if has_ref:
+        parts = [f"基于我本次上传附带的参考图片进行生图/编辑：{r.prompt.strip()}"]
+    else:
+        parts = [f"全新文生图创作（当前未提供任何参考图，请勿查找历史相册或向用户索要原图，直接根据文字描述从零绘制生成一张全新图片）：{r.prompt.strip()}"]
     ar = (r.aspect_ratio or "").strip().lower()
     sz = (r.size or "").strip().lower()
 
@@ -382,7 +397,7 @@ def build_image_prompt(r: ImageRequest) -> str:
     elif r.size:
         parts.append(f"尺寸/比例：{r.size}")
 
-    if r.reference_image or r.image or r.images:
+    if has_ref:
         parts.append("【纯净画面要求】：彻底清除并去除参考图中的所有文字、水印、签名、角标及Logo标记（clean image without any watermark, text, or logo），输出绝对纯净无字画面")
 
     if r.extra:
@@ -723,7 +738,7 @@ def _run_generation(prompt: str, kind: str, timeout: int,
     if acc and not acc.get("enabled", True):
         acc = None
     if not acc:
-        acc = store.pick_account(rotate=True)
+        acc = store.pick_account(rotate=True, preferred_id=getattr(engine, "current_acc_id", None))
     if not acc:
         raise MuseAuthError("没有可用账号，请先在管理页面导入 cookie")
 
@@ -731,13 +746,15 @@ def _run_generation(prompt: str, kind: str, timeout: int,
     cur_acc = acc
     for attempt in range(2):
         if attempt > 0:
-            alt = store.pick_account(rotate=True)
+            if last_exc and "未产出媒体附件，仅返回了文本回复" in str(last_exc):
+                break
+            alt = store.pick_account(rotate=True, force_rotate=True, exclude_id=cur_acc["id"])
             if not alt or alt["id"] == cur_acc["id"]:
                 break
             cur_acc = alt
             log.info("【生图/视频自动切号】切换到备用账号 %s (%s) 重试...", cur_acc.get("label"), cur_acc["id"])
         try:
-            refreshed = _renew_and_persist(cur_acc["id"], wake_vm=True)
+            refreshed = _renew_and_persist(cur_acc["id"], wake_vm=True, force=(attempt > 0))
             if refreshed:
                 cur_acc = refreshed
             with GEN_LOCK:
@@ -988,6 +1005,13 @@ def _want_usage(stream_options) -> bool:
     return False
 
 
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "X-Accel-Buffering": "no",
+    "Connection": "keep-alive",
+}
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatRequest, _=Depends(auth)):
     """OpenAI 兼容的对话接口 —— 各类智能体客户端都能接。
@@ -1015,7 +1039,7 @@ async def chat_completions(req: ChatRequest, _=Depends(auth)):
 
     model = resolve_model(req.model, default="muse-spark")
     timeout = int(req.timeout or CFG.chat_timeout)
-    acc = store.pick_account(rotate=True)
+    acc = store.pick_account(rotate=True, preferred_id=getattr(engine, "current_acc_id", None))
     if not acc:
         raise HTTPException(400, "没有可用账号，请先在管理页面导入 cookie")
 
@@ -1091,7 +1115,7 @@ async def chat_completions(req: ChatRequest, _=Depends(auth)):
                 yield _sse({"error": {"message": str(exc), "type": "server_error", "code": 502}})
             except Exception as exc:
                 yield _sse({"error": {"message": f"内部错误: {exc}", "type": "server_error", "code": 500}})
-        return StreamingResponse(sync_stream(), media_type="text/event-stream")
+        return StreamingResponse(sync_stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
     def run() -> str:
         return "".join(safe_chat_stream(cookies, prompt, expires, timeout, account_id=acc_id))
@@ -1169,7 +1193,7 @@ async def responses_api(req: ResponsesRequest, _=Depends(auth)):
 
     model = resolve_model(req.model, default="muse-spark")
     timeout = int(req.timeout or CFG.chat_timeout)
-    acc = store.pick_account(rotate=True)
+    acc = store.pick_account(rotate=True, preferred_id=getattr(engine, "current_acc_id", None))
     if not acc:
         raise HTTPException(400, "没有可用账号，请先在管理页面导入 cookie")
 
@@ -1227,7 +1251,7 @@ async def responses_api(req: ResponsesRequest, _=Depends(auth)):
                 yield _sse_event("response.failed", {
                     "type": "response.failed",
                     "response": envelope("failed")})
-        return StreamingResponse(sync_stream(), media_type="text/event-stream")
+        return StreamingResponse(sync_stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
     def run() -> str:
         return "".join(safe_chat_stream(cookies, prompt, expires, timeout, account_id=acc_id))
@@ -1706,13 +1730,40 @@ async def run_keepalive_all(force: bool = False) -> dict:
             KEEPALIVE_STATE["running"] = False
 
 
+def _warmup_browser_sync():
+    """后台静默预热浏览器与首个可用账号的 WebSocket 隧道，使重启后首条请求也秒回。"""
+    if getattr(engine, "current_acc_id", None) and engine.page is not None:
+        return
+    acc = store.pick_account(rotate=False)
+    if not acc or not acc.get("cookies"):
+        return
+    if not GEN_LOCK.acquire(blocking=False):
+        return
+    try:
+        log.info("【浏览器预热】正在后台预热账号 %s (%s) 的热备标签页...", acc.get("label"), acc["id"])
+        refreshed = _renew_and_persist(acc["id"], wake_vm=True, force=False) or acc
+        engine.start()
+        engine.ensure_page(refreshed["cookies"], refreshed.get("cookies_exp"), account_id=acc["id"])
+        log.info("【浏览器预热】账号 %s (%s) 热备标签页与 WebSocket 已就绪", acc.get("label"), acc["id"])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("【浏览器预热】预热异常: %s", exc)
+    finally:
+        GEN_LOCK.release()
+
+
 async def _keepalive_loop():
     """后台常驻守护任务：每 15 分钟轮询一次账号健康状态并保持 VM 热备。"""
     log.info("【自动保活守护进程】已启动，检测周期: 15 分钟")
-    await asyncio.sleep(3)
+    await asyncio.sleep(1)
+    try:
+        await asyncio.to_thread(_warmup_browser_sync)
+    except Exception as e:  # noqa: BLE001
+        log.warning("【浏览器预热】异常: %s", e)
     while True:
         try:
             await run_keepalive_all(force=False)
+            if not getattr(engine, "current_acc_id", None) or engine.page is None:
+                await asyncio.to_thread(_warmup_browser_sync)
         except Exception as e:  # noqa: BLE001
             log.error("【自动保活守护进程】轮询异常: %s", e)
         await asyncio.sleep(900)
