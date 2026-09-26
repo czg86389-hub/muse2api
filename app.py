@@ -1789,14 +1789,15 @@ def get_keepalive_status(_=Depends(auth)):
     return KEEPALIVE_STATE
 
 
-# ------------------------- 仓库同步与一键推送/拉取更新 -------------------------
+# ------------------------- 仓库实时更新检测、通知与一键在线升级 -------------------------
 REPO_URL = "https://github.com/czg86389-hub/muse2api"
 TRACKED_REPO_PATHS = [
     "app.py", "engine.py", "store.py", "cdp.py", "config.py",
-    "admin.html", "README.md", "requirements.txt", "Dockerfile",
-    "docker-compose.yml", ".env.example", ".gitignore", "LICENSE",
-    "extension", "deploy",
+    "admin.html", "README.md", "version.json", "requirements.txt",
+    "Dockerfile", "docker-compose.yml", ".env.example", ".gitignore",
+    "LICENSE", "extension", "deploy",
 ]
+_UPDATE_CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 
 
 def _read_env_key(key: str) -> str:
@@ -1815,7 +1816,23 @@ def _read_env_key(key: str) -> str:
     return ""
 
 
-def _git(args: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
+def _read_local_version() -> dict:
+    p = os.path.join(BASE_DIR, "version.json")
+    try:
+        with open(p, encoding="utf-8") as f:
+            obj = json.load(f)
+            if isinstance(obj, dict):
+                return obj
+    except Exception:
+        pass
+    return {"version": "1.5.0", "highlights": []}
+
+
+def _installed_sha_file() -> str:
+    return os.path.join(CFG.data_dir, ".installed_sha")
+
+
+def _git(args: list[str], timeout: int = 30):
     import subprocess
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -1845,74 +1862,217 @@ def _ensure_git_repo(token: str = ""):
     _git(["config", "user.email", "czg86389-hub@users.noreply.github.com"])
 
 
-def _repo_status_sync() -> dict:
+def _check_update_sync(force: bool = False) -> dict:
+    """检测 GitHub 官方仓库 (czg86389-hub/muse2api) 是否有新版本或新提交。
+    默认缓存 90 秒，防止频繁刷新触发 GitHub API 速率限制。"""
+    now = time.time()
+    if not force and _UPDATE_CACHE["data"] and (now - _UPDATE_CACHE["ts"]) < 90:
+        return _UPDATE_CACHE["data"]
+
     import requests
     token = _read_env_key("GITHUB_TOKEN")
+    local_ver_obj = _read_local_version()
+    local_version = str(local_ver_obj.get("version") or "1.5.0")
+
     has_git = os.path.isdir(os.path.join(BASE_DIR, ".git"))
     local_sha, local_msg, local_ts = "", "", 0
-    dirty_files = []
-    has_push_cred = bool(token)
-
     if has_git:
-        r_sha = _git(["rev-parse", "--short", "HEAD"])
-        if r_sha.returncode == 0:
-            local_sha = r_sha.stdout.strip()
-        r_log = _git(["log", "-1", "--format=%s||%ct"])
-        if r_log.returncode == 0 and "||" in r_log.stdout:
-            parts = r_log.stdout.strip().split("||", 1)
-            local_msg = parts[0]
-            try:
+        try:
+            r_sha = _git(["rev-parse", "--short", "HEAD"])
+            if r_sha.returncode == 0:
+                local_sha = r_sha.stdout.strip()[:7]
+            r_log = _git(["log", "-1", "--format=%s||%ct"])
+            if r_log.returncode == 0 and "||" in r_log.stdout:
+                parts = r_log.stdout.strip().split("||", 1)
+                local_msg = parts[0]
                 local_ts = int(parts[1])
-            except ValueError:
-                pass
-        existing_paths = [p for p in TRACKED_REPO_PATHS if os.path.exists(os.path.join(BASE_DIR, p))]
-        r_st = _git(["status", "--porcelain", "--", *existing_paths])
-        if r_st.returncode == 0:
-            for ln in r_st.stdout.splitlines():
-                if ln.strip():
-                    dirty_files.append(ln.strip())
-        r_rem = _git(["remote", "get-url", "origin"])
-        if r_rem.returncode == 0 and "@" in r_rem.stdout:
-            has_push_cred = True
+        except Exception:
+            pass
 
-    remote_sha, remote_msg = "", ""
+    if not local_sha and os.path.isfile(_installed_sha_file()):
+        try:
+            with open(_installed_sha_file(), encoding="utf-8") as f:
+                local_sha = f.read().strip()[:7]
+        except OSError:
+            pass
+
+    remote_version = local_version
+    highlights = list(local_ver_obj.get("highlights") or [])
     try:
-        headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "muse2api"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        resp = requests.get("https://api.github.com/repos/czg86389-hub/muse2api/commits/main",
-                            headers=headers, timeout=6)
-        if resp.status_code == 200:
-            rj = resp.json()
-            remote_sha = (rj.get("sha") or "")[:7]
-            remote_msg = ((rj.get("commit") or {}).get("message") or "").splitlines()[0]
+        rv = requests.get(
+            f"https://raw.githubusercontent.com/czg86389-hub/muse2api/main/version.json?t={int(now)}",
+            timeout=6,
+        )
+        if rv.status_code == 200:
+            rvj = rv.json()
+            if isinstance(rvj, dict):
+                remote_version = str(rvj.get("version") or remote_version)
+                if rvj.get("highlights"):
+                    highlights = list(rvj["highlights"])
     except Exception:
         pass
 
-    return {
+    remote_sha, remote_msg, remote_time = "", "", ""
+    recent_commits = []
+    try:
+        headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "muse2api-updater"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        resp = requests.get(
+            "https://api.github.com/repos/czg86389-hub/muse2api/commits?sha=main&per_page=5",
+            headers=headers,
+            timeout=6,
+        )
+        if resp.status_code == 200 and isinstance(resp.json(), list):
+            commits = resp.json()
+            for idx, c in enumerate(commits):
+                sha7 = (c.get("sha") or "")[:7]
+                c_msg = ((c.get("commit") or {}).get("message") or "").splitlines()[0]
+                c_date = (((c.get("commit") or {}).get("committer") or {}).get("date") or "")
+                c_url = c.get("html_url") or f"{REPO_URL}/commit/{sha7}"
+                if idx == 0:
+                    remote_sha = sha7
+                    remote_msg = c_msg
+                    remote_time = c_date
+                recent_commits.append({
+                    "sha": sha7,
+                    "message": c_msg,
+                    "date": c_date,
+                    "url": c_url,
+                })
+    except Exception:
+        pass
+
+    # 若用户通过 Docker/ZIP 部署（无 .git）且首次运行版本一致，记录初始基准 SHA
+    if not local_sha and remote_sha and local_version == remote_version:
+        local_sha = remote_sha
+        try:
+            with open(_installed_sha_file(), "w", encoding="utf-8") as f:
+                f.write(remote_sha)
+        except OSError:
+            pass
+
+    has_update = False
+    if remote_sha and local_sha and remote_sha != local_sha:
+        has_update = True
+    elif remote_version and local_version and remote_version != local_version:
+        has_update = True
+
+    data = {
         "repo_url": REPO_URL,
         "has_git": has_git,
+        "local_version": local_version,
+        "remote_version": remote_version,
         "local_sha": local_sha,
         "local_msg": local_msg,
         "local_ts": local_ts,
         "remote_sha": remote_sha,
         "remote_msg": remote_msg,
-        "up_to_date": bool(local_sha and remote_sha and local_sha == remote_sha and not dirty_files),
-        "has_unpushed_changes": bool(dirty_files) or bool(local_sha and remote_sha and local_sha != remote_sha),
-        "dirty_files": dirty_files,
-        "has_push_cred": has_push_cred,
+        "remote_time": remote_time,
+        "has_update": has_update,
+        "up_to_date": not has_update and bool(remote_sha or remote_version),
+        "highlights": highlights,
+        "recent_commits": recent_commits,
+        "checked_at": int(now),
+    }
+    _UPDATE_CACHE["ts"] = now
+    _UPDATE_CACHE["data"] = data
+    return data
+
+
+def _upgrade_from_github_sync() -> dict:
+    """从 GitHub 拉取最新代码覆盖核心文件（兼容 Git 与无 Git 的 Docker/ZIP 环境），绝不触碰 .env 与 data/。"""
+    import requests
+    import tarfile
+
+    token = _read_env_key("GITHUB_TOKEN")
+    upgraded_via = ""
+    try:
+        _ensure_git_repo(token)
+        f_res = _git(["fetch", "origin", "main"], timeout=45)
+        if f_res.returncode == 0:
+            existing_paths = [p for p in TRACKED_REPO_PATHS if os.path.exists(os.path.join(BASE_DIR, p)) or p == "version.json"]
+            _git(["checkout", "origin/main", "--", *existing_paths])
+            _git(["reset", "--mixed", "origin/main"])
+            upgraded_via = "git"
+    except Exception as e:
+        log.warning("Git 拉取更新失败，将使用 Tarball 方式更新: %s", e)
+
+    if not upgraded_via:
+        resp = requests.get(
+            "https://codeload.github.com/czg86389-hub/muse2api/tar.gz/refs/heads/main",
+            timeout=60,
+        )
+        if resp.status_code != 200:
+            raise HTTPException(502, f"下载 GitHub 更新包失败 (HTTP {resp.status_code})")
+        allowed = set(TRACKED_REPO_PATHS)
+        with tarfile.open(fileobj=io.BytesIO(resp.content), mode="r:gz") as tar:
+            for member in tar.getmembers():
+                parts = member.name.split("/", 1)
+                if len(parts) < 2 or not parts[1]:
+                    continue
+                rel = parts[1]
+                top = rel.split("/", 1)[0]
+                if top not in allowed or ".." in rel:
+                    continue
+                target_path = os.path.join(BASE_DIR, rel)
+                if member.isdir():
+                    os.makedirs(target_path, exist_ok=True)
+                elif member.isfile():
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    fobj = tar.extractfile(member)
+                    if fobj is not None:
+                        with open(target_path, "wb") as out_f:
+                            out_f.write(fobj.read())
+        upgraded_via = "tarball"
+
+    _UPDATE_CACHE["ts"] = 0.0
+    status = _check_update_sync(force=True)
+    if status.get("remote_sha"):
+        try:
+            with open(_installed_sha_file(), "w", encoding="utf-8") as f:
+                f.write(status["remote_sha"])
+            status["local_sha"] = status["remote_sha"]
+            status["has_update"] = False
+            status["up_to_date"] = True
+        except OSError:
+            pass
+    return {
+        "ok": True,
+        "via": upgraded_via,
+        "message": f"已成功更新至最新版本 {status.get('remote_version')} ({status.get('remote_sha')})",
+        "status": status,
     }
 
 
+@app.get("/admin/update/check")
 @app.get("/admin/repo/status")
-async def admin_repo_status(_=Depends(auth)):
-    """查询本地代码与 GitHub 仓库 (czg86389-hub/muse2api) 的同步状态。"""
-    return await asyncio.to_thread(_repo_status_sync)
+async def admin_check_update(force: bool = False, _=Depends(auth)):
+    """供所有已部署节点实时检测 GitHub 官方仓库是否有新版本更新。"""
+    return await asyncio.to_thread(_check_update_sync, force)
+
+
+@app.post("/admin/update/upgrade")
+@app.post("/admin/repo/pull")
+async def admin_upgrade_now(payload: dict = Body(default={}), _=Depends(auth)):
+    """一键从 GitHub 官方仓库拉取最新更新并自动平滑重启服务。"""
+    res = await asyncio.to_thread(_upgrade_from_github_sync)
+    restart = payload.get("restart", True) if isinstance(payload, dict) else True
+    if restart:
+        def _delayed_restart():
+            time.sleep(1.2)
+            try:
+                engine.stop()
+            except Exception:
+                pass
+            os._exit(0)
+        threading.Thread(target=_delayed_restart, daemon=True).start()
+    return res
 
 
 @app.post("/admin/repo/push")
 async def admin_repo_push(payload: dict = Body(default={}), _=Depends(auth)):
-    """一键将当前节点的核心代码更新提交并推送到 GitHub 仓库 (自动过滤 .env 与 data 目录)。"""
+    """维护者专用：将当前节点核心代码推送到 GitHub 仓库（自动过滤 .env 与 data 目录）。"""
     msg = (payload.get("message") or "").strip() or f"chore: sync update ({time.strftime('%Y-%m-%d %H:%M:%S')})"
     new_token = (payload.get("github_token") or "").strip()
     if new_token:
@@ -1934,41 +2094,17 @@ async def admin_repo_push(payload: dict = Body(default={}), _=Depends(auth)):
         p_res = _git(["push", "origin", "HEAD:main"], timeout=60)
         if p_res.returncode != 0:
             err = (p_res.stderr or p_res.stdout or "").strip()
-            if "Authentication failed" in err or "could not read Username" in err or "403" in err:
-                raise HTTPException(400, "推送需要 GitHub Personal Access Token（请在弹窗中填入 Token，仅需填一次自动保存）")
             raise HTTPException(500, f"Git push 失败: {err[:300]}")
-        status = _repo_status_sync()
+        _UPDATE_CACHE["ts"] = 0.0
+        status = _check_update_sync(force=True)
         return {
             "ok": True,
             "committed": committed,
-            "message": "已成功提交并推送到 GitHub 仓库" if committed else "已是最新状态，已同步推送至 GitHub 仓库",
+            "message": "已成功提交并推送到 GitHub 仓库",
             "status": status,
         }
 
     return await asyncio.to_thread(_do_push)
-
-
-@app.post("/admin/repo/pull")
-async def admin_repo_pull(_=Depends(auth)):
-    """从 GitHub 仓库拉取最新核心代码（保留本地 .env 和 data 数据目录）。"""
-    token = _read_env_key("GITHUB_TOKEN")
-
-    def _do_pull():
-        _ensure_git_repo(token)
-        f_res = _git(["fetch", "origin", "main"], timeout=45)
-        if f_res.returncode != 0:
-            raise HTTPException(500, f"Git fetch 失败: {(f_res.stderr or f_res.stdout)[:300]}")
-        existing_paths = [p for p in TRACKED_REPO_PATHS if os.path.exists(os.path.join(BASE_DIR, p))]
-        _git(["checkout", "origin/main", "--", *existing_paths])
-        _git(["reset", "--mixed", "origin/main"])
-        status = _repo_status_sync()
-        return {
-            "ok": True,
-            "message": f"已成功同步到仓库最新版本 ({status.get('local_sha')})",
-            "status": status,
-        }
-
-    return await asyncio.to_thread(_do_pull)
 
 
 @app.on_event("startup")
