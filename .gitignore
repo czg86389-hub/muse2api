@@ -32,6 +32,8 @@ wheels/
 # Runtime & User Data
 data/accounts.json
 data/tasks.json
+data/.installed_sha
+data/debug-*.json
 data/media/*
 !data/media/.gitkeep
 data/downloads/*
