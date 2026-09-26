@@ -169,7 +169,9 @@ def auth(authorization: str | None = Header(default=None)):
         return True
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "缺少 Authorization: Bearer <key>")
-    if authorization.split(None, 1)[1].strip() != CFG.api_key:
+    parts = authorization.split(None, 1)
+    token = parts[1].strip() if len(parts) > 1 else ""
+    if not token or token != CFG.api_key:
         raise HTTPException(401, "API key 无效")
     return True
 
@@ -2047,7 +2049,7 @@ def _upgrade_from_github_sync() -> dict:
 
 @app.get("/admin/update/check")
 @app.get("/admin/repo/status")
-async def admin_check_update(force: bool = False, _=Depends(auth)):
+async def admin_check_update(force: bool = False):
     """供所有已部署节点实时检测 GitHub 官方仓库是否有新版本更新。"""
     return await asyncio.to_thread(_check_update_sync, force)
 
@@ -2060,7 +2062,7 @@ async def admin_upgrade_now(payload: dict = Body(default={}), _=Depends(auth)):
     restart = payload.get("restart", True) if isinstance(payload, dict) else True
     if restart:
         def _delayed_restart():
-            time.sleep(1.2)
+            time.sleep(0.5)
             try:
                 engine.stop()
             except Exception:

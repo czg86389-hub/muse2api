@@ -1376,9 +1376,19 @@ async function upgradeNow(){
   if (btn2) { btn2.disabled = true; btn2.innerHTML = '<span class="spin"></span>正在在线更新…'; }
   try{
     const r = await api('/admin/update/upgrade', {method: 'POST', body: JSON.stringify({restart: true})});
-    toast('✓ ' + (r.message || '更新完成') + '，服务正在自动重启，5 秒后自动刷新页面…', 'ok');
+    toast('✓ ' + (r.message || '更新完成') + '，服务正在重启，就绪后将自动刷新页面…', 'ok');
     $('updateBanner').classList.remove('show');
-    setTimeout(() => { location.reload(); }, 5500);
+    let tries = 0;
+    const waitReady = async () => {
+      tries++;
+      try{
+        const hr = await fetch('/healthz?t=' + Date.now(), {cache: 'no-store'});
+        if (hr.ok) { location.reload(); return; }
+      }catch(_){}
+      if (tries < 20) setTimeout(waitReady, 1000);
+      else location.reload();
+    };
+    setTimeout(waitReady, 2500);
   }catch(e){
     toast('在线更新失败：' + e.message, 'bad');
     if (btn1) { btn1.disabled = false; btn1.textContent = '⚡ 一键从 GitHub 在线更新并重启'; }
