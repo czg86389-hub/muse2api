@@ -13,7 +13,22 @@
   🤝 本开源项目已链接并认可 <b><a href="https://linux.do/" target="_blank">LINUX DO 社区 (https://linux.do/)</a></b> —— 新的理想型社区（真诚、友善、团结、专业）
 </p>
 
-将 **[muse.ai](https://muse.ai/)** 网页端的前沿多模态能力逆向工程封装为标准的 **OpenAI 兼容 RESTful API**。通过无头浏览器 CDP 协议穿透、热备 WebSocket 隧道复用与动态 Session 管理，原生支持文本对话（2~3 秒级流式首字响应）、文生图、图生图编辑、文生视频、首帧图生视频，并提供多账号池亲和轮转、全自动 48 小时会话续期与云端 VM 唤醒保活，以及配套 Chrome 一键导号扩展。
+---
+
+> ### 🔧 关于本仓库（先读这段）
+>
+> 这是 **[czg86389-hub/muse2api](https://github.com/czg86389-hub/muse2api)** 的一个**修复分支**。
+> 主体功能与上游 v1.5.2 一致，额外叠加了 **11 项并发 / 稳定性 / 安全修复**
+> （详见下方 [「本分支相对上游的修复」](#-本分支相对上游的修复)）。
+>
+> - 🔀 修复已向上游提交 **PR #4**（等待合并）：<https://github.com/czg86389-hub/muse2api/pull/4>
+> - ✅ **想要更稳的版本** → 直接用本仓库
+> - 🔄 **想跟官方主线** → 用上游仓库 `czg86389-hub/muse2api`
+> - 📌 上游合并 PR 后，本分支会回归上游，不再单独维护
+
+---
+
+将 **[muse.ai](https://muse.ai/)** 网页端的前沿多模态能力逆向工程封装为标准的 **OpenAI 兼容 RESTful API**。通过无头浏览器 CDP 协议穿透、热备 WebSocket 隧道复用与动态 Session 管理，原生支持文本对话（2~3 秒级流式首字响应）、文生图、文生图编辑、文生视频、首帧图生视频，并提供多账号池亲和轮转、全自动 48 小时会话续期与云端 VM 唤醒保活，以及配套 Chrome 一键导号扩展。
 
 ---
 
@@ -55,9 +70,11 @@
 
 1. **克隆代码并进入目录**：
    ```bash
-   git clone https://github.com/czg86389-hub/muse2api.git
+   git clone https://github.com/yys9253462-gif/muse2api.git
    cd muse2api
    ```
+   > 想用上游官方版本，把地址换成 `https://github.com/czg86389-hub/muse2api.git` 即可
+   > （但会缺少本分支的 11 项修复）。
 
 2. **配置环境变量（可选）**：
    ```bash
@@ -247,6 +264,86 @@ curl -X POST "http://localhost:18610/v1/images/generations" \
 
 本项目基于 [MIT License](LICENSE) 开源发布。
 
+---
+
+## 🔧 本分支相对上游的修复
+
+本分支基于上游 **v1.5.2**（`9164bd5`），在其之上叠加了 **11 项缺陷修复**（提交 `7eb983d`）。
+所有修复都来自对运行中服务的黑盒压测与故障注入，**已向上游提交 [PR #4](https://github.com/czg86389-hub/muse2api/pull/4)**。
+
+> 与上游 v1.5.2 是**互补**关系：上游 v1.5.2 改的是图片链路（幂等入队、524 规避、
+> 浏览器清理串行化），本分支改的是并发调度、CDP 通信、参数校验与鉴权。两者不重复。
+
+### 一、并发与调度（新增 `scheduler.py`）
+
+上游用「裸抢锁」串行化生成，存在两个致命问题，本分支改为 **FIFO 队列 + 单工作线程**：
+
+| 问题 | 表现 | 修复 |
+|---|---|---|
+| **排队任务被饿死** | 并发提交多个任务时，后来的可能先抢到锁，先来的无限期等待 | `queue.Queue` 严格先来先服务，`/admin/scheduler` 可见 `waited` 排队时长 |
+| **锁泄漏导致队列冻结** | 任务异常时锁未释放，之后**所有**生成请求永久挂起（全站静默停摆） | 由调度器统一持有/释放锁，异常路径也保证释放 |
+
+- **执行超时看门狗**：单任务执行超过 `video_timeout + 300s`（默认 900s）即强制重启浏览器中断，
+  不再无限期挂起。语义上让位给 engine 自身超时，不会误杀正常慢任务。
+- **排队超时**：任务在队列中等待超过 900s 即判超时返回，不占用客户端连接。
+- **观测端点** `GET /admin/scheduler`：返回 `submitted / completed / failed / timeout /
+  rejected / queue_size / running / worker_alive`，便于排障。
+
+### 二、CDP 通信层（重写 `cdp.py`）
+
+上游的 `send()` 是「发一条 → 阻塞等结果」的同步模型。当某个任务卡在一次 `recv()` 上时，
+**该连接上后续所有请求都会超时**。
+
+本分支重写为**单后台读循环架构**：一个 reader 线程统一分发所有响应，
+`send()` 只负责投递 + 等待自己的 id，并带写超时；读线程若死亡会唤醒全部等待者并明确报错。
+一个任务卡死不再拖垮其他请求。
+
+### 三、参数的入参校验
+
+上游对非法参数「照单全收」，往往在生成阶段才失败（用户白等几分钟）：
+
+- `validate_video_duration()` —— 视频时长白名单校验
+- `validate_size()` —— 图片/视频尺寸与宽高比校验（超出 64~8192 直接拒绝）
+- `validate_reference_image()` —— 参考图仅接受 `http(s)` URL / data URI / base64，其余入口即拒
+
+### 四、鉴权加固
+
+- **修复 405 鉴权绕过**：Starlette 对不支持的 HTTP 方法会在 **FastAPI 依赖注入之前**返回 405，
+  导致未授权请求也能探测到接口是否存在。本分支加了一层 `_guard_method_not_allowed`
+  中间件，在任何 405 之前先校验 Bearer token。
+
+### 五、更诚实的进度语义
+
+- **移除伪造的 92% 进度**：上游对运行中的任务用 `min(92, 20 + elapsed * 1.1)` 计算进度，
+  于是一个**早已卡死的任务**会永远对外显示「92%，快好了」，客户端被无限期欺骗。
+  本分支队列中的任务如实返回 `{"status": "queued", "progress": 0, "stage": "queued"}`。
+- **新增 `stalled` 状态**：任务超过 120s 无任何进展（基于 `updated_at` 空闲时长，而非 progress 值）
+  才判定为疑似卡死，返回 `status: "stalled"`。**不会误伤慢任务**——正常长任务会持续刷新 `updated_at`。
+- 新增 `stage` 字段（`queued` / `rendering` / `done` / `failed` / `stalled`），是对原 `status` 的补充，
+  老客户端读 `status` 不受影响。
+
+### 六、前端 DOM 解析修正
+
+- 回复计数过滤**空骨架气泡**（页面上存在同类的占位元素），修正回复数虚高。
+- `reset_thread` 的 `bubbleCount` 只统计主聊天区，未就绪时显式报错而非静默继续。
+
+### 兼容性
+
+- 所有改动都在原语义上**收紧**（原本被错误接受的输入现在被拒），**合法请求行为不变**。
+- 新增 `stage` 字段是对 `status` 的补充，不是替换。
+- `scheduler.py` 为新增文件，`Dockerfile` 已同步 `COPY` 行；用 Docker 部署无需额外操作。
+
+### 同步上游
+
+若上游合入了 PR #4 或发布了新版本，本分支同步方式：
+
+```bash
+git remote add upstream https://github.com/czg86389-hub/muse2api.git
+git fetch upstream
+git merge upstream/main          # 或 git rebase upstream/main
+```
+
+---
 
 ## 媒体选择回归测试
 
