@@ -272,7 +272,16 @@ class MuseEngine:
 
     def reset_thread(self, for_chat: bool = False):
         """关闭残留弹窗并确保处于干净会话且 WebSocket 已就绪。
-        对于纯文本对话（for_chat=True），若当前热页面无附件、无卡死且气泡数较少，直接复用现有热连接以实现 2s 级秒回。"""
+        对于纯文本对话（for_chat=True），若当前热页面无附件、无卡死且气泡数较少，直接复用现有热连接以实现 2s 级秒回。
+
+        修复（缺陷6B 前置条件）：
+          * `bubbleCount` 原本统计**整页**的 `hatch-chat-groupable-bubble`，
+            会连同左侧 thread 列表/历史一起计入（实测可达 24+），从而**误判需要导航**。
+            现在只统计**主对话区**内的气泡。
+          * 导航后若 10s 内未就绪，**不能再静默继续**（原 `pass`）——
+            那会让后续 `_send` 打在一个半加载的页面上，进而触发 CDP 挂起。
+            现在改为多等一轮 `_wait_ws_ready`，仍在失败时抛错让上层切号/重试。
+        """
         if not self.page:
             return
         try:
@@ -282,7 +291,12 @@ class MuseEngine:
                     var b = d.querySelector('button[aria-label*="close" i], button');
                     if (b) b.click();
                 }
-                var bubbleCount = document.querySelectorAll('div[class*="hatch-chat-groupable-bubble"]').length;
+                // 只统计主对话区（排除侧栏 thread 列表）：优先找主滚动容器
+                var scope = document.querySelector('main,[class*="chat-scroll"],[class*="hatch-chat-scroll"]')
+                            || document.body;
+                var bubbleCount = scope
+                    ? scope.querySelectorAll('div[class*="hatch-chat-groupable-bubble"]').length
+                    : 0;
                 var hasAtts = document.querySelectorAll('[data-testid^="hatch-chat-attachment-presentation-"]').length > 0;
                 var hasStop = !!document.querySelector('button[aria-label*="Stop" i]');
                 var bodyTxt = document.body ? (document.body.innerText || '') : '';
@@ -296,17 +310,23 @@ class MuseEngine:
             if needs_nav:
                 self.page.send("Page.navigate", {"url": "https://muse.ai/thread/new"})
                 t_end = time.time() + 10.0
+                ready = False
                 while time.time() < t_end:
                     time.sleep(0.08)
-                    ready = self.page.js("""(function(){
+                    ready = bool(self.page.js("""(function(){
                         return document.readyState === 'complete'
                             && !!document.querySelector('textarea')
                             && document.querySelectorAll('div[class*="hatch-chat-groupable-bubble"]').length === 0;
-                    })()""")
+                    })()"""))
                     if ready:
                         break
+                if not ready:
+                    raise MuseGenerationError(
+                        "重置会话失败：页面在 10s 内未回到干净的 /thread/new（可能需要重新登录或账号 VM 异常）")
                 self._wait_ws_ready(self.page, timeout=12.0)
-        except Exception:
+        except MuseGenerationError:
+            raise
+        except Exception:  # noqa: BLE001
             pass
 
     def ensure_page(self, cookies: dict, expires: dict | None = None, account_id: str | None = None):
@@ -680,7 +700,9 @@ class MuseEngine:
                         return att
             elapsed = time.time() - t_start
             if on_progress:
-                prog = min(92, int(25 + elapsed * 1.0))
+                # 渐进逼近 95 而非在 92 处饱和：避免「任务明明还在跑、
+                # 进度却纹丝不动」被误判成卡死（长视频实测会跑 5~10 分钟）。
+                prog = min(95, int(25 + elapsed * 0.6))
                 try:
                     on_progress(prog)
                 except Exception:
@@ -751,7 +773,10 @@ class MuseEngine:
         "'div[class*=\"hatch-chat-groupable-bubble\"]'));"
         "for(var i=bs.length-1;i>=0;i--){"
         "var cs=bs[i].className||'';"
-        "if(/hatch-agent-bubble-bg/.test(cs))return bs[i].innerText||'';}"
+        # 修复（缺陷6A）：跳过空骨架气泡，取最后一个**内容非空**的助手气泡文本。
+        "if(/hatch-agent-bubble-bg/.test(cs)){"
+        "var t=(bs[i].innerText||'').trim();"
+        "if(t.length>0)return bs[i].innerText||'';}}"
         "return '';})()"
     )
     _USER_COUNT_JS = (
@@ -767,9 +792,17 @@ class MuseEngine:
         "var bs=[].slice.call(document.querySelectorAll("
         "'div[class*=\"hatch-chat-groupable-bubble\"]'));"
         "var n=0;for(var i=0;i<bs.length;i++){"
-        "if(/hatch-agent-bubble-bg/.test(bs[i].className||''))n++;}"
+        "if(/hatch-agent-bubble-bg/.test(bs[i].className||'')){"
+        # 修复（缺陷6A）：只统计**内容非空**的助手气泡，跳过 muse.ai 的骨架/占位气泡，
+        # 保证 base_agent 基线与 _poll_chat 的 cnt 口径一致（否则基线漂移会误判首字）。
+        "if(((bs[i].innerText||'').trim().length)>0)n++;}}"
         "return String(n);})()"
     )
+    # 修复（缺陷6A）：原实现取「最后一个」agent 气泡的 innerText，
+    # 但 muse.ai 会在真实回复之后渲染一个空的骨架/占位气泡（innerText 为空），
+    # 导致 txt 恒为空 ⇒ chat_stream 的 `if cnt > base_agent and cur:` 永假 ⇒ 永远判不到首字。
+    # 现在先过滤掉「无文本气泡」，再取最后一个**内容非空**的 agent 气泡。
+    # 同时返回真实计数（仅含非空气泡），避免骨架气泡污染 cnt 判定。
     _POLL_CHAT_JS = (
         "(function(){"
         "var els=[...document.querySelectorAll('*')].filter(function(e){"
@@ -777,11 +810,13 @@ class MuseEngine:
         "return (s.overflowY==='auto'||s.overflowY==='scroll')&&e.scrollHeight>e.clientHeight+100;});"
         "els.sort(function(a,b){return b.scrollHeight-a.scrollHeight;});"
         "if(els[0])els[0].scrollTop=els[0].scrollHeight;"
-        "var bs=[].slice.call(document.querySelectorAll('div[class*=\"hatch-chat-groupable-bubble\"]'))"
+        "var all=[].slice.call(document.querySelectorAll('div[class*=\"hatch-chat-groupable-bubble\"]'))"
         ".filter(function(b){return /hatch-agent-bubble-bg/.test(b.className||'');});"
-        "var txt=bs.length?(bs[bs.length-1].innerText||'').trim():'';"
+        "var nonEmpty=all.filter(function(b){return ((b.innerText||'').trim().length)>0;});"
+        "var txt=nonEmpty.length?(nonEmpty[nonEmpty.length-1].innerText||'').trim():'';"
         "var stop=!!document.querySelector('button[aria-label*=\"Stop\" i]');"
-        "return JSON.stringify({cnt:bs.length,txt:txt,stop:stop});})()"
+        "return JSON.stringify({cnt:nonEmpty.length,"
+        "total:all.length,empty:all.length-nonEmpty.length,txt:txt,stop:stop});})()"
     )
 
     def _agent_text(self) -> str:

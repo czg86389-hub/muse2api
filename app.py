@@ -46,6 +46,7 @@ from pydantic import BaseModel, Field
 
 from config import CFG
 from engine import ESSENTIAL_COOKIES, MuseAuthError, MuseEngine, MuseGenerationError
+from scheduler import ST_DONE, ST_FAILED, ST_QUEUED, ST_RUNNING, ST_TIMEOUT, Scheduler
 from store import Store, account_expiry, min_expiry
 
 import sys
@@ -77,9 +78,33 @@ app.add_middleware(CORSMiddleware,
 
 store = Store(CFG)
 engine = MuseEngine(CFG)
+
+# 浏览器只有 1 个实例，所有生成路径必须串行。
+# GEN_LOCK 是那把真正的互斥锁；SCHED 是架在它上面的 FIFO 队列调度器。
+# 详见 scheduler.py 顶部注释（修缺陷 3 / 4 / 10）。
 GEN_LOCK = threading.Lock()
+# 图片任务准入与幂等判定的专用锁：只保护 store 里图片任务的「查重 + 建任务」
+# 这段临界区，与浏览器串行无关，因此独立于 GEN_LOCK。
 IMAGE_TASK_LOCK = threading.Lock()
+# run_timeout：单任务执行看门狗（缺陷 4 兜底）。
+# 语义是「engine 自己的超时（video 默认 600s）应先生效」；看门狗只处理
+# engine 连自己的超时都没走完就卡死的情况，所以取 video_timeout + 300s 余量。
+# 之前设成 *2（1200s）过长 —— 真出问题时用户要等 20 分钟才看到失败。
+SCHED = Scheduler(GEN_LOCK, max_queue=100, queue_timeout=900,
+                  run_timeout=CFG.video_timeout + 300)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _on_sched_run_timeout(job):
+    """调度器看门狗触发：强杀浏览器，打断卡死的生成，释放锁。"""
+    log.error("【看门狗】强制重启浏览器以打断卡死任务: %s", getattr(job, "label", "?"))
+    try:
+        engine.stop()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("【看门狗】engine.stop() 异常: %s", exc)
+
+
+SCHED.on_run_timeout = _on_sched_run_timeout
 
 
 # ------------------------- OpenAI 风格的错误响应 -------------------------
@@ -117,6 +142,46 @@ async def _validation_exc(request: Request, exc: RequestValidationError):
             "message": "请求参数校验失败：" + str(exc.errors())[:400],
             "type": "invalid_request_error", "param": None, "code": 422}})
     return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
+
+# ------------------------- 405 鉴权旁路修复（缺陷 11） -------------------------
+# 问题：Starlette 的 405 Method Not Allowed 是在「路由匹配阶段」直接返回的，
+# 早于 FastAPI 的依赖注入 —— 也就是说 `Depends(auth)` 根本没跑。
+# 结果：未授权的人只要用错方法（比如对 /v1/videos 发 GET），
+# 就能根据 405 / 200 / 404 的差异枚举出服务到底有哪些端点。
+#
+# 修法：加一层最外层中间件，凡是命中 /v1/* 且最终返回 405 的请求，
+# 先做一次鉴权；鉴权不过直接返回 401，不再泄露「这个方法不行」的信号。
+@app.middleware("http")
+async def _guard_method_not_allowed(request: Request, call_next):
+    response = await call_next(request)
+    if (response.status_code == 405
+            and request.url.path.startswith("/v1/")):
+        auth_err = _check_bearer(request.headers.get("authorization"))
+        if auth_err is not None:
+            return JSONResponse(
+                status_code=401,
+                content={"error": {"message": auth_err,
+                                   "type": "invalid_request_error",
+                                   "param": None, "code": 401}})
+    return response
+
+
+def _check_bearer(authorization: str | None) -> str | None:
+    """返回 None 表示鉴权通过；否则返回错误信息字符串。
+
+    必须与 `auth()` 的判定逻辑保持一致，否则会出现
+    「405 路径放行了但真实请求仍被拒」的不一致。
+    """
+    if not CFG.api_key:
+        return None
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return "缺少 Authorization: Bearer <key>"
+    parts = authorization.split(None, 1)
+    token = parts[1].strip() if len(parts) > 1 else ""
+    if not token or token != CFG.api_key:
+        return "API key 无效"
+    return None
 
 MODELS = [
     {"id": "muse-spark", "object": "model", "owned_by": "muse",
@@ -214,14 +279,23 @@ def _renew_and_persist(acc_id: str, wake_vm: bool = True, force: bool = False) -
 
 def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
                      timeout: int, account_id: str | None):
-    """在独立线程中执行 chat_stream 并持有 GEN_LOCK，通过 Queue 往外吐。
-    无论下游客户端何时断连、异常或超时，stop_event + finally 块保证 100% 立即释放 GEN_LOCK，绝不死锁。
-    若首字前遇到单账号 VM 卡死或会话异常，自动切换下一个健康账号重试一次。"""
+    """在独立线程中执行 chat_stream，通过 Queue 往外吐增量文本。
+
+    **锁的获取方式已改**：不再由本函数内的线程直接 `with GEN_LOCK`
+    抢占，而是把「整段生成」作为一个 job 提交给 SCHED（FIFO 单 worker），
+    由 worker 在持锁状态下执行。这样 chat / image / video 三条路径
+    都走同一条公平队列，先来先得（修缺陷 3 / 10）。
+
+    无论下游客户端何时断连、异常或超时，stop_event + finally 块保证
+    100% 立即释放锁并让出 worker，绝不死锁。
+    若首字前遇到单账号 VM 卡死或会话异常，自动切换下一个健康账号重试一次。
+    """
     import queue
     q = queue.Queue(maxsize=100)
     stop_event = threading.Event()
 
-    def worker():
+    def job():
+        """由调度器 worker 在持锁状态下执行；负责跑完整个生成过程。"""
         cur_id = account_id
         cur_cookies = cookies
         cur_exp = expires
@@ -245,18 +319,17 @@ def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
                         if refreshed:
                             cur_cookies = refreshed["cookies"]
                             cur_exp = refreshed.get("cookies_exp")
-                    with GEN_LOCK:
+                    if stop_event.is_set():
+                        return
+                    engine.start()
+                    for chunk in engine.chat_stream(
+                        cur_cookies, prompt, cur_exp, timeout,
+                        account_id=cur_id, stop_event=stop_event
+                    ):
+                        yielded = True
+                        q.put(("data", chunk))
                         if stop_event.is_set():
                             return
-                        engine.start()
-                        for chunk in engine.chat_stream(
-                            cur_cookies, prompt, cur_exp, timeout,
-                            account_id=cur_id, stop_event=stop_event
-                        ):
-                            yielded = True
-                            q.put(("data", chunk))
-                            if stop_event.is_set():
-                                return
                     if cur_id:
                         store.mark(cur_id, True, "")
                         _sync_cookies(cur_id)
@@ -280,7 +353,10 @@ def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
         finally:
             q.put(("done", None))
 
-    threading.Thread(target=worker, daemon=True).start()
+    try:
+        SCHED.submit(job, label="chat")
+    except Exception:  # noqa: BLE001  # 队列满
+        raise MuseGenerationError("生成队列已满，请稍后重试")
 
     try:
         while True:
@@ -293,6 +369,92 @@ def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
                 break
     finally:
         stop_event.set()
+
+
+# ------------------------- 参数校验（修缺陷 1 / 2 / 8） -------------------------
+# 实测背景：
+#   * 缺陷 1 —— `duration` 原为裸 int，传 999 / 0 / -1 都被静默接受，
+#     最终拼进提示词交给 muse.ai，产出与预期严重不符且无任何报错。
+#   * 缺陷 2 —— `size` 原为裸 str，传任意字符串都被原样写进提示词。
+#   * 缺陷 8 —— `reference_image` / `image` 传非法内容（不是图片、URL 打不开、
+#     base64 乱码）时，`_normalize_image` 失败后**静默返回空**，任务照样往下跑，
+#     白等 1.5~3 倍时间才失败（实测 194.7s）。
+# 这里统一做「入口即校验」，把非法输入在提交阶段就打回去。
+_VIDEO_DURATIONS = {5, 6, 10}          # muse.ai 网页实际可选的时长档位
+_VALID_IMAGE_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp",
+                     "image/gif", "image/bmp"}
+_MAX_REF_BYTES = 20 * 1024 * 1024      # 参考图上限 20MB
+
+
+def validate_video_duration(d: int | None) -> int:
+    """校验并归一视频时长。缺陷 1。"""
+    if d is None:
+        return 6
+    try:
+        di = int(d)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"duration 必须是整数，收到: {d!r}")
+    if di not in _VIDEO_DURATIONS:
+        raise HTTPException(
+            400,
+            f"不支持的 duration={di}，仅支持 {sorted(_VIDEO_DURATIONS)} 秒")
+    return di
+
+
+def validate_size(size: str | None, aspect_ratio: str | None) -> None:
+    """校验尺寸/比例字符串。缺陷 2。"""
+    s = (size or "").strip().lower()
+    if not s:
+        return
+    # 允许 "auto" / "WxH" / 常见比例 "16:9"
+    if s == "auto":
+        return
+    if re.fullmatch(r"\d{2,5}x\d{2,5}", s):
+        w, h = (int(x) for x in s.split("x"))
+        if not (64 <= w <= 8192 and 64 <= h <= 8192):
+            raise HTTPException(400, f"size 尺寸超出范围(64~8192): {size!r}")
+        return
+    if re.fullmatch(r"\d{1,2}[:/]\d{1,2}", s):
+        return
+    if any(k in s for k in ("portrait", "landscape", "square", "竖屏", "横屏", "正方形")):
+        return
+    raise HTTPException(400, f"无法识别的 size/aspect_ratio: {size!r}")
+
+
+def validate_reference_image(ref: str | None) -> str | None:
+    """校验参考图输入。缺陷 8。
+
+    只做「轻量校验」——不下载远程图、不解码大 base64，避免在请求线程里
+    产生新的长阻塞；真正无法使用的输入会在生成阶段被 MuseGenerationError
+    明确抛出，而不是像以前那样静默忽略继续跑。
+    返回归一后的字符串（可能带 400 抛错）。
+    """
+    if ref is None:
+        return None
+    if not isinstance(ref, str):
+        raise HTTPException(400, "reference_image 必须是字符串（URL / data URI / base64）")
+    s = ref.strip()
+    if not s:
+        return None
+    if len(s) > _MAX_REF_BYTES * 2:   # base64 膨胀约 4/3，留余量
+        raise HTTPException(400, f"参考图数据过大（>{_MAX_REF_BYTES // 1024 // 1024}MB）")
+    if s.startswith("data:"):
+        head = s.split(",", 1)[0]
+        mime = head.split(";")[0].replace("data:", "").strip().lower()
+        if mime and mime not in _VALID_IMAGE_MIME:
+            raise HTTPException(400, f"参考图 MIME 不受支持: {mime}")
+        if "," not in s or not s.split(",", 1)[1].strip():
+            raise HTTPException(400, "data URI 参考图内容为空")
+        return s
+    if s.startswith(("http://", "https://")):
+        return s
+    # 纯 base64（无 data: 前缀）：粗略校验字符集与长度
+    if re.fullmatch(r"[A-Za-z0-9+/=\s]+", s):
+        if len(s) < 32:
+            raise HTTPException(400, "base64 参考图数据过短，疑似非法")
+        return s
+    raise HTTPException(
+        400, "reference_image 无法识别，仅支持 http(s) URL / data URI / base64")
 
 
 class ImageRequest(BaseModel):
@@ -739,15 +901,16 @@ def _pos(v) -> bool:
 def _run_generation(prompt: str, kind: str, timeout: int,
                     account_id: str | None = None, on_progress=None,
                     reference_image: str | None = None) -> tuple[dict, str | None]:
-    # Browser ownership covers account selection, retry and cleanup, not just generate().
+    # 锁契约（重要）：本函数假定调用方已持有 GEN_LOCK，自身不再抢锁。
+    # 正确调用方式是经由 `_sched_run(...)` / `SCHED.submit(...)` 提交成 job，
+    # 由调度器 worker 在持锁状态下调用。若直接在线程里裸调，
+    # 会与其它生成任务并发争抢同一个浏览器，导致串话。
+    #
+    # 上游原先在此处 `GEN_LOCK.acquire(timeout=...)`；因 GEN_LOCK 不可重入，
+    # 调度器 worker 已持锁后再抢会永久自锁，故抢锁职责上移至调度器。
     deadline = time.monotonic() + max(1, timeout)
-    if not GEN_LOCK.acquire(timeout=max(1, timeout)):
-        raise MuseGenerationError("等待浏览器队列超时，请稍后重试")
-    try:
-        return _run_generation_locked(prompt, kind, timeout, account_id,
-                                      on_progress, reference_image, deadline=deadline)
-    finally:
-        GEN_LOCK.release()
+    return _run_generation_locked(prompt, kind, timeout, account_id,
+                                  on_progress, reference_image, deadline=deadline)
 
 
 def _run_generation_locked(prompt: str, kind: str, timeout: int,
@@ -869,13 +1032,21 @@ def _queue_image(req: ImageRequest, prompt: str, reference_image: str | None,
                           image_request_key=key_hash, image_request_hash=request_hash)
 
     def worker():
+        # 经 FIFO 调度器排队执行（与 chat/video 共用一条队列，单 worker 持锁）。
+        # 不可直接裸调 _run_generation —— 该函数假定调用方已持锁。
+        # 注意 progress=5 的「已开始处理」要等真正拿到执行权后再打，
+        # 否则排队期间就显示 processing 会误导用户（缺陷 9 同类问题）。
         t0 = time.time()
-        store.update_task(tid, status="processing", progress=5)
         try:
-            res, acc_id = _run_generation(
-                prompt, "image", req.timeout or CFG.image_timeout,
-                reference_image=reference_image,
-                on_progress=lambda p: store.update_task(tid, progress=p))
+            def _do():
+                store.update_task(tid, status="processing", progress=5)
+                return _run_generation(
+                    prompt, "image", req.timeout or CFG.image_timeout,
+                    reference_image=reference_image,
+                    on_progress=lambda p: store.update_task(tid, progress=p))
+
+            res, acc_id = _run_generation_sched(
+                _do, label="image:%s" % tid[-8:])
             # Store only media metadata, not large base64 payloads or reference credentials.
             store.update_task(tid, status="completed", progress=100, account=acc_id,
                               elapsed=round(time.time() - t0, 1),
@@ -916,6 +1087,49 @@ def get_image_task(task_id: str, _=Depends(auth)):
         out.update(_image_response(req, out["result"]))
     return out
 
+def _run_generation_sched(fn, label: str = "gen", timeout: float | None = None):
+    """同步提交给 FIFO 调度器并阻塞等待结果。
+
+    供**在独立线程中、无法 await** 的调用方使用（如 _queue_image 的 worker）。
+    与 async 版 `_sched_run` 语义一致：进入 SCHED 排队 → 由单 worker 持
+    GEN_LOCK 执行 → 返回结果。这样图片与 chat/video 共用同一条队列，
+    不会绕过调度器裸抢浏览器。
+    """
+    return SCHED.run_sync(fn, label=label, timeout=timeout)
+
+
+async def _sched_run(fn, label: str):
+    """把「需要占浏览器的同步生成函数」提交给 FIFO 调度器并 await 结果。
+
+    这样生图请求不再用裸锁抢，而是与 chat/video 一起排队（修缺陷 3 / 10）。
+    并行请求会按提交顺序执行，且不会出现线程饥饿。
+    """
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future = loop.create_future()
+
+    def wrapped():
+        if fut.cancelled():
+            return
+        try:
+            result = fn()
+        except BaseException as exc:  # noqa: BLE001
+            loop.call_soon_threadsafe(_safe_set_exc, fut, exc)
+        else:
+            loop.call_soon_threadsafe(_safe_set_result, fut, result)
+
+    SCHED.submit(wrapped, label=label)
+    return await fut
+
+
+def _safe_set_result(fut: asyncio.Future, value):
+    if not fut.done():
+        fut.set_result(value)
+
+
+def _safe_set_exc(fut: asyncio.Future, exc: BaseException):
+    if not fut.done():
+        fut.set_exception(exc)
+
 
 @app.post("/v1/images/generations")
 async def images_generations(req: ImageRequest, _=Depends(auth)):
@@ -926,12 +1140,17 @@ async def images_generations(req: ImageRequest, _=Depends(auth)):
         first = req.images[0]
         ref_img = first.get("image_url") or first.get("url") if isinstance(first, dict) else first
 
+    validate_size(req.size, req.aspect_ratio)     # 缺陷 2
+    ref_img = validate_reference_image(ref_img)   # 缺陷 8
+
     prompt = build_image_prompt(req)
     timeout = req.timeout or CFG.image_timeout
     if req.async_:
         return _queue_image(req, prompt, ref_img)
     try:
-        res, _acc = await asyncio.to_thread(_run_generation, prompt, "image", timeout, reference_image=ref_img)
+        res, _acc = await _sched_run(
+            lambda: _run_generation(prompt, "image", timeout, reference_image=ref_img),
+            label="image")
     except MuseAuthError as exc:
         raise HTTPException(401, str(exc)) from exc
     except MuseGenerationError as exc:
@@ -1014,7 +1233,10 @@ async def images_edits(request: Request, _=Depends(auth)):
     if req_obj.async_:
         return _queue_image(req_obj, full_prompt, ref_image_data)
     try:
-        res, _acc = await asyncio.to_thread(_run_generation, full_prompt, "image", gen_timeout, reference_image=ref_image_data)
+        res, _acc = await _sched_run(
+            lambda: _run_generation(full_prompt, "image", gen_timeout,
+                                    reference_image=ref_image_data),
+            label="image")
     except MuseAuthError as exc:
         raise HTTPException(401, str(exc)) from exc
     except MuseGenerationError as exc:
@@ -1027,6 +1249,9 @@ async def images_edits(request: Request, _=Depends(auth)):
 @app.post("/v1/videos")
 @app.post("/v1/videos/generations")
 async def create_video(req: VideoRequest, _=Depends(auth)):
+    # ---- 入口校验（修缺陷 1 / 2 / 8）----
+    validate_video_duration(req.duration)          # 缺陷 1：时长白名单
+    validate_size(req.size, req.aspect_ratio)      # 缺陷 2：尺寸/比例校验
     ref_img = None
     if req.reference_image:
         ref_img = req.reference_image
@@ -1035,22 +1260,28 @@ async def create_video(req: VideoRequest, _=Depends(auth)):
     elif req.image:
         ref_img = req.image.get("url") if isinstance(req.image, dict) else req.image
 
+    ref_img = validate_reference_image(ref_img)   # 缺陷 8：非法参考图入口即拒
+
     prompt = build_video_prompt(req)
     timeout = req.timeout or CFG.video_timeout
     task = store.create_task("video", req.prompt)
-    store.update_task(task["id"], api_prompt=prompt)
+    store.update_task(task["id"], api_prompt=prompt,
+                      status=ST_QUEUED, progress=0, stage="queued")
 
-    store.update_task(task["id"], progress=10)
-
-    def worker():
-        store.update_task(task["id"], status="processing", progress=15)
+    def job():
+        """由调度器 worker 在持锁状态下执行。"""
+        store.update_task(task["id"], status=ST_RUNNING, progress=10,
+                          stage="rendering")
         t0 = time.time()
         try:
             def prog_cb(p):
-                store.update_task(task["id"], progress=p)
-            res, acc_id = _run_generation(prompt, "video", timeout, on_progress=prog_cb, reference_image=ref_img)
+                store.update_task(task["id"], progress=p, stage="rendering")
+            res, acc_id = _run_generation(prompt, "video", timeout,
+                                          on_progress=prog_cb, reference_image=ref_img)
             vurl = media_url(res["filename"])
-            store.update_task(task["id"], status="completed", progress=100, account=acc_id,
+            store.update_task(task["id"], status=ST_DONE, progress=100,
+                              stage="done",
+                              account=acc_id,
                               elapsed=round(time.time() - t0, 1),
                               url=vurl,
                               video={"url": vurl},
@@ -1058,12 +1289,20 @@ async def create_video(req: VideoRequest, _=Depends(auth)):
                                       "filename": res["filename"],
                                       "bytes": res["size"], "kind": res["kind"]})
         except Exception as exc:  # noqa: BLE001
-            store.update_task(task["id"], status="failed",
+            store.update_task(task["id"], status=ST_FAILED, stage="failed",
                               elapsed=round(time.time() - t0, 1), error=str(exc))
 
-    threading.Thread(target=worker, daemon=True).start()
-    return {"id": task["id"], "task_id": task["id"], "object": "video.task", "status": "queued",
-            "progress": 10, "created_at": task["created_at"]}
+    try:
+        SCHED.submit(job, label=f"video:{task['id'][-8:]}")
+    except Exception as exc:  # noqa: BLE001  # 队列满
+        store.update_task(task["id"], status=ST_FAILED, stage="rejected",
+                          error=f"服务繁忙，生成队列已满: {exc}")
+        raise HTTPException(503, "生成队列已满，请稍后重试") from exc
+
+    return {"id": task["id"], "task_id": task["id"], "object": "video.task",
+            "status": ST_QUEUED, "progress": 0,
+            "queue_size": SCHED.queue_size,
+            "created_at": task["created_at"]}
 
 
 @app.get("/v1/videos/{task_id}")
@@ -1075,13 +1314,24 @@ def get_video(task_id: str, _=Depends(auth)):
     out = dict(t)
     status = out.get("status")
     if status in ("succeeded", "success", "done"):
-        out["status"] = "completed"
-    if out.get("status") == "completed":
+        out["status"] = ST_DONE
+    out.setdefault("stage", out.get("status"))
+
+    if out.get("status") == ST_DONE:
         out["progress"] = 100
-    elif out.get("status") == "processing":
-        elapsed = time.time() - out.get("created_at", time.time())
-        calc_prog = min(92, int(20 + elapsed * 1.1))
-        out["progress"] = max(out.get("progress", 0) or 0, calc_prog)
+    elif out.get("status") == ST_RUNNING:
+        # 注意：**不再伪造进度**。旧实现在这里按 elapsed 编造
+        # `min(92, 20 + elapsed*1.1)`，导致一个早就卡死的僵尸任务
+        # 对外永远显示 92%「快要好了」，客户端被无限期欺骗（缺陷 9）。
+        # 现在只回传 worker 真实写入的 progress；若长时间无推进，
+        # 明确标记 stalled，让调用方能识别并放弃。
+        last = out.get("updated_at") or out.get("created_at") or time.time()
+        idle = time.time() - last
+        out["idle_seconds"] = round(idle, 1)
+        if idle > 120:
+            out["status"] = "stalled"
+            out["stage"] = "stalled"
+            out["error"] = f"任务已 {int(idle)}s 无任何进展，疑似浏览器会话卡死"
     vurl = out.get("url")
     if not vurl and isinstance(out.get("result"), dict):
         vurl = out["result"].get("url")
@@ -1396,6 +1646,7 @@ def admin_status(_=Depends(auth)):
         if os.path.isdir(CFG.media_dir) else 0,
         "browser_running": bool(engine.proc and engine.proc.poll() is None),
         "essential_cookies": list(ESSENTIAL_COOKIES),
+        "scheduler": SCHED.stats(),
         "base_url": f"{base}/v1",
         "config": {"site": CFG.site_url, "cdp_port": CFG.cdp_port,
                    "image_timeout": CFG.image_timeout,
@@ -1406,6 +1657,12 @@ def admin_status(_=Depends(auth)):
 
 
 # ------------------------- 管理：账号池 -------------------------
+@app.get("/admin/scheduler")
+def admin_scheduler(_=Depends(auth)):
+    """生成调度器观测：队列长度、正在跑的任务、累计指标（修缺陷 4 可观测性）。"""
+    return SCHED.stats()
+
+
 @app.get("/admin/accounts")
 def list_accounts(_=Depends(auth)):
     return {"accounts": store.list_accounts(), "stats": store.stats()}
@@ -2223,9 +2480,11 @@ async def _startup():
         CFG.api_key = new_key
         _persist_env("MUSE2API_KEY", new_key)
         log.info("🔑 未检测到 MUSE2API_KEY，已自动生成初始密钥: %s", new_key)
+    SCHED.start()
     asyncio.create_task(_keepalive_loop())
 
 
 @app.on_event("shutdown")
 def _shutdown():
+    SCHED.stop()
     engine.stop()
