@@ -300,7 +300,9 @@ class MuseEngine:
                 var scope = document.querySelector('main,[class*="chat-scroll"],[class*="hatch-chat-scroll"]') || document.body;
                 var bubbleCount = scope ? scope.querySelectorAll('div[class*="hatch-chat-groupable-bubble"]').length : 0;
                 var hasAtts = document.querySelectorAll('[data-testid^="hatch-chat-attachment-presentation-"]').length > 0;
-                var hasStop = !!document.querySelector('button[aria-label*="Stop" i]');
+                var hasStop = !!(document.querySelector('[data-testid="hatch-composer-stop-button"]')
+                    || document.querySelector('button[aria-label*="Stop" i]')
+                    || document.querySelector('button[aria-label*="停止"]'));
                 var bodyTxt = document.body ? (document.body.innerText || '') : '';
                 var hasStuck = bodyTxt.indexOf('Still sending') !== -1 || bodyTxt.indexOf('Connecting...') !== -1;
                 if (hasStop || hasStuck || hasAtts) return true;
@@ -666,13 +668,36 @@ class MuseEngine:
         t_start = time.time()
         stable_src, stable_n = "", 0
         last_txt, txt_stable = "", 0
+        fallback_since = 0.0
         while time.time() < deadline:
             if stop_event is not None and stop_event.is_set():
                 raise MuseGenerationError("客户端已断开连接，终止生成任务")
             time.sleep(0.6)
             self._scroll_bottom()
             atts = self.attachments()
-            att = atts[-1] if atts else None
+            # 按期望类型挑选候选：视频请求优先挑带 video 的附件；
+            # 若无匹配（muse 有时先渲染封面静帧），先记下图片兜底，
+            # 再给视频节点一段宽限期，避免把封面 img 误当成品返回。
+            att = None
+            fallback_att = None
+            if atts:
+                def _score(a):
+                    tid = (a.get("tid") or "").lower()
+                    has_video = bool(a.get("hasVideo"))
+                    if expect == "video":
+                        return 2 if (has_video or "video" in tid) else 1
+                    return 2 if (("image" in tid) or (not has_video)) else 1
+                best = max(atts, key=_score)
+                if _score(best) >= 2:
+                    att = best
+                else:
+                    fallback_att = atts[-1]
+            if att is None and fallback_att is not None and expect == "video":
+                # 图片兜底：只有宽限期内仍未出现视频节点才接受
+                if fallback_since == 0.0:
+                    fallback_since = time.time()
+                if time.time() - fallback_since >= 15.0:
+                    att = fallback_att
             if att:
                 src = att.get("src") or ""
                 v_src = att.get("vSrc") or ""
@@ -680,7 +705,12 @@ class MuseEngine:
                 w = att.get("w", 0) or 0
                 h = att.get("h", 0) or 0
                 has_video = att.get("hasVideo", False)
-                if expect == "video":
+                is_fallback = att is fallback_att and att is not None and not (
+                    has_video or "video" in (tid or "").lower()
+                ) and expect == "video"
+                if is_fallback:
+                    want = True  # 宽限期已过，接受图片兜底结果
+                elif expect == "video":
                     want = has_video or ("video" in tid) or ("video" in src) or ("video" in v_src) or src.endswith((".mp4", ".webm", ".mov"))
                 else:
                     want = ("image" in tid) or (not has_video)
@@ -706,7 +736,9 @@ class MuseEngine:
                     var bs=[].slice.call(document.querySelectorAll('div[class*="hatch-chat-groupable-bubble"]'))
                         .filter(function(b){return /hatch-agent-bubble-bg/.test(b.className||'');});
                     var lastTxt = bs.length ? (bs[bs.length-1].innerText||'').trim() : '';
-                    var hasStop = !!document.querySelector('button[aria-label*="Stop" i]');
+                    var hasStop = !!(document.querySelector('[data-testid="hatch-composer-stop-button"]')
+                        || document.querySelector('button[aria-label*="Stop" i]')
+                        || document.querySelector('button[aria-label*="停止"]'));
                     var tail = document.body ? (document.body.innerText||'').slice(-700) : '';
                     return JSON.stringify({cnt: bs.length, txt: lastTxt, stop: hasStop, tail: tail});
                 })()""")
@@ -798,7 +830,9 @@ class MuseEngine:
         ".filter(function(b){return /hatch-agent-bubble-bg/.test(b.className||'');});"
         "var nonEmpty=bs.filter(function(b){return ((b.innerText||'').trim().length)>0;});"
         "var txt=nonEmpty.length?(nonEmpty[nonEmpty.length-1].innerText||'').trim():'';"
-        "var stop=!!document.querySelector('button[aria-label*=\"Stop\" i]');"
+        "var stop=!!(document.querySelector('[data-testid=\"hatch-composer-stop-button\"]')"
+        "||document.querySelector('button[aria-label*=\"Stop\" i]')"
+        "||document.querySelector('button[aria-label*=\"停止\"]'));"
         "return JSON.stringify({cnt:nonEmpty.length,total:bs.length,txt:txt,stop:stop});})()"
     )
 
@@ -987,16 +1021,16 @@ class MuseEngine:
         return img, "image/png"
 
     def _clear_attachments(self):
-        """清除聊天输入框里遗留的附件缩略图。"""
+        """清除聊天输入框里遗留的附件缩略图（兼容中/英文 UI）。"""
         try:
             self.page.js(
                 "(function(){"
-                "var btns=Array.from(document.querySelectorAll('button')).filter(function(b){"
-                "return /remove attachment|移除|删除/i.test(b.getAttribute('aria-label')||b.innerText||'');"
+                "var btns=Array.from(document.querySelectorAll('button[aria-label]')).filter(function(b){"
+                "var al=b.getAttribute('aria-label')||'';"
+                "return /remove\\s*attachment|移除附件|删除附件|移除|删除/i.test(al);"
                 "});"
                 "btns.forEach(function(b){b.click();});"
-                "var inp=document.querySelector('input[type=\"file\"]');"
-                "if(inp) inp.value='';"
+                "Array.from(document.querySelectorAll('input[type=\"file\"]')).forEach(function(inp){inp.value='';});"
                 "return btns.length;"
                 "})()")
             time.sleep(0.3)
@@ -1026,8 +1060,23 @@ class MuseEngine:
                 var ext = mime.split('/')[1] || 'png';
                 if (ext === 'jpeg') ext = 'jpg';
                 var file = new File([blob], 'reference_image.' + ext, {type: mime});
-                var input = document.querySelector('input[type="file"]');
-                if (!input) return JSON.stringify({ok: false, err: 'no-file-input'});
+                // 现网 composer 里可能有多个 file input；优先取位于 composer 内的那个
+                var inputs = Array.from(document.querySelectorAll('input[type="file"]'));
+                if (!inputs.length) return JSON.stringify({ok: false, err: 'no-file-input'});
+                var ov = document.querySelector('[data-testid="hatch-composer-placeholder-overlay"]');
+                var composer = ov ? ov.closest('form') : null;
+                var input = null;
+                if (composer) {
+                    input = inputs.find(function(x){ return composer.contains(x); }) || null;
+                }
+                if (!input) {
+                    // 退而求其次：取不在对话气泡里的那个 input
+                    input = inputs.find(function(x){
+                        return !x.closest('[class*=chat-user-bubble], [class*="group/msg"]');
+                    }) || inputs[0];
+                }
+                // 有些版本 accept 为空，补上 image/* 让页面接受本次 File
+                if (!input.getAttribute('accept')) input.setAttribute('accept', 'image/*');
                 var dt = new DataTransfer();
                 dt.items.add(file);
                 input.files = dt.files;
@@ -1047,13 +1096,26 @@ class MuseEngine:
         except Exception as e:
             raise MuseGenerationError("附加参考图失败，已停止生成") from e
 
-        # 等待输入框附件确认；历史图片不能证明本次上传成功
+        # 等待输入框附件确认；历史图片不能证明本次上传成功。
+        # 现网 UI 已切中文：确认按钮 aria-label = "附加文件"/"移除附件"；
+        # 同时兼容英文（Remove attachment / Attach file），并以 composer 内缩略图兜底。
         deadline = time.time() + 15.0
         while time.time() < deadline:
             has_attached = self.page.js(
                 """(function(){
-                var hasBtn = document.querySelector('button[aria-label*="Remove attachment" i]');
-                return Boolean(hasBtn);
+                var btns = Array.from(document.querySelectorAll('button[aria-label]'));
+                var hasRemove = btns.some(function(b){
+                    return /remove\\s*attachment|移除附件|删除附件/i.test(b.getAttribute('aria-label') || '');
+                });
+                if (hasRemove) return 'remove';
+                // 兜底：composer 内出现附件缩略图（img/video）
+                var ov = document.querySelector('[data-testid="hatch-composer-placeholder-overlay"]');
+                var composer = ov ? (ov.closest('form') || ov.parentElement.parentElement.parentElement) : null;
+                if (composer) {
+                    var media = composer.querySelectorAll('img, video');
+                    if (media.length > 0) return 'thumb';
+                }
+                return '';
                 })()"""
             )
             if has_attached:
