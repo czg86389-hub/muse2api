@@ -4,3 +4,4 @@ pydantic>=2.9
 requests>=2.32
 websocket-client>=1.8
 python-multipart>=0.0.9
+typesafe-sdk>=1.0  # optional paid fallback; default is OpenCode free endpoint
