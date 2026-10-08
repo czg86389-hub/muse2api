@@ -30,6 +30,12 @@ ATT_SEL = '[data-testid^="hatch-chat-attachment-presentation-"]'
 ESSENTIAL_COOKIES = ("hatch_sess", "hatch_gw", "hatch_vml",
                      "hatch_native_auth_device")
 
+# 视频请求里 muse 会先渲染一张封面静帧，<video> 节点随后才挂上并出源。
+# 这段宽限期就是「等真视频」的上限；过期仍没有视频源才接受封面兜底。
+# 默认 120 秒：走代理/慢线路的部署里视频 blob 落地可能远慢于上游默认的 15 秒，
+# 短了就会把封面 jpg 当成品返回（本地实测踩到）。可用环境变量覆盖。
+VIDEO_COVER_GRACE = float(os.environ.get("MUSE2API_VIDEO_COVER_GRACE", "120"))
+
 
 class MuseAuthError(RuntimeError):
     pass
@@ -696,7 +702,7 @@ class MuseEngine:
                 # 图片兜底：只有宽限期内仍未出现视频节点才接受
                 if fallback_since == 0.0:
                     fallback_since = time.time()
-                if time.time() - fallback_since >= 15.0:
+                if time.time() - fallback_since >= VIDEO_COVER_GRACE:
                     att = fallback_att
             if att:
                 src = att.get("src") or ""
@@ -705,13 +711,18 @@ class MuseEngine:
                 w = att.get("w", 0) or 0
                 h = att.get("h", 0) or 0
                 has_video = att.get("hasVideo", False)
-                is_fallback = att is fallback_att and att is not None and not (
-                    has_video or "video" in (tid or "").lower()
-                ) and expect == "video"
-                if is_fallback:
-                    want = True  # 宽限期已过，接受图片兜底结果
-                elif expect == "video":
-                    want = has_video or ("video" in tid) or ("video" in src) or ("video" in v_src) or src.endswith((".mp4", ".webm", ".mov"))
+                if expect == "video":
+                    # 本地实测（走代理的部署）：附件 tid 已经叫 ...-presentation-video，
+                    # 但 <video> 还没挂上——此时 vSrc 为空、src 只是封面静帧（engine 的
+                    # _ATT_JS 里 primary 会退回 img）。旧逻辑按 tid 判定"命中"，
+                    # 于是把封面 jpg 当成品返回。现在只有真正拿到视频源才算命中；
+                    # 只有封面时走宽限期，过期才接受封面兜底。
+                    if v_src or has_video:
+                        want = True
+                    else:
+                        if fallback_since == 0.0:
+                            fallback_since = time.time()
+                        want = (time.time() - fallback_since) >= VIDEO_COVER_GRACE
                 else:
                     want = ("image" in tid) or (not has_video)
                 check_src = v_src if (expect == "video" and v_src) else src
