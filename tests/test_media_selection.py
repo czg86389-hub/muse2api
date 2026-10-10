@@ -11,7 +11,7 @@ spec=importlib.util.spec_from_file_location('candidate',source)
 module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
 from types import SimpleNamespace
 # snap Chromium needs a non-hidden writable profile under HOME, not /tmp.
-with tempfile.TemporaryDirectory(prefix='muse-media-test-', dir=Path.home()) as tmp:
+with tempfile.TemporaryDirectory(prefix='muse-media-test-', dir=Path.home(), ignore_cleanup_errors=True) as tmp:
  with socket.socket() as sock:
   sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]
  chromium=os.environ.get('MUSE2API_CHROMIUM') or next((shutil.which(n) for n in ('chromium','chromium-browser','google-chrome') if shutil.which(n)),None)
@@ -41,6 +41,8 @@ with tempfile.TemporaryDirectory(prefix='muse-media-test-', dir=Path.home()) as 
   selected=engine._wait_attachment('old-b',5,'image',base_att_cnt=2,**kw)
   engine.attachments=lambda:[{'src':'poster.png','vSrc':'clip.mp4','tid':'video','hasVideo':True,'w':32,'h':32}]
   video=engine._wait_attachment('',3,'video')
+  engine.attachments=lambda:[{'src':'poster_only.png','tid':'image','hasVideo':False,'w':32,'h':32}]
+  fallback_video_rejected=engine._wait_attachment('',1,'video') is None
   page.js('''document.body.innerHTML='<button aria-label="Download" onclick="window.wrongDownload=true">Download</button>';window.wrongDownload=false;''')
   if 'src' in inspect.signature(engine._download_fallback).parameters:
    engine._download_fallback('selected',timeout=0)
@@ -49,7 +51,7 @@ with tempfile.TemporaryDirectory(prefix='muse-media-test-', dir=Path.home()) as 
   engine._normalize_image=lambda _:('', 'image/png')
   try:engine._attach_image('bad-reference'); rejected=False
   except module.MuseGenerationError:rejected=True
-  result={'upload_only_accepted':len(upload)>0,'result_sources':[a['src'] for a in atts], 'extract_b64':extracted.get('b64'),'stale_selected':selected['src'],'video_selected':video['vSrc'],'global_download_clicked':global_click,'invalid_reference_rejected':rejected}
+  result={'upload_only_accepted':len(upload)>0,'result_sources':[a['src'] for a in atts], 'extract_b64':extracted.get('b64'),'stale_selected':selected['src'],'video_selected':video['vSrc'],'fallback_video_rejected':fallback_video_rejected,'global_download_clicked':global_click,'invalid_reference_rejected':rejected}
   print(json.dumps(result,sort_keys=True))
   if '--observe' not in sys.argv:
    assert not result['upload_only_accepted']
@@ -57,7 +59,8 @@ with tempfile.TemporaryDirectory(prefix='muse-media-test-', dir=Path.home()) as 
    assert result['extract_b64']=='c2VsZWN0ZWQ='
    assert result['stale_selected']=='new-image'
    assert result['video_selected']=='clip.mp4'
+   assert result['fallback_video_rejected']
    assert not global_click and rejected
-   print('PASS: input preview excluded; exact selected bytes; all old sources ignored; video retained; scoped download; upload failure closed')
+   print('PASS: input preview excluded; exact selected bytes; all old sources ignored; video retained; crossmodal fallback rejected; scoped download; upload failure closed')
  finally:
   engine.stop()

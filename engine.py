@@ -668,54 +668,34 @@ class MuseEngine:
         t_start = time.time()
         stable_src, stable_n = "", 0
         last_txt, txt_stable = "", 0
-        fallback_since = 0.0
         while time.time() < deadline:
             if stop_event is not None and stop_event.is_set():
                 raise MuseGenerationError("客户端已断开连接，终止生成任务")
             time.sleep(0.6)
             self._scroll_bottom()
             atts = self.attachments()
-            # 按期望类型挑选候选：视频请求优先挑带 video 的附件；
-            # 若无匹配（muse 有时先渲染封面静帧），先记下图片兜底，
-            # 再给视频节点一段宽限期，避免把封面 img 误当成品返回。
-            att = None
-            fallback_att = None
-            if atts:
-                def _score(a):
-                    tid = (a.get("tid") or "").lower()
-                    has_video = bool(a.get("hasVideo"))
-                    if expect == "video":
-                        return 2 if (has_video or "video" in tid) else 1
-                    return 2 if (("image" in tid) or (not has_video)) else 1
-                best = max(atts, key=_score)
-                if _score(best) >= 2:
-                    att = best
+            # 严格按期望类型挑选附件，绝不接受跨模态兜底（如将视频请求降级为图片封面）
+            matching_atts = []
+            for a in atts:
+                tid = (a.get("tid") or "").lower()
+                has_video = bool(a.get("hasVideo"))
+                src = a.get("src") or ""
+                v_src = a.get("vSrc") or ""
+                if expect == "video":
+                    is_match = has_video or ("video" in tid) or ("video" in src) or ("video" in v_src) or src.endswith((".mp4", ".webm", ".mov"))
                 else:
-                    fallback_att = atts[-1]
-            if att is None and fallback_att is not None and expect == "video":
-                # 图片兜底：只有宽限期内仍未出现视频节点才接受
-                if fallback_since == 0.0:
-                    fallback_since = time.time()
-                if time.time() - fallback_since >= 15.0:
-                    att = fallback_att
+                    is_match = ("image" in tid) or (not has_video and not src.endswith((".mp4", ".webm", ".mov")))
+                if is_match:
+                    matching_atts.append(a)
+
+            att = matching_atts[-1] if matching_atts else None
             if att:
                 src = att.get("src") or ""
                 v_src = att.get("vSrc") or ""
-                tid = att.get("tid") or ""
                 w = att.get("w", 0) or 0
                 h = att.get("h", 0) or 0
-                has_video = att.get("hasVideo", False)
-                is_fallback = att is fallback_att and att is not None and not (
-                    has_video or "video" in (tid or "").lower()
-                ) and expect == "video"
-                if is_fallback:
-                    want = True  # 宽限期已过，接受图片兜底结果
-                elif expect == "video":
-                    want = has_video or ("video" in tid) or ("video" in src) or ("video" in v_src) or src.endswith((".mp4", ".webm", ".mov"))
-                else:
-                    want = ("image" in tid) or (not has_video)
                 check_src = v_src if (expect == "video" and v_src) else src
-                if check_src and check_src not in baseline_sources and want:
+                if check_src and check_src not in baseline_sources:
                     if w > 0 and h > 0:
                         return att
                     if check_src == stable_src:
@@ -1166,8 +1146,11 @@ class MuseEngine:
             dst = os.path.join(self.cfg.media_dir, name)
             with open(dst, "wb") as f:
                 f.write(data)
+            kind = "video" if ext in (".mp4", ".webm", ".mov") else "image"
+            if expect == "video" and kind != "video":
+                raise MuseGenerationError(f"期望生成视频，但提取成品类型为图片 ({ext})，拒绝以图片冒充视频交付")
             return {"path": dst, "filename": name, "size": len(data), "ext": ext, "mime": mime,
-                    "kind": "video" if ext in (".mp4", ".webm", ".mov") else "image",
+                    "kind": kind,
                     "via": "blob", "attachment": att.get("tid"),
                     "w": att.get("w"), "h": att.get("h")}
 
@@ -1178,8 +1161,11 @@ class MuseEngine:
         name = f"{uuid.uuid4().hex}{ext}"
         dst = os.path.join(self.cfg.media_dir, name)
         shutil.move(path, dst)
+        kind = "video" if ext in (".mp4", ".webm", ".mov") else "image"
+        if expect == "video" and kind != "video":
+            raise MuseGenerationError(f"期望生成视频，但下载成品类型为图片 ({ext})，拒绝以图片冒充视频交付")
         return {"path": dst, "filename": name, "size": os.path.getsize(dst), "ext": ext, "mime": "",
-                "kind": "video" if ext in (".mp4", ".webm", ".mov") else "image",
+                "kind": kind,
                 "via": "download", "attachment": att.get("tid"),
                 "w": att.get("w"), "h": att.get("h")}
 
