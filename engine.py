@@ -682,7 +682,15 @@ class MuseEngine:
                 src = a.get("src") or ""
                 v_src = a.get("vSrc") or ""
                 if expect == "video":
-                    is_match = has_video or ("video" in tid) or ("video" in src) or ("video" in v_src) or src.endswith((".mp4", ".webm", ".mov"))
+                    # tid 含 "video" 不足以命中：muse 会先把 data-testid 标成
+                    # ...-presentation-video，此时 <video> 可能尚未挂上，_ATT_JS 的
+                    # primary = v || img 会退回封面 img，src/w/h 全是静帧。
+                    # 只认真正的视频源（vSrc / hasVideo / 视频扩展名）。
+                    is_match = (
+                        has_video
+                        or bool(v_src)
+                        or src.endswith((".mp4", ".webm", ".mov"))
+                    )
                 else:
                     is_match = ("image" in tid) or (not has_video and not src.endswith((".mp4", ".webm", ".mov")))
                 if is_match:
@@ -694,7 +702,13 @@ class MuseEngine:
                 v_src = att.get("vSrc") or ""
                 w = att.get("w", 0) or 0
                 h = att.get("h", 0) or 0
-                check_src = v_src if (expect == "video" and v_src) else src
+                # 视频任务禁止用封面 src 冒充成品；无 vSrc 时仅接受显式视频后缀的 src
+                if expect == "video":
+                    check_src = v_src if v_src else (
+                        src if src.endswith((".mp4", ".webm", ".mov")) else ""
+                    )
+                else:
+                    check_src = src
                 if check_src and check_src not in baseline_sources:
                     if w > 0 and h > 0:
                         return att

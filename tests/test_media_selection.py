@@ -43,6 +43,9 @@ with tempfile.TemporaryDirectory(prefix='muse-media-test-', dir=Path.home(), ign
   video=engine._wait_attachment('',3,'video')
   engine.attachments=lambda:[{'src':'poster_only.png','tid':'image','hasVideo':False,'w':32,'h':32}]
   fallback_video_rejected=engine._wait_attachment('',1,'video') is None
+  # tid 已标 presentation-video，但尚无 <video>/vSrc：封面静帧不得当作命中
+  engine.attachments=lambda:[{'src':'cover.jpg','vSrc':'','tid':'hatch-chat-attachment-presentation-video','hasVideo':False,'w':1280,'h':720}]
+  tid_video_cover_rejected=engine._wait_attachment('',1,'video') is None
   page.js('''document.body.innerHTML='<button aria-label="Download" onclick="window.wrongDownload=true">Download</button>';window.wrongDownload=false;''')
   if 'src' in inspect.signature(engine._download_fallback).parameters:
    engine._download_fallback('selected',timeout=0)
@@ -51,7 +54,7 @@ with tempfile.TemporaryDirectory(prefix='muse-media-test-', dir=Path.home(), ign
   engine._normalize_image=lambda _:('', 'image/png')
   try:engine._attach_image('bad-reference'); rejected=False
   except module.MuseGenerationError:rejected=True
-  result={'upload_only_accepted':len(upload)>0,'result_sources':[a['src'] for a in atts], 'extract_b64':extracted.get('b64'),'stale_selected':selected['src'],'video_selected':video['vSrc'],'fallback_video_rejected':fallback_video_rejected,'global_download_clicked':global_click,'invalid_reference_rejected':rejected}
+  result={'upload_only_accepted':len(upload)>0,'result_sources':[a['src'] for a in atts], 'extract_b64':extracted.get('b64'),'stale_selected':selected['src'],'video_selected':video['vSrc'],'fallback_video_rejected':fallback_video_rejected,'tid_video_cover_rejected':tid_video_cover_rejected,'global_download_clicked':global_click,'invalid_reference_rejected':rejected}
   print(json.dumps(result,sort_keys=True))
   if '--observe' not in sys.argv:
    assert not result['upload_only_accepted']
@@ -60,7 +63,8 @@ with tempfile.TemporaryDirectory(prefix='muse-media-test-', dir=Path.home(), ign
    assert result['stale_selected']=='new-image'
    assert result['video_selected']=='clip.mp4'
    assert result['fallback_video_rejected']
+   assert result['tid_video_cover_rejected']
    assert not global_click and rejected
-   print('PASS: input preview excluded; exact selected bytes; all old sources ignored; video retained; crossmodal fallback rejected; scoped download; upload failure closed')
+   print('PASS: input preview excluded; exact selected bytes; all old sources ignored; video retained; crossmodal fallback rejected; tid-video cover rejected; scoped download; upload failure closed')
  finally:
   engine.stop()
