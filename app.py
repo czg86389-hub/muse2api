@@ -738,12 +738,18 @@ def _pos(v) -> bool:
 
 def _run_generation(prompt: str, kind: str, timeout: int,
                     account_id: str | None = None, on_progress=None,
-                    reference_image: str | None = None) -> tuple[dict, str | None]:
+                    reference_image: str | None = None,
+                    on_acquired=None) -> tuple[dict, str | None]:
     # Browser ownership covers account selection, retry and cleanup, not just generate().
     deadline = time.monotonic() + max(1, timeout)
     if not GEN_LOCK.acquire(timeout=max(1, timeout)):
         raise MuseGenerationError("等待浏览器队列超时，请稍后重试")
     try:
+        if on_acquired:
+            try:
+                on_acquired()
+            except Exception:
+                pass
         return _run_generation_locked(prompt, kind, timeout, account_id,
                                       on_progress, reference_image, deadline=deadline)
     finally:
@@ -869,22 +875,25 @@ def _queue_image(req: ImageRequest, prompt: str, reference_image: str | None,
                           image_request_key=key_hash, image_request_hash=request_hash)
 
     def worker():
-        t0 = time.time()
-        store.update_task(tid, status="processing", progress=5)
+        timing = {"t0": time.time()}
+        def _on_acquired():
+            timing["t0"] = time.time()
+            store.update_task(tid, status="processing", progress=5)
         try:
             res, acc_id = _run_generation(
                 prompt, "image", req.timeout or CFG.image_timeout,
                 reference_image=reference_image,
-                on_progress=lambda p: store.update_task(tid, progress=p))
+                on_progress=lambda p: store.update_task(tid, progress=p),
+                on_acquired=_on_acquired)
             # Store only media metadata, not large base64 payloads or reference credentials.
             store.update_task(tid, status="completed", progress=100, account=acc_id,
-                              elapsed=round(time.time() - t0, 1),
+                              elapsed=round(time.time() - timing["t0"], 1),
                               url=media_url(res["filename"]),
                               result={**{k: res[k] for k in ("filename", "size", "kind")},
                                       "url": media_url(res["filename"])})
         except Exception as exc:  # noqa: BLE001
             store.update_task(tid, status="failed", error=str(exc),
-                              elapsed=round(time.time() - t0, 1))
+                              elapsed=round(time.time() - timing["t0"], 1))
 
     threading.Thread(target=worker, daemon=True).start()
     return JSONResponse(status_code=202, content={
@@ -1043,15 +1052,18 @@ async def create_video(req: VideoRequest, _=Depends(auth)):
     store.update_task(task["id"], progress=10)
 
     def worker():
-        store.update_task(task["id"], status="processing", progress=15)
-        t0 = time.time()
+        timing = {"t0": time.time()}
+        def _on_acquired():
+            timing["t0"] = time.time()
+            store.update_task(task["id"], status="processing", progress=15)
         try:
             def prog_cb(p):
                 store.update_task(task["id"], progress=p)
-            res, acc_id = _run_generation(prompt, "video", timeout, on_progress=prog_cb, reference_image=ref_img)
+            res, acc_id = _run_generation(prompt, "video", timeout, on_progress=prog_cb,
+                                          reference_image=ref_img, on_acquired=_on_acquired)
             vurl = media_url(res["filename"])
             store.update_task(task["id"], status="completed", progress=100, account=acc_id,
-                              elapsed=round(time.time() - t0, 1),
+                              elapsed=round(time.time() - timing["t0"], 1),
                               url=vurl,
                               video={"url": vurl},
                               result={"url": vurl,
@@ -1059,7 +1071,7 @@ async def create_video(req: VideoRequest, _=Depends(auth)):
                                       "bytes": res["size"], "kind": res["kind"]})
         except Exception as exc:  # noqa: BLE001
             store.update_task(task["id"], status="failed",
-                              elapsed=round(time.time() - t0, 1), error=str(exc))
+                              elapsed=round(time.time() - timing["t0"], 1), error=str(exc))
 
     threading.Thread(target=worker, daemon=True).start()
     return {"id": task["id"], "task_id": task["id"], "object": "video.task", "status": "queued",
@@ -2290,7 +2302,7 @@ async def admin_repo_push(payload: dict = Body(default={}), _=Depends(auth)):
 @app.on_event("startup")
 async def _startup():
     for task in list(store.tasks.values()):
-        if task.get("kind") == "image" and task.get("status") in ("queued", "processing"):
+        if task.get("kind") in ("image", "video") and task.get("status") in ("queued", "processing"):
             store.update_task(task["id"], status="failed", error="服务重启中断了任务，请重新提交")
     if not CFG.api_key:
         import secrets
