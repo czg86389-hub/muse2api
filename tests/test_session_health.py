@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 
 def check(root, home, observe):
-    os.environ.update(MUSE2API_HOME=home, MUSE2API_PROFILE_ROOT=home, MUSE2API_KEY='test-only')
+    os.environ.update(MUSE2API_HOME=home, MUSE2API_PROFILE_ROOT=home, MUSE2API_KEY='test-only',
+                      REDIS_URL='memory://', MUSE2API_REDIS_URL='memory://')
     sys.path.insert(0, str(root))
     import app
     import requests

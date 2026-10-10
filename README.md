@@ -30,10 +30,10 @@
   - 支持 `url` 直链或 `b64_json` 两种返回格式，内置纯文本拒答秒级快速检测，杜绝队列死锁。
   - 图生图仅返回本次新生成的媒体：排除上传预览与历史附件，下载绑定选中的结果；参考图上传或提示词发送未确认时明确报错，不再静默返回原图。
 - 🎬 **文生视频 / 图生视频（Videos）**
-  - 原生对接 Muse 顶配视频生成模型，可传递 5 秒 / 6 秒 / 8 秒 / 10 秒的时长请求（实际成片时长以 Muse 上游输出为准）及 `9:16` 竖屏 / `16:9` 横屏视频生成。
-  - 支持上传首帧参考图（Data URL / HTTP URL）进行严格首帧图生视频创作。
-  - 异步任务架构（`/v1/videos` 创建任务 + `/v1/videos/{task_id}` 状态轮询）。
-  - 内置媒体资源服务 `/v1/media/{filename}`，自动持久化存储生成的 MP4 / WebP 资源。
+  - 异步任务：`POST /v1/videos` 创建，`GET /v1/videos/{task_id}` 轮询，完成状态是 `completed`。
+  - `duration` 不传时按 6 秒请求，服务端不截断秒数，成片时长以 Muse 输出为准。`16:9` 与 `9:16` 由 `aspect_ratio` 或 `size` 指定。
+  - 参考图最多 10 张，字段可用 `reference_images`、`images`、`image_urls`，也兼容单张 `reference_image` / `image_url` / `image`。
+  - 成品上传到图床后返回公网地址。对接说明见 [docs/video-api.md](docs/video-api.md)。
 - 🔄 **多账号池与热连接亲和调度**
   - 支持导入无上限的 Muse 账号矩阵。
   - 基于热连接亲和（Warm-Tab Affinity）与 LRU 策略智能分发，兼顾 2 秒级极速响应与多号均衡消耗。
@@ -189,35 +189,19 @@ curl -X POST "http://localhost:18610/v1/images/generations" \
 
 ### 3. 文生视频 / 图生视频（Videos）
 
-- **第一步：创建生成任务**
-  ```bash
-  curl -X POST "http://localhost:18610/v1/videos" \
-    -H "Authorization: Bearer m2a_your_secret_key" \
-    -H "Content-Type: application/json" \
-    -d '{
-      "prompt": "金色的枫叶在微风中轻盈飘落，阳光穿透树梢",
-      "duration": 5,
-      "size": "16:9"
-    }'
-  ```
-  返回任务 ID：`{"id": "task_xyz789", "status": "queued"}`
+完整字段、参考图、排队和错误码见 [docs/video-api.md](docs/video-api.md)。视频接口始终异步：创建返回 `queued`，轮询到 `completed` 后读取 `url`。
 
-- **第二步：轮询任务进度**
-  ```bash
-  curl "http://localhost:18610/v1/videos/task_xyz789" \
-    -H "Authorization: Bearer m2a_your_secret_key"
-  ```
-  完成时返回：
-  ```json
-  {
-    "id": "task_xyz789",
-    "status": "succeeded",
-    "progress": 100,
-    "result": {
-      "url": "http://localhost:18610/v1/media/vid_xyz789.mp4"
-    }
-  }
-  ```
+```bash
+curl -X POST "https://muse.secure-skill.com/v1/videos" \
+  -H "Authorization: Bearer m2a_your_secret_key" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"金色的枫叶在微风中轻盈飘落","duration":6,"aspect_ratio":"16:9"}'
+
+curl "https://muse.secure-skill.com/v1/videos/task_xyz789" \
+  -H "Authorization: Bearer m2a_your_secret_key"
+```
+
+完成时 `status` 为 `completed`，`url` 是图床上的 mp4 地址。
 
 ---
 

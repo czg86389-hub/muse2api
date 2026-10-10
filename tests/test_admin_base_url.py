@@ -67,7 +67,8 @@ def build_cmd(base_url):
 
 async def check(source, home, public_base):
     os.environ.update(MUSE2API_HOME=home, MUSE2API_PROFILE_ROOT=home,
-                      MUSE2API_KEY="test-only", MUSE2API_PUBLIC_BASE=public_base)
+                      MUSE2API_KEY="test-only", MUSE2API_PUBLIC_BASE=public_base,
+                      REDIS_URL="memory://", MUSE2API_REDIS_URL="memory://")
     sys.path.insert(0, str(source.parent))
     for name in ("config", "store", "engine", "cdp"):
         sys.modules.pop(name, None)          # config reads MUSE2API_* at import

@@ -11,8 +11,7 @@ import uuid
 _LOCK = threading.Lock()
 
 # 决定账号生死的核心 cookie（与 engine.ESSENTIAL_COOKIES 保持一致）
-ESSENTIAL_COOKIES = ("hatch_sess", "hatch_gw", "hatch_vml",
-                     "hatch_native_auth_device")
+ESSENTIAL_COOKIES = ("hatch_sess", "hatch_vml", "hatch_native_auth_device")
 
 
 def _is_pos(v) -> bool:
@@ -121,6 +120,23 @@ class Store:
             self.accounts.append(acc)
             _write(self.cfg.accounts_file, self.accounts)
             return acc
+
+    def live_accounts(self) -> list[dict]:
+        """已启用且有 cookie 的账号副本。有健康账号时跳过 ok=False，否则仍返回全部可用账号。"""
+        with _LOCK:
+            enabled = [dict(a) for a in self.accounts
+                       if a.get("enabled", True) and a.get("cookies")]
+        healthy = [a for a in enabled if a.get("ok") is not False]
+        return healthy or enabled
+
+    def note_use(self, aid: str):
+        with _LOCK:
+            for a in self.accounts:
+                if a["id"] == aid:
+                    a["last_used"] = time.time()
+                    a["use_count"] = a.get("use_count", 0) + 1
+                    _write(self.cfg.accounts_file, self.accounts)
+                    return
 
     def list_accounts(self) -> list[dict]:
         out = []
@@ -253,6 +269,29 @@ class Store:
         return {"total": total, "enabled": enabled, "disabled": total - enabled,
                 "healthy": healthy, "error": bad,
                 "expiring": expiring, "expired": expired}
+
+    # ---------- 界面设置 ----------
+    def queue_limit(self) -> int:
+        """还在排队、尚未开始的任务上限。默认 20，范围 1–500。"""
+        data = _read(self.cfg.settings_file, {})
+        raw = data.get("queue_limit", 20) if isinstance(data, dict) else 20
+        try:
+            limit = int(raw)
+        except (TypeError, ValueError):
+            limit = 20
+        return min(500, max(1, limit))
+
+    def set_queue_limit(self, limit: int) -> int:
+        limit = int(limit)
+        if limit < 1 or limit > 500:
+            raise ValueError("队列长度需在 1 到 500 之间")
+        with _LOCK:
+            data = _read(self.cfg.settings_file, {})
+            if not isinstance(data, dict):
+                data = {}
+            data["queue_limit"] = limit
+            _write(self.cfg.settings_file, data)
+        return limit
 
     # ---------- 任务 ----------
     def create_task(self, kind: str, prompt: str) -> dict:

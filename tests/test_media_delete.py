@@ -74,6 +74,8 @@ async def main():
     with tempfile.TemporaryDirectory(prefix="muse-media-del-test-") as tmp:
         os.environ["MUSE2API_HOME"] = tmp
         os.environ["MUSE2API_KEY"] = "test-secret"
+        os.environ["REDIS_URL"] = "memory://"
+        os.environ["MUSE2API_REDIS_URL"] = "memory://"
         media_dir = os.path.join(tmp, "data", "media")
         os.makedirs(media_dir, exist_ok=True)
 

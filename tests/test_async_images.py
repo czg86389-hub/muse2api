@@ -78,7 +78,8 @@ class Client:
 
 async def check(source, home):
     os.environ.update(MUSE2API_HOME=home, MUSE2API_PROFILE_ROOT=home,
-                      MUSE2API_KEY="test-only", MUSE2API_PUBLIC_BASE="")
+                      MUSE2API_KEY="test-only", MUSE2API_PUBLIC_BASE="",
+                      REDIS_URL="memory://", MUSE2API_REDIS_URL="memory://")
     sys.path.insert(0, str(source.parent))
     spec = importlib.util.spec_from_file_location("image_api_test_target", source)
     module = importlib.util.module_from_spec(spec)
@@ -99,28 +100,36 @@ async def check(source, home):
 
     locked_impl = module._run_generation_locked if hasattr(module, "_run_generation_locked") else None
     if locked_impl:
+        module.store.add_account(
+            {"hatch_sess": "s", "hatch_vml": "v", "hatch_native_auth_device": "d"}, "lock")
+        lock_id = module.store.accounts[-1]["id"]
+
         def assert_owned(*args, **kwargs):
-            assert module.GEN_LOCK.locked(), "browser lock must cover retry/cleanup"
+            assert kwargs.get("account_id") in module.ACCOUNT_GATE.busy_ids(), "account slot must cover retry/cleanup"
             assert kwargs.get("deadline") is not None
-            return {"fixture": True}, None
+            return {"fixture": True}, kwargs.get("account_id")
         module._run_generation_locked = assert_owned
         module._run_generation("lock fixture", "image", 1)
         module._run_generation_locked = locked_impl
-        assert not module.GEN_LOCK.locked()
-        real_lock = module.GEN_LOCK
-        class BusyLock:
-            def acquire(self, timeout):
-                assert timeout == 1
-                return False
-        module.GEN_LOCK = BusyLock()
+        assert lock_id not in module.ACCOUNT_GATE.busy_ids()
+        assert module.ACCOUNT_GATE.try_acquire(lock_id)
         try:
             module._run_generation("queue fixture", "image", 1)
-            raise AssertionError("busy browser must time out")
+            raise AssertionError("busy account must time out")
         except module.MuseGenerationError:
             pass
         finally:
-            module.GEN_LOCK = real_lock
+            module.ACCOUNT_GATE.release(lock_id)
         print("generation_lock_covers_retry_cleanup=PASS queue_wait_bounded=PASS")
+    def publish_generated_media(res, include_b64=False):
+        out = dict(res)
+        out["url"] = "https://source.openclaw-token.shop/uploads/" + res["filename"]
+        out["path"] = None
+        if include_b64:
+            out["b64_json"] = base64.b64encode(Path(res["path"]).read_bytes()).decode()
+        return out
+
+    module.publish_generated_media = publish_generated_media
     module._run_generation = generation
     headers = {"Authorization": "Bearer test-only"}
     async with Client(module.app, headers) as client:
@@ -137,13 +146,13 @@ async def check(source, home):
         tid = response.json()["task_id"]
 
         async def finish(task_id):
-            for _ in range(100):
+            for _ in range(200):
                 result = await client.get("/v1/images/tasks/" + task_id)
                 assert result.status_code == 200
                 data = result.json()
                 if data["status"] in ("completed", "failed"):
                     return data
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.02)
             raise AssertionError("task never finished")
 
         done = await finish(tid)
@@ -197,10 +206,16 @@ async def check(source, home):
                                  headers={"Authorization": "Bearer wrong"})).status_code == 401
         print("failure_terminal=PASS authentication=PASS missing_task=PASS")
 
-        for _ in range(8):
-            module.store.create_task("image", "queued fixture")
+        module.DISPATCHER.pause()
+        time.sleep(0.45)
+        module.store.set_queue_limit(1)
+        held = await client.post("/v1/images/tasks", json={"prompt": "queue holds one"})
+        assert held.status_code == 202, held.body
         full = await client.post("/v1/images/tasks", json={"prompt": "queue full"})
-        assert full.status_code == 429
+        assert full.status_code == 429, full.body
+        module.DISPATCHER.resume()
+        done = await finish(held.json()["id"])
+        assert done["status"] == "completed"
         print("bounded_queue=PASS")
         pending = module.store.create_task("image", "interrupted fixture")
         await module._startup()

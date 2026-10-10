@@ -1,138 +1,205 @@
-/* Muse2API Cookie 导入 —— 读取 muse.ai 的 cookie 并 POST 到 muse2api 服务。
- *
- * 关键点：用 chrome.cookies 而不是 document.cookie。
- * muse.ai 的 4 条核心 cookie（hatch_sess / hatch_gw / hatch_vml /
- * hatch_native_auth_device）都带 httpOnly，网页 JS 读不到，
- * 只有浏览器扩展的 cookies 接口能拿到。
- */
+/* 读取 muse.ai 的 httpOnly Cookie，展示必填项并复制成管理页能粘贴的字符串。 */
 
 const $ = (id) => document.getElementById(id);
-const STORE = 'muse2api_ext_cfg';
+const ext = globalThis.chrome || globalThis.browser;
 
-const ESSENTIAL = ['hatch_sess', 'hatch_gw', 'hatch_vml', 'hatch_native_auth_device'];
+const REQUIRED = ['hatch_sess', 'hatch_vml', 'hatch_native_auth_device'];
+const OPTIONAL = ['hatch_gw'];
+const ORDER = [...REQUIRED, ...OPTIONAL];
 
-function log(html, cls) {
+function log(text, cls) {
   const el = $('log');
-  el.className = 'show';
-  el.innerHTML = cls ? `<span class="${cls}">${html}</span>` : html;
+  el.className = cls ? `show ${cls}` : 'show';
+  el.textContent = text;
 }
 
-/* 规范化服务地址：去掉结尾斜杠和 /v1 后缀 */
-function normBase(v) {
-  let s = (v || '').trim();
-  if (!s) return '';
-  if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
-  s = s.replace(/\/+$/, '');
-  s = s.replace(/\/v1$/i, '');
-  return s;
+function cookieHeader(cookies) {
+  return ORDER.filter((name) => cookies[name]).map((name) => `${name}=${cookies[name]}`).join('; ');
 }
 
-async function loadCfg() {
-  const o = await chrome.storage.local.get(STORE);
-  const c = o[STORE] || {};
-  if (c.base) $('base').value = c.base;
-  if (c.key) $('key').value = c.key;
-  if (c.label) $('label').value = c.label;
-  // 没有配置过就尝试从当前标签页猜一个（用户在管理页上时）
-  if (!c.base) {
-    try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      const u = tab && tab.url ? new URL(tab.url) : null;
-      if (u && /\/admin/.test(u.pathname)) {
-        $('base').value = u.origin;
-        const k = new URLSearchParams(u.search).get('key');
-        if (k) $('key').value = k;
-      }
-    } catch (e) { /* 忽略 */ }
+function renderList(cookies) {
+  const list = $('list');
+  list.replaceChildren();
+  for (const name of ORDER) {
+    const row = document.createElement('div');
+    const present = Object.prototype.hasOwnProperty.call(cookies, name);
+    const optional = OPTIONAL.includes(name);
+    row.className = 'item';
+    const title = document.createElement('b');
+    title.textContent = name;
+    const state = document.createElement('span');
+    if (present) {
+      state.className = 'ok';
+      state.textContent = '已读取';
+    } else if (optional) {
+      state.className = 'opt';
+      state.textContent = '未下发，可忽略';
+    } else {
+      state.className = 'bad';
+      state.textContent = '缺失';
+    }
+    row.append(title, state);
+    list.append(row);
   }
 }
 
-async function saveCfg() {
-  await chrome.storage.local.set({
-    [STORE]: {
-      base: normBase($('base').value),
-      key: $('key').value.trim(),
-      label: $('label').value.trim(),
-    },
+function showMissing(names) {
+  const box = $('missing');
+  if (!names.length) {
+    box.hidden = true;
+    box.textContent = '';
+    return;
+  }
+  box.hidden = false;
+  box.textContent = `缺少必填 Cookie：${names.join('、')}\n`
+    + '请在这个窗口打开 https://muse.ai/ ，登录到能看到聊天界面，再点「刷新会话」。';
+}
+
+function museHost(url) {
+  try {
+    const host = new URL(url).hostname;
+    return host === 'muse.ai' || host.endsWith('.muse.ai');
+  } catch (err) {
+    return false;
+  }
+}
+
+async function museTab() {
+  const tabs = await ext.tabs.query({ currentWindow: true });
+  return tabs.find((tab) => tab.active && museHost(tab.url))
+    || tabs.find((tab) => museHost(tab.url));
+}
+
+function requestSession() {
+  return fetch('https://muse.ai/api/session', {
+    credentials: 'include',
+    headers: { accept: 'application/json' },
+  }).then(async (response) => {
+    let status = '';
+    try {
+      const data = await response.json();
+      status = data && typeof data.status === 'string' ? data.status : '';
+    } catch (err) {
+      status = '';
+    }
+    return { http: response.status, status };
   });
 }
 
-async function grabCookies() {
-  const all = await chrome.cookies.getAll({ domain: 'muse.ai' });
-  const out = {}, exp = {};
-  for (const c of all) {
-    const dom = (c.domain || '').replace(/^\./, '');
-    if (!dom.endsWith('muse.ai')) continue;
-    out[c.name] = c.value;
-    if (c.expirationDate) exp[c.name] = Math.floor(c.expirationDate);
+async function renewSession() {
+  if (!ext.tabs || !ext.scripting || typeof ext.scripting.executeScript !== 'function') {
+    throw new Error('这个浏览器没有开放页面脚本接口。请用 1.3.0 的安装包重新上传扩展，并关联到当前窗口。');
   }
-  return { cookies: out, expires: exp };
+  const tab = await museTab();
+  if (!tab || tab.id == null) {
+    throw new Error('这个窗口里没有打开 muse.ai。请先打开 https://muse.ai/ 并登录到聊天界面。');
+  }
+  const target = { tabId: tab.id };
+  let injected;
+  try {
+    injected = await ext.scripting.executeScript({ target, world: 'MAIN', func: requestSession });
+  } catch (err) {
+    injected = await ext.scripting.executeScript({ target, func: requestSession });
+  }
+  const info = injected && injected[0] && injected[0].result;
+  if (!info || typeof info.http !== 'number') {
+    throw new Error('没有拿到会话接口的结果。请确认 muse.ai 页面已打开。');
+  }
+  if (info.http === 401) {
+    throw new Error('会话已失效。请在这个窗口重新登录 muse.ai，直到能看到聊天界面。');
+  }
+  if (info.http !== 200 || info.status !== 'assigned') {
+    const detail = info.status ? `，状态 ${info.status}` : '';
+    throw new Error(`会话接口没有签发新 Cookie（HTTP ${info.http}${detail}）。`);
+  }
 }
 
-async function run() {
-  const base = normBase($('base').value);
-  const key = $('key').value.trim();
-  const label = $('label').value.trim();
+async function grabCookies() {
+  if (!ext || !ext.cookies || typeof ext.cookies.getAll !== 'function') {
+    throw new Error('这个浏览器没有开放 cookies 接口。请从 Roxy「扩展中心 → 本地上传」重新安装本扩展，并关联到当前项目窗口。');
+  }
+  const all = await ext.cookies.getAll({ domain: 'muse.ai' });
+  const out = {};
+  for (const item of all) {
+    const host = (item.domain || '').replace(/^\./, '').toLowerCase();
+    if (host !== 'muse.ai' && !host.endsWith('.muse.ai')) continue;
+    out[item.name] = item.value;
+  }
+  return out;
+}
 
-  if (!base) return log('请先填服务地址', 'bad');
-  if (!key) return log('请先填 API Key', 'bad');
-
-  $('go').disabled = true;
-  log('正在读取 muse.ai 的 Cookie…');
-
+async function refresh(fromRenew) {
+  $('refresh').disabled = true;
+  $('copy').disabled = true;
+  log('正在读取…');
   try {
-    const { cookies, expires } = await grabCookies();
-    const names = Object.keys(cookies);
-    if (!names.length) {
-      return log('没读到 muse.ai 的 Cookie。\n请先在这个浏览器里打开并登录 '
-                 + 'https://muse.ai/ ，再回来点一次。', 'bad');
+    const cookies = await grabCookies();
+    renderList(cookies);
+    const missing = REQUIRED.filter((name) => !cookies[name]);
+    const header = cookieHeader(cookies);
+    $('cookieText').value = header;
+    $('copy').disabled = !header;
+    showMissing(missing);
+    if (!Object.keys(cookies).length) {
+      log('没读到 muse.ai 的 Cookie。请先在这个窗口登录 https://muse.ai/ 。', 'bad');
+    } else if (missing.length) {
+      log(fromRenew
+        ? `会话接口已请求，但仍缺少：${missing.join('、')}。`
+        : '必填 Cookie 不齐，先不要粘贴到网站。', 'bad');
+    } else {
+      log(fromRenew
+        ? '会话已刷新，必填 Cookie 已重新读取，可以复制。'
+        : `已读到 ${REQUIRED.length} 条必填 Cookie，可以复制。`, 'ok');
     }
-    const missing = ESSENTIAL.filter((n) => !(n in cookies));
-    if (missing.length) {
-      log(`读到 ${names.length} 条 Cookie，但缺核心项：${missing.join('、')}\n`
-          + '说明这个浏览器还没登录成功。请登录到能看到聊天界面再试。', 'warn');
+  } catch (err) {
+    renderList({});
+    $('cookieText').value = '';
+    showMissing(REQUIRED);
+    log(err && err.message ? err.message : String(err), 'bad');
+  } finally {
+    $('refresh').disabled = false;
+  }
+}
+
+async function copyText() {
+  const text = $('cookieText').value.trim();
+  if (!text) {
+    log('没有可复制的 Cookie。', 'bad');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (err) {
+    $('cookieText').focus();
+    $('cookieText').select();
+    const ok = document.execCommand('copy');
+    if (!ok) {
+      log('复制失败，请在文本框里手动全选复制。', 'bad');
       return;
     }
+  }
+  const missing = REQUIRED.filter((name) => !text.includes(name + '='));
+  if (missing.length) {
+    log(`已复制，但仍缺少：${missing.join('、')}。补齐后再粘到网站。`, 'bad');
+    return;
+  }
+  log('已复制。到管理页「添加账号」或「粘贴导入」，贴进 Cookie 字符串后点导入。', 'ok');
+}
 
-    log(`读到 ${names.length} 条 Cookie，正在上传到 ${base} …`);
-
-    const r = await fetch(base + '/admin/accounts', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + key,
-      },
-      body: JSON.stringify({ label, cookies, expires }),
-    });
-
-    const text = await r.text();
-    let data;
-    try { data = JSON.parse(text); } catch (e) { data = { raw: text }; }
-
-    if (r.status === 401) {
-      return log('API Key 不对（服务返回 401）。\n'
-                 + '请到管理页「账号池」页顶部复制正确的 API Key。', 'bad');
-    }
-    if (!r.ok) {
-      return log(`导入失败：HTTP ${r.status}\n${text.slice(0, 300)}`, 'bad');
-    }
-
-    const a = (data.added && data.added[0]) || {};
-    await saveCfg();
-    log(`✓ 导入成功\n账号标签：${a.label || label || '(自动)'}\n`
-        + `账号 ID：${a.id || '?'}\nCookie 条数：${a.cookie_count || names.length}\n`
-        + `有效期到：${a.expires_at ? new Date(a.expires_at * 1000).toLocaleString() : '未知'}\n`
-        + (data.warning ? `\n注意：${data.warning}` : ''), 'ok');
-  } catch (e) {
-    log('出错了：' + (e && e.message ? e.message : String(e))
-        + '\n\n常见原因：\n'
-        + '· 服务地址填错或服务没启动\n'
-        + '· 这个地址不是 https（或证书不被信任）\n'
-        + '· 浏览器拦截了跨域请求', 'bad');
+async function renewAndRead() {
+  $('renew').disabled = true;
+  log('正在这个窗口的 muse.ai 页面请求会话接口…');
+  try {
+    await renewSession();
+    await refresh(true);
+  } catch (err) {
+    log(err && err.message ? err.message : String(err), 'bad');
   } finally {
-    $('go').disabled = false;
+    $('renew').disabled = false;
   }
 }
 
-$('go').addEventListener('click', run);
-loadCfg();
+$('renew').addEventListener('click', renewAndRead);
+$('refresh').addEventListener('click', () => refresh(false));
+$('copy').addEventListener('click', copyText);
+refresh();

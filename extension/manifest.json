@@ -1,17 +1,31 @@
 {
   "manifest_version": 3,
   "name": "Muse2API Cookie 导入",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "description": "一键把 muse.ai 的登录 Cookie 导入到你的 muse2api 服务。不用装 Python、不用开终端。",
-  "permissions": ["cookies", "storage", "activeTab"],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtuZKGv8uXRqHItfBzsh+vlSfTjrc1XeY0bpMJI6nE76Fzi3sg6VaoTBdLCPODnskOeWlKL96uWGlhZgTtMMYMdzF13hRUbTRNzfQHFQNYkkfR3Gc3VRJtB3WEsduGMYrBZxqxBXfRFBwZm/ziwFgNy1kNBA/yyC42OmqQUSpIWhOnhSYd6ExRZ7oZRf3Y4nBPsfkViGYR8SSHpG7ZfVicbIfuOR11989sm0PN76G99d4oR7fPUpA7B3cniva8Umhl3O9ddzE2qOHExe+Zi/3DZBkQUGTKuHVv+oOZd1uKqytkMbx6gMwwjWMQ5Q601nLzLwcFfAnd/dXifvhOj/RQQIDAQAB",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Muse2API Cookie 导入",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["cookies", "scripting", "storage", "tabs"],
   "host_permissions": [
     "https://muse.ai/*",
     "https://*.muse.ai/*",
     "http://*/*",
     "https://*/*"
-  ],
-  "action": {
-    "default_title": "Muse2API Cookie 导入",
-    "default_popup": "popup.html"
-  }
+  ]
 }

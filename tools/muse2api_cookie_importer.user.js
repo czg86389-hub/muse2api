@@ -20,7 +20,7 @@
   'use strict';
 
   const STORE_KEY = '***';
-  const ESSENTIAL = ['hatch_sess', 'hatch_gw', 'hatch_vml'];
+  const ESSENTIAL = ['hatch_sess', 'hatch_vml', 'hatch_native_auth_device'];
 
   function loadCfg() {
     const fallback = { base: '', key: '', label: '' };

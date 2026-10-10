@@ -1,10 +1,12 @@
 {
-  "version": "1.5.4",
-  "updated_at": "2026-10-06",
+  "version": "1.5.5",
+  "updated_at": "2026-10-10",
   "repo": "https://github.com/czg86389-hub/muse2api",
   "highlights": [
-    "媒体库新增文件批量选择、一键全选与按需删除功能，有效释放 VPS 磁盘存储空间",
-    "后端新增 POST /admin/media/delete 与 DELETE /admin/media/{name}，严格防范路径穿越安全风险",
-    "新增媒体管理自动化测试套件"
+    "多个 Muse 账号同时生成，一个账号同时只跑一个任务；超出并发的图片和视频进入 Redis 队列，队列长度可在管理页设置",
+    "生成的图片和视频上传到图床，不再留在服务器本地",
+    "视频支持最多 10 张参考图，对接说明见 docs/video-api.md",
+    "参考图还在上传时会等到发送按钮可用再提交，避免提示词发送未确认",
+    "登录插件 1.3.0：必填 Cookie 可直接复制，hatch_gw 改为可选，可在当前窗口刷新会话补齐 hatch_vml"
   ]
 }

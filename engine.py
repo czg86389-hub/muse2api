@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 
@@ -27,8 +28,8 @@ log = logging.getLogger("muse2api")
 ATT_SEL = '[data-testid^="hatch-chat-attachment-presentation-"]'
 
 # 决定账号生死的核心 cookie（缺失或过期 = 会话失效）
-ESSENTIAL_COOKIES = ("hatch_sess", "hatch_gw", "hatch_vml",
-                     "hatch_native_auth_device")
+# hatch_gw 当前站点经常不下发，缺了不影响登录和生成。
+ESSENTIAL_COOKIES = ("hatch_sess", "hatch_vml", "hatch_native_auth_device")
 
 
 class MuseAuthError(RuntimeError):
@@ -39,16 +40,88 @@ class MuseGenerationError(RuntimeError):
     pass
 
 
+def send_wait_budget(ref_count: int | None) -> float:
+    """参考图还在上传时，发送按钮会一直禁用。张数越多，等多久。"""
+    try:
+        n = int(ref_count or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n <= 0:
+        return 12.0
+    return min(45.0, max(12.0, 8.0 + 6.0 * n))
+
+
+def send_failure_message(code: str | None) -> str:
+    reason = {
+        "disabled": "发送按钮仍不可用",
+        "missing": "未找到发送按钮",
+        "no-button": "未找到发送按钮",
+        "hidden": "未找到发送按钮",
+        "no-text": "提示词没有写进输入框",
+    }.get(code or "", "发送未确认")
+    return f"提示词发送未确认，已停止生成（{reason}）"
+
+
 class MuseEngine:
     def __init__(self, cfg):
         self.cfg = cfg
         self.proc: subprocess.Popen | None = None
         self.browser: CDP | None = None
-        self.page: CDP | None = None
-        self.current_acc_id: str | None = None
+        # 页面按线程绑定。每个账号有自己的浏览器上下文，任务线程互不覆盖。
+        self._tls = threading.local()
+        self._sessions: dict[str, dict] = {}
+        self._state_lock = threading.Lock()
+        self._browser_lock = threading.RLock()
+        self.page = None
+        self.current_acc_id = None
         self._last_http_renew: dict[str, float] = {}
         self._log = None
         os.makedirs(cfg.profile_dir, exist_ok=True)
+
+    @property
+    def page(self):
+        tls = getattr(self, "_tls", None)
+        if tls is not None and hasattr(tls, "page"):
+            return tls.page
+        return self.__dict__.get("_page_fallback")
+
+    @page.setter
+    def page(self, value):
+        tls = getattr(self, "_tls", None)
+        if tls is None:
+            self.__dict__["_page_fallback"] = value
+            return
+        tls.page = value
+
+    @property
+    def current_acc_id(self):
+        tls = getattr(self, "_tls", None)
+        if tls is not None and hasattr(tls, "current_acc_id"):
+            return tls.current_acc_id
+        return self.__dict__.get("_acc_fallback")
+
+    @current_acc_id.setter
+    def current_acc_id(self, value):
+        tls = getattr(self, "_tls", None)
+        if tls is None:
+            self.__dict__["_acc_fallback"] = value
+            return
+        tls.current_acc_id = value
+
+    def has_page(self, account_id: str | None = None) -> bool:
+        with self._state_lock:
+            if account_id:
+                sess = self._sessions.get(account_id)
+                return bool(sess and sess.get("page") and not sess.get("stale"))
+            return any(s.get("page") and not s.get("stale") for s in self._sessions.values())
+
+    def invalidate(self, account_id: str | None):
+        """cookie 更新后，下次进入该账号时重建页面。不打断正在跑的任务。"""
+        key = account_id or "_default"
+        with self._state_lock:
+            sess = self._sessions.get(key)
+            if sess:
+                sess["stale"] = True
 
     # ---------------- 浏览器生命周期 ----------------
     def _debug_url(self):
@@ -57,6 +130,12 @@ class MuseEngine:
     def start(self):
         if self.proc and self.proc.poll() is None and self.browser:
             return
+        with self._browser_lock:
+            if self.proc and self.proc.poll() is None and self.browser:
+                return
+            self._start_locked()
+
+    def _start_locked(self):
         env = dict(os.environ)
         env.setdefault("HOME", self.cfg.home_dir)
         env["PATH"] = (self.cfg.extra_path + os.pathsep + env.get("PATH", "")) if self.cfg.extra_path else env.get("PATH", "")
@@ -108,10 +187,33 @@ class MuseEngine:
         raise MuseGenerationError(f"Chromium 启动失败: {last}")
 
     def stop(self):
-        for c in (self.page, self.browser):
-            if c:
-                c.close()
-        self.page = self.browser = None
+        with self._state_lock:
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+        for sess in sessions:
+            page = sess.get("page")
+            if page:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+        if self.browser:
+            for sess in sessions:
+                ctx = sess.get("context_id")
+                if not ctx:
+                    continue
+                try:
+                    self.browser.send("Target.disposeBrowserContext",
+                                      {"browserContextId": ctx})
+                except Exception:
+                    pass
+            try:
+                self.browser.close()
+            except Exception:
+                pass
+        self.browser = None
+        self.page = None
+        self.current_acc_id = None
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
             try:
@@ -121,27 +223,164 @@ class MuseEngine:
         self.proc = None
 
     # ---------------- 页面 ----------------
-    def _open_page(self):
-        import requests
+    def _browser_call(self, method: str, params: dict | None = None) -> dict:
+        with self._browser_lock:
+            if not self.browser:
+                raise MuseGenerationError("浏览器未启动")
+            msg = self.browser.send(method, params or {})
+        return msg.get("result") or {}
+
+    def _session_key(self, account_id: str | None) -> str:
+        return account_id or "_default"
+
+    def _bind(self, key: str):
+        with self._state_lock:
+            sess = self._sessions.get(key)
+            page = sess.get("page") if sess else None
+        if getattr(self, "_tls", None) is not None:
+            self._tls.key = key
+        self.page = page
+        self.current_acc_id = None if key == "_default" else key
+
+    def _save_page(self, key: str, page):
+        with self._state_lock:
+            sess = self._sessions.setdefault(key, {})
+            sess["page"] = page
+            sess["stale"] = False
+            target_id = getattr(page, "_muse_target_id", None)
+            if target_id:
+                sess["target_id"] = target_id
+
+    def _close_target(self, target_id: str | None):
+        if not target_id or not self.browser:
+            return
         try:
-            pages = requests.get(f"http://127.0.0.1:{self.cfg.cdp_port}/json/list", timeout=3).json()
-            for p in pages:
-                if p.get("type") == "page":
-                    pid = p.get("id")
-                    if pid:
-                        requests.get(f"http://127.0.0.1:{self.cfg.cdp_port}/json/close/{pid}", timeout=2)
+            self._browser_call("Target.closeTarget", {"targetId": target_id})
+        except Exception:
+            log.warning("关闭标签页失败")
+
+    def _discard_page(self, page):
+        target_id = getattr(page, "_muse_target_id", None)
+        try:
+            page.close()
         except Exception:
             pass
+        self._close_target(target_id)
 
-        tgt = requests.put(
-            f"http://127.0.0.1:{self.cfg.cdp_port}/json/new?about:blank",
-            timeout=10).json()
-        page = CDP(tgt["webSocketDebuggerUrl"], timeout=180)
+    def _close_page_only(self, key: str):
+        with self._state_lock:
+            sess = self._sessions.get(key)
+            page = sess.get("page") if sess else None
+            target_id = (sess or {}).get("target_id") or getattr(page, "_muse_target_id", None)
+            if sess:
+                sess["page"] = None
+                sess["target_id"] = None
+        if page:
+            try:
+                page.close()
+            except Exception:
+                pass
+        self._close_target(target_id)
+        tls = getattr(self, "_tls", None)
+        if tls is not None and getattr(tls, "key", None) == key:
+            self.page = None
+
+    def drop_session(self, account_id: str | None):
+        """关掉一个账号的页面和独立 cookie 环境，不影响其他账号。"""
+        key = self._session_key(account_id)
+        with self._state_lock:
+            sess = self._sessions.pop(key, None)
+        tls = getattr(self, "_tls", None)
+        if tls is not None and getattr(tls, "key", None) == key:
+            self.page = None
+            self.current_acc_id = None
+        if not sess:
+            return
+        page = sess.get("page")
+        target_id = sess.get("target_id") or getattr(page, "_muse_target_id", None)
+        if page:
+            try:
+                page.close()
+            except Exception:
+                pass
+        self._close_target(target_id)
+        ctx = sess.get("context_id")
+        if ctx and self.browser:
+            try:
+                self._browser_call("Target.disposeBrowserContext",
+                                   {"browserContextId": ctx})
+            except Exception:
+                log.warning("关闭账号 %s 的浏览器会话失败", key)
+
+    def _ensure_context(self, key: str) -> str:
+        with self._state_lock:
+            sess = self._sessions.get(key)
+            ctx = sess.get("context_id") if sess else None
+        if ctx:
+            return ctx
+        try:
+            result = self._browser_call("Target.createBrowserContext", {})
+        except Exception as exc:
+            raise MuseGenerationError(f"无法为账号创建独立浏览器会话: {exc}") from exc
+        ctx = result.get("browserContextId")
+        if not ctx:
+            raise MuseGenerationError("浏览器没有返回独立会话编号")
+        extra = None
+        with self._state_lock:
+            sess = self._sessions.setdefault(key, {})
+            existing = sess.get("context_id")
+            if existing:
+                extra = ctx
+                ctx = existing
+            else:
+                sess["context_id"] = ctx
+                log.info("【账号并发】为 %s 创建独立浏览器会话", key)
+        if extra:
+            try:
+                self._browser_call("Target.disposeBrowserContext",
+                                   {"browserContextId": extra})
+            except Exception:
+                log.warning("关闭重复的浏览器会话失败")
+        return ctx
+
+    def _wait_target_ws(self, target_id: str) -> str:
+        import requests
+        last = None
+        for _ in range(30):
+            try:
+                pages = requests.get(
+                    f"http://127.0.0.1:{self.cfg.cdp_port}/json/list", timeout=3).json()
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+                time.sleep(0.1)
+                continue
+            for p in pages:
+                if p.get("id") == target_id and p.get("webSocketDebuggerUrl"):
+                    return p["webSocketDebuggerUrl"]
+            time.sleep(0.1)
+        raise MuseGenerationError(f"新标签页未就绪: {last}")
+
+    def _open_page(self, account_key: str | None = None):
+        """在指定账号的独立上下文里开一个标签。不关闭其他账号的页面。"""
+        self.start()
+        params = {"url": "about:blank"}
+        if account_key:
+            params["browserContextId"] = self._ensure_context(account_key)
+        try:
+            result = self._browser_call("Target.createTarget", params)
+        except Exception as exc:
+            raise MuseGenerationError(f"无法打开账号标签页: {exc}") from exc
+        target_id = result.get("targetId")
+        if not target_id:
+            raise MuseGenerationError("浏览器没有返回新标签页")
+        page = CDP(self._wait_target_ws(target_id), timeout=180)
+        page._muse_target_id = target_id
+        page._muse_download_dir = self._download_dir(account_key)
         page.send("Network.enable")
         page.send("Page.enable")
         page.send("Runtime.enable")
         page.send("Browser.setDownloadBehavior",
-                  {"behavior": "allow", "downloadPath": self.cfg.download_dir})
+                  {"behavior": "allow", "downloadPath": page._muse_download_dir})
         return page
 
     @staticmethod
@@ -305,7 +544,12 @@ class MuseEngine:
                     || document.querySelector('button[aria-label*="停止"]'));
                 var bodyTxt = document.body ? (document.body.innerText || '') : '';
                 var hasStuck = bodyTxt.indexOf('Still sending') !== -1 || bodyTxt.indexOf('Connecting...') !== -1;
-                if (hasStop || hasStuck || hasAtts) return true;
+                var ta = document.querySelector('textarea');
+                var dirtyDraft = !!(ta && (ta.value || '').replace(/\\s/g, '').length);
+                var dirtyFiles = Array.prototype.some.call(document.querySelectorAll('button[aria-label]'), function(el){
+                    return /^remove attachment$|^移除附件$|^删除附件$/i.test((el.getAttribute('aria-label') || '').trim());
+                });
+                if (hasStop || hasStuck || hasAtts || dirtyDraft || dirtyFiles) return true;
                 if (forChat) {
                     return bubbleCount >= 24;
                 }
@@ -328,18 +572,20 @@ class MuseEngine:
             pass
 
     def ensure_page(self, cookies: dict, expires: dict | None = None, account_id: str | None = None):
-        if self.page is not None and (account_id is None or getattr(self, "current_acc_id", None) == account_id):
+        key = self._session_key(account_id)
+        with self._state_lock:
+            sess = self._sessions.get(key)
+            stale = bool(sess and sess.get("stale"))
+        if stale:
+            self.drop_session(account_id)
+        self._bind(key)
+        if self.page is not None:
             try:
                 if self.page.js("!!document.querySelector('textarea')"):
                     return self.page
             except Exception:
                 pass
-        if self.page:
-            try:
-                self.page.close()
-            except Exception:
-                pass
-            self.page = None
+            self._close_page_only(key)
         # 仅当距离上次 HTTP 续签超过 10 分钟时才在主链路调用 /api/session，避免每次切号重复阻塞
         last_map = getattr(self, "_last_http_renew", None)
         if last_map is None:
@@ -360,23 +606,23 @@ class MuseEngine:
             except Exception as e:
                 log.warning("预续签 /api/session 失败（继续尝试浏览器加载）: %s", e)
 
-        page = self._open_page()
+        page = self._open_page(key)
         self._apply_cookies(page, cookies, expires)
         page.send("Page.navigate", {"url": "https://muse.ai/thread/new"})
         for _ in range(self.cfg.login_wait * 2):
             time.sleep(0.15)
             try:
                 if page.js("!!document.querySelector('textarea')"):
-                    self.page = page
-                    self.current_acc_id = account_id
+                    self._save_page(key, page)
+                    self._bind(key)
                     self._wait_ws_ready(page, timeout=15.0)
                     return page
             except Exception:
                 pass
         try:
             if page.js("!!document.querySelector('textarea')"):
-                self.page = page
-                self.current_acc_id = account_id
+                self._save_page(key, page)
+                self._bind(key)
                 self._wait_ws_ready(page, timeout=15.0)
                 return page
         except Exception:  # noqa: BLE001
@@ -386,17 +632,16 @@ class MuseEngine:
             body = (page.js("document.body.innerText.slice(0,1200)") or "").lower()
         except Exception:  # noqa: BLE001
             body = ""
-        page.close()
+        self._discard_page(page)
         if re.search(r"log in|sign in|create an account|登录|use another account", body):
             raise MuseAuthError("会话已被 muse.ai 登出（可能被其它登录挤掉或触发风控），"
                                 "请用浏览器扩展重新导入 cookie")
         raise MuseGenerationError("muse.ai 页面加载超时（未出现聊天输入框），请检查服务器网络后重试；未确认会话失效")
 
-    def refresh(self, cookies: dict, expires: dict | None = None):
-        if self.page:
-            self.page.close()
-            self.page = None
-        return self.ensure_page(cookies, expires)
+    def refresh(self, cookies: dict, expires: dict | None = None, account_id: str | None = None):
+        key = self._session_key(account_id)
+        self._close_page_only(key)
+        return self.ensure_page(cookies, expires, account_id=account_id)
 
     # ---------------- 额度查询（Settings 面板） ----------------
     # muse.ai 的额度在底部 Settings 菜单 → Settings 项 → 设置面板的
@@ -406,6 +651,8 @@ class MuseEngine:
     #   1% used
     #   Additional tokens / Never expires / 0% used (2B tokens left)
     def _click_point(self, x: int, y: int):
+        self.page.send("Input.dispatchMouseEvent",
+                       {"type": "mouseMoved", "x": x, "y": y})
         for t in ("mousePressed", "mouseReleased"):
             self.page.send("Input.dispatchMouseEvent",
                            {"type": t, "x": x, "y": y,
@@ -419,9 +666,9 @@ class MuseEngine:
         "return JSON.stringify({x:Math.round(r.x+r.width/2),"
         "y:Math.round(r.y+r.height/2)});})()")
 
-    def quota(self, cookies: dict, expires: dict | None = None) -> dict:
+    def quota(self, cookies: dict, expires: dict | None = None, account_id: str | None = None) -> dict:
         """打开 Settings 面板读额度。返回结构化 dict；读不到时 raise。"""
-        self.ensure_page(cookies, expires)
+        self.ensure_page(cookies, expires, account_id=account_id)
         p = self.page
         time.sleep(1)
 
@@ -543,18 +790,141 @@ class MuseEngine:
             return []
 
     # ---------------- 发送 ----------------
-    # 检查「文字真的进了输入框 + Send 按钮真的被渲染出来」。
-    # 两个条件缺一不可：Send 按钮只有 React state 里有文字才会渲染 ——
-    # 它在，就说明 React 真的收到了输入（不是 DOM value 被改了而已）。
-    _SEND_STATE_JS = (
-        "(function(){var ta=document.querySelector('textarea');"
-        "var b=[...document.querySelectorAll('button,[role=button]')]"
-        ".find(function(x){return /send/i.test(x.getAttribute('aria-label')||'');});"
-        "return JSON.stringify({v:ta?ta.value:'',btn:b?(b.disabled?2:1):0});})()"
-    )
+    # 只认 aria-label 恰好是 Send/发送，或 composer 自己的 data-testid。
+    # 导航按钮里只要出现 send 字样就不能点。innerText 含 send 也不算。
+    _COMPOSER_JS = r"""(function(){
+        function visible(el){
+            if(!el) return false;
+            var r = el.getBoundingClientRect();
+            if(r.width < 2 || r.height < 2) return false;
+            var s = window.getComputedStyle(el);
+            if(s.display === 'none' || s.visibility === 'hidden') return false;
+            return true;
+        }
+        function blocked(el){
+            if(el.disabled || el.getAttribute('aria-disabled') === 'true') return true;
+            return window.getComputedStyle(el).pointerEvents === 'none';
+        }
+        var ta = document.querySelector('textarea');
+        var nodes = Array.prototype.slice.call(document.querySelectorAll('button,[role="button"]'));
+        function isSend(el){
+            var al = (el.getAttribute('aria-label') || '').trim().toLowerCase();
+            var id = (el.getAttribute('data-testid') || '').trim().toLowerCase();
+            return al === 'send' || al === '发送'
+                || id === 'hatch-composer-send' || id === 'hatch-composer-send-button';
+        }
+        var send = null;
+        for(var i = 0; i < nodes.length; i++){
+            if(isSend(nodes[i])){ send = nodes[i]; break; }
+        }
+        var stopEl = document.querySelector('[data-testid="hatch-composer-stop-button"]');
+        if(!stopEl){
+            for(var j = 0; j < nodes.length; j++){
+                var al2 = (nodes[j].getAttribute('aria-label') || '').trim().toLowerCase();
+                if(al2 === 'stop' || al2 === '停止' || al2 === 'stop generating'){
+                    stopEl = nodes[j]; break;
+                }
+            }
+        }
+        var removes = 0;
+        var fileBtns = document.querySelectorAll('button[aria-label]');
+        for(var k = 0; k < fileBtns.length; k++){
+            var al3 = (fileBtns[k].getAttribute('aria-label') || '').trim();
+            if(/^remove attachment$|^移除附件$|^删除附件$/i.test(al3)) removes++;
+        }
+        var state = 'missing';
+        var x = 0, y = 0;
+        if(send){
+            var r = send.getBoundingClientRect();
+            x = Math.round(r.left + r.width / 2);
+            y = Math.round(r.top + r.height / 2);
+            if(!visible(send)) state = 'hidden';
+            else if(blocked(send)) state = 'disabled';
+            else state = 'ready';
+        }
+        return JSON.stringify({
+            ta: ta ? (ta.value || '').length : -1,
+            state: state, x: x, y: y,
+            stop: !!(stopEl && visible(stopEl)),
+            removes: removes
+        });
+    })()"""
 
-    def _send(self, prompt: str):
-        # 1. 确保 textarea 滚动到视口中央并获得真实焦点
+    def _composer_state(self) -> dict:
+        try:
+            raw = self.page.js(self._COMPOSER_JS)
+            if isinstance(raw, str) and raw:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    return data
+        except Exception:  # noqa: BLE001
+            pass
+        return {"state": "missing", "ta": -1, "x": 0, "y": 0, "stop": False, "removes": 0}
+
+    def _set_textarea(self, text: str) -> int:
+        """写入输入框，并清掉 React _valueTracker，让发送按钮跟着文字出现。"""
+        payload = json.dumps(text, ensure_ascii=False)
+        payload = payload.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+        js = (
+            "(function(t){"
+            "var ta=document.querySelector('textarea');"
+            "if(!ta) return 0;"
+            "ta.focus();"
+            "var desc=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value');"
+            "if(!desc||!desc.set) return 0;"
+            "var tracker=ta._valueTracker;"
+            "if(tracker&&tracker.setValue){"
+            "try{tracker.setValue(t?'':' ');}catch(e){}"
+            "}"
+            "desc.set.call(ta,t);"
+            "try{ta.dispatchEvent(new InputEvent('input',{bubbles:true,cancelable:true,inputType:'insertText'}));}"
+            "catch(e){ta.dispatchEvent(new Event('input',{bubbles:true}));}"
+            "ta.dispatchEvent(new Event('change',{bubbles:true}));"
+            "return (ta.value||'').length;"
+            "})(" + payload + ")"
+        )
+        try:
+            return int(self.page.js(js) or 0)
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def _wait_submit(self, seconds: float) -> bool:
+        """点过发送之后，输入框被清空或出现停止按钮，才算真正发出。"""
+        deadline = time.time() + max(0.0, seconds)
+        empty_hits = 0
+        while True:
+            st = self._composer_state()
+            if st.get("stop"):
+                return True
+            if st.get("ta") == 0:
+                empty_hits += 1
+                if empty_hits >= 2:
+                    return True
+            else:
+                empty_hits = 0
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.2)
+
+    def _press_enter(self):
+        self.page.js("(function(){var ta=document.querySelector('textarea');if(ta)ta.focus();})()")
+        for modifiers in (0, 2):
+            for kind in ("keyDown", "char", "keyUp"):
+                params = {
+                    "type": kind, "key": "Enter", "code": "Enter",
+                    "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13,
+                    "modifiers": modifiers,
+                }
+                if kind == "char":
+                    params["text"] = "\r"
+                    params["unmodifiedText"] = "\r"
+                self.page.send("Input.dispatchKeyEvent", params)
+            time.sleep(0.15)
+
+    def _send(self, prompt: str, wait: float | None = None):
+        budget = 12.0 if wait is None else max(3.0, float(wait))
+        started = time.time()
+        deadline = started + budget
         try:
             self.page.js("""(function(){
                 var ta = document.querySelector('textarea');
@@ -575,66 +945,73 @@ class MuseEngine:
         if not rect:
             raise MuseGenerationError("找不到聊天输入框")
         c = json.loads(rect)
-        for t in ("mousePressed", "mouseReleased"):
-            self.page.send("Input.dispatchMouseEvent",
-                           {"type": t, "x": c["x"], "y": c["y"],
-                            "button": "left", "clickCount": 1})
+        self._click_point(int(c["x"]), int(c["y"]))
         time.sleep(0.1)
 
-        # 触发 React 18 原型 setter 以及 input/change 事件以同步发送按钮状态
-        # （对于 DeepSeek/Codex 等 100KB+ 超长上下文，直接走原型 setter 仅需 <1s，避免 Input.insertText 逐字注入卡死）
-        _SETTER_JS = (
-            "(function(t){var ta=document.querySelector('textarea');"
-            "if(!ta) return 0;"
-            "ta.focus();"
-            "var s=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set;"
-            "s.call(ta,t);"
-            "ta.dispatchEvent(new Event('input',{bubbles:true}));"
-            "ta.dispatchEvent(new Event('change',{bubbles:true}));"
-            "return (ta.value||'').length;})(%s)")
-        val_len = self.page.js(_SETTER_JS % json.dumps(prompt)) or 0
-        if not val_len and len(prompt) < 500:
+        # 超长提示词走原型 setter。提示词里可能有 %，不能再用 % 拼接脚本。
+        val_len = self._set_textarea(prompt)
+        if not val_len and prompt and len(prompt) < 500:
             self.page.send("Input.insertText", {"text": prompt})
-            self.page.js(_SETTER_JS % json.dumps(prompt))
+            val_len = self._set_textarea(prompt)
+        if prompt and not val_len:
+            log.warning("提示词没有写进输入框（%s 字）", len(prompt))
+            return "no-text"
 
-        # 等待发送按钮就绪并点击
-        clicked = "no-button"
-        t_deadline = time.time() + 3.0
-        while time.time() < t_deadline:
-            res = self.page.js(
-                "(function(){var b=[...document.querySelectorAll('button,[role=button]')]"
-                ".filter(function(x){return x.offsetParent!==null;})"
-                ".find(function(x){return /发送|send/i.test(x.getAttribute('aria-label')||'')"
-                "||/发送|send/i.test(x.getAttribute('data-testid')||'')"
-                "||/send/i.test(x.innerText||'');});"
-                "if(!b)return 'no-button';"
-                "if(b.disabled)return 'disabled';"
-                "b.click();return 'clicked';})()")
-            if res == "clicked":
-                clicked = "clicked"
-                break
-            time.sleep(0.08)
+        last = {"state": "missing", "ta": val_len, "removes": 0}
+        clicks = 0
+        entered = False
+        empty_hits = 0
+        next_click = 0.0
+        next_nudge = time.time() + 2.0
+        while time.time() < deadline:
+            st = self._composer_state()
+            last = st
+            if clicks or entered:
+                if st.get("stop"):
+                    empty_hits = 2
+                elif st.get("ta") == 0:
+                    empty_hits += 1
+                else:
+                    empty_hits = 0
+                if empty_hits >= 2:
+                    how = "enter-sent" if entered and not clicks else "clicked"
+                    if time.time() - started > 5:
+                        log.info("提示词已送出（等待 %.1f 秒，方式 %s）", time.time() - started, how)
+                    return how
+            # 上传未完成时按钮是 disabled，文字还在，不要重写。按钮还没出现才再写一次。
+            if st.get("state") in ("missing", "hidden") and not st.get("stop") and time.time() >= next_nudge:
+                self._set_textarea(prompt)
+                next_nudge = time.time() + 2.0
+                time.sleep(0.15)
+                continue
+            if (
+                st.get("state") == "ready"
+                and clicks < 2
+                and time.time() >= next_click
+                and ((st.get("x") or 0) or (st.get("y") or 0))
+            ):
+                self._click_point(int(st.get("x") or 0), int(st.get("y") or 0))
+                clicks += 1
+                next_click = time.time() + 2.0
+                if self._wait_submit(min(2.0, max(0.0, deadline - time.time()))):
+                    if time.time() - started > 5:
+                        log.info("提示词已送出（等待 %.1f 秒，方式 clicked）", time.time() - started)
+                    return "clicked"
+                continue
+            if st.get("state") == "ready" and clicks and not entered:
+                self._press_enter()
+                entered = True
+                if self._wait_submit(min(2.0, max(0.0, deadline - time.time()))):
+                    if time.time() - started > 5:
+                        log.info("提示词已送出（等待 %.1f 秒，方式 enter-sent）", time.time() - started)
+                    return "enter-sent"
+            time.sleep(0.2)
 
-        if clicked != "clicked":
-            # 兜底：Ctrl+Enter 或普通 Enter
-            for combo in ({"modifiers": 1}, {}):
-                for t in ("keyDown", "char", "keyUp"):
-                    params = {"type": t, "key": "Enter", "code": "Enter",
-                              "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13,
-                              "modifiers": combo.get("modifiers", 0)}
-                    if t == "char":
-                        params["text"] = "\r"
-                        params["unmodifiedText"] = "\r"
-                    self.page.send("Input.dispatchKeyEvent", params)
-                time.sleep(1.0)
-                try:
-                    if self.page.js("!(document.querySelector('textarea')||{value:''}).value"):
-                        clicked = "enter-sent"
-                        break
-                except Exception:
-                    pass
-        time.sleep(0.3)
-        return clicked
+        log.warning(
+            "提示词发送未确认 state=%s ta=%s removes=%s clicks=%s wait=%.0f",
+            last.get("state"), last.get("ta"), last.get("removes"), clicks, budget,
+        )
+        return last.get("state") or "no-button"
 
     # ---------------- 等待生成 ----------------
     def _last_attachment(self) -> dict | None:
@@ -873,7 +1250,9 @@ class MuseEngine:
         self.ensure_page(cookies, expires, account_id=account_id)
         self.reset_thread(for_chat=True)
         base_agent, base_text, _ = self._poll_chat()
-        self._send(prompt)
+        sent = self._send(prompt)
+        if sent not in ("clicked", "enter-sent"):
+            raise MuseGenerationError(send_failure_message(sent))
 
         t_sent = time.time()
         deadline = t_sent + timeout
@@ -958,8 +1337,16 @@ class MuseEngine:
         raise MuseGenerationError(f"未能取回生成结果: {last}")
 
     # ---------------- 下载兜底 ----------------
+    def _download_dir(self, account_key: str | None = None) -> str:
+        """每个账号单独的下载目录，避免并发兜底下载拿错文件。"""
+        key = account_key or self._session_key(self.current_acc_id)
+        folder = os.path.join(self.cfg.download_dir, key)
+        os.makedirs(folder, exist_ok=True)
+        return folder
+
     def _download_fallback(self, src: str, timeout: int = 180) -> str | None:
-        before = set(os.listdir(self.cfg.download_dir))
+        folder = getattr(self.page, "_muse_download_dir", None) or self._download_dir()
+        before = set(os.listdir(folder))
         # ponytail: fail closed when the selected result has no local download;
         # never click an unrelated/global button that can return the upload.
         clicked = self.page.js("""(function(src){
@@ -978,11 +1365,11 @@ class MuseEngine:
         deadline = time.time() + timeout
         while time.time() < deadline:
             time.sleep(1.5)
-            new = [f for f in (set(os.listdir(self.cfg.download_dir)) - before)
+            new = [f for f in (set(os.listdir(folder)) - before)
                    if not f.endswith(".crdownload")]
             if new:
-                p = os.path.join(self.cfg.download_dir, max(
-                    new, key=lambda f: os.path.getmtime(os.path.join(self.cfg.download_dir, f))))
+                p = os.path.join(folder, max(
+                    new, key=lambda f: os.path.getmtime(os.path.join(folder, f))))
                 if os.path.getsize(p) > 0:
                     return p
         return None
@@ -1021,46 +1408,64 @@ class MuseEngine:
         return img, "image/png"
 
     def _clear_attachments(self):
-        """清除聊天输入框里遗留的附件缩略图（兼容中/英文 UI）。"""
+        """去掉输入框里残留的参考图。只点「移除附件」，避免误点别的删除按钮。"""
         try:
-            self.page.js(
-                "(function(){"
-                "var btns=Array.from(document.querySelectorAll('button[aria-label]')).filter(function(b){"
-                "var al=b.getAttribute('aria-label')||'';"
-                "return /remove\\s*attachment|移除附件|删除附件|移除|删除/i.test(al);"
-                "});"
-                "btns.forEach(function(b){b.click();});"
-                "Array.from(document.querySelectorAll('input[type=\"file\"]')).forEach(function(inp){inp.value='';});"
-                "return btns.length;"
-                "})()")
-            time.sleep(0.3)
+            for _ in range(12):
+                raw = self.page.js(
+                    "(function(){"
+                    "var b=Array.prototype.find.call(document.querySelectorAll('button[aria-label]'),function(el){"
+                    "var al=(el.getAttribute('aria-label')||'').trim();"
+                    "if(!/^remove attachment$|^移除附件$|^删除附件$/i.test(al)) return false;"
+                    "var r=el.getBoundingClientRect();"
+                    "return r.width>1&&r.height>1;"
+                    "});"
+                    "if(!b){"
+                    "Array.prototype.forEach.call(document.querySelectorAll('input[type=\"file\"]'),function(inp){inp.value='';});"
+                    "return null;"
+                    "}"
+                    "var r=b.getBoundingClientRect();"
+                    "return JSON.stringify({x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)});"
+                    "})()")
+                if not raw:
+                    break
+                pos = json.loads(raw) if isinstance(raw, str) else raw
+                self._click_point(int(pos["x"]), int(pos["y"]))
+                time.sleep(0.25)
+            self._set_textarea("")
         except Exception:
             pass
 
     def _attach_image(self, image_data: str):
-        """将参考图通过 DataTransfer 附加到输入框，杜绝使用旧历史图片。"""
-        if not image_data:
+        """将一张参考图附加到输入框。"""
+        self._attach_images([image_data] if image_data else [])
+
+    def _attach_images(self, images: list[str]):
+        """一次把多张参考图放进输入框。Muse 的 file input 带 multiple，单次最多 10 张。"""
+        prepared = []
+        for index, image_data in enumerate(images or [], 1):
+            if not image_data:
+                continue
+            b64, mime = self._normalize_image(image_data)
+            if not b64:
+                raise MuseGenerationError(f"第 {index} 张参考图读取失败，已停止生成")
+            ext = ((mime or "image/png").split("/")[-1] or "png").split(";")[0]
+            if ext == "jpeg":
+                ext = "jpg"
+            prepared.append({
+                "b64": b64,
+                "mime": mime or "image/png",
+                "name": f"reference_image_{index}.{ext}",
+            })
+        if not prepared:
             return
-        b64, mime = self._normalize_image(image_data)
-        if not b64:
-            raise MuseGenerationError("参考图读取失败，已停止生成")
+        if len(prepared) > 10:
+            raise MuseGenerationError("参考图最多 10 张")
 
         self._clear_attachments()
 
         _INJECT_JS = """
-        (function(b64, mime) {
+        (function(files) {
             try {
-                var byteChars = atob(b64);
-                var byteNumbers = new Array(byteChars.length);
-                for (var i = 0; i < byteChars.length; i++) {
-                    byteNumbers[i] = byteChars.charCodeAt(i);
-                }
-                var byteArray = new Uint8Array(byteNumbers);
-                var blob = new Blob([byteArray], {type: mime});
-                var ext = mime.split('/')[1] || 'png';
-                if (ext === 'jpeg') ext = 'jpg';
-                var file = new File([blob], 'reference_image.' + ext, {type: mime});
-                // 现网 composer 里可能有多个 file input；优先取位于 composer 内的那个
                 var inputs = Array.from(document.querySelectorAll('input[type="file"]'));
                 if (!inputs.length) return JSON.stringify({ok: false, err: 'no-file-input'});
                 var ov = document.querySelector('[data-testid="hatch-composer-placeholder-overlay"]');
@@ -1070,70 +1475,81 @@ class MuseEngine:
                     input = inputs.find(function(x){ return composer.contains(x); }) || null;
                 }
                 if (!input) {
-                    // 退而求其次：取不在对话气泡里的那个 input
                     input = inputs.find(function(x){
                         return !x.closest('[class*=chat-user-bubble], [class*="group/msg"]');
                     }) || inputs[0];
                 }
-                // 有些版本 accept 为空，补上 image/* 让页面接受本次 File
                 if (!input.getAttribute('accept')) input.setAttribute('accept', 'image/*');
                 var dt = new DataTransfer();
-                dt.items.add(file);
+                files.forEach(function(f) {
+                    var byteChars = atob(f.b64);
+                    var byteNumbers = new Array(byteChars.length);
+                    for (var i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
+                    var blob = new Blob([new Uint8Array(byteNumbers)], {type: f.mime});
+                    dt.items.add(new File([blob], f.name, {type: f.mime}));
+                });
                 input.files = dt.files;
                 input.dispatchEvent(new Event('change', {bubbles: true}));
                 input.dispatchEvent(new Event('input', {bubbles: true}));
-                return JSON.stringify({ok: true});
+                return JSON.stringify({ok: true, count: files.length});
             } catch(e) {
                 return JSON.stringify({ok: false, err: String(e)});
             }
-        })(%s, %s)
+        })(%s)
         """
         try:
-            raw_res = self.page.js(_INJECT_JS % (json.dumps(b64), json.dumps(mime)))
+            raw_res = self.page.js(_INJECT_JS % json.dumps(prepared))
             res_obj = json.loads(raw_res) if isinstance(raw_res, str) else raw_res
             if not res_obj.get("ok"):
                 raise MuseGenerationError("附加参考图失败，已停止生成")
+        except MuseGenerationError:
+            raise
         except Exception as e:
             raise MuseGenerationError("附加参考图失败，已停止生成") from e
 
-        # 等待输入框附件确认；历史图片不能证明本次上传成功。
-        # 现网 UI 已切中文：确认按钮 aria-label = "附加文件"/"移除附件"；
-        # 同时兼容英文（Remove attachment / Attach file），并以 composer 内缩略图兜底。
-        deadline = time.time() + 15.0
+        expect = len(prepared)
+        # 现网确认按钮是「移除附件」，每张图一个；缩略图用 blob 地址，避免把历史图片算进去。
+        deadline = time.time() + max(15.0, 4.0 * expect)
         while time.time() < deadline:
-            has_attached = self.page.js(
+            raw_count = self.page.js(
                 """(function(){
-                var btns = Array.from(document.querySelectorAll('button[aria-label]'));
-                var hasRemove = btns.some(function(b){
+                var removes = Array.from(document.querySelectorAll('button[aria-label]')).filter(function(b){
                     return /remove\\s*attachment|移除附件|删除附件/i.test(b.getAttribute('aria-label') || '');
-                });
-                if (hasRemove) return 'remove';
-                // 兜底：composer 内出现附件缩略图（img/video）
-                var ov = document.querySelector('[data-testid="hatch-composer-placeholder-overlay"]');
-                var composer = ov ? (ov.closest('form') || ov.parentElement.parentElement.parentElement) : null;
-                if (composer) {
-                    var media = composer.querySelectorAll('img, video');
-                    if (media.length > 0) return 'thumb';
+                }).length;
+                var root = document.querySelector('textarea');
+                var blobs = 0;
+                for (var i = 0; i < 6 && root; i++) {
+                    blobs = root.querySelectorAll('img[src^="blob:"]').length;
+                    if (blobs) break;
+                    root = root.parentElement;
                 }
-                return '';
+                return JSON.stringify({removes: removes, blobs: blobs});
                 })()"""
             )
-            if has_attached:
+            try:
+                counts = json.loads(raw_count) if isinstance(raw_count, str) else (raw_count or {})
+            except (TypeError, ValueError):
+                counts = {}
+            if counts.get("removes", 0) >= expect or counts.get("blobs", 0) >= expect:
                 break
             time.sleep(0.3)
         else:
-            raise MuseGenerationError("参考图上传未确认，已停止生成")
+            raise MuseGenerationError(f"参考图上传未确认，期望 {expect} 张，已停止生成")
         time.sleep(0.5)
     # ---------------- 主流程 ----------------
     def generate(self, cookies: dict, prompt: str, expect: str = "image",
                  timeout: int = 240, expires: dict | None = None, account_id: str | None = None,
                  on_progress=None, reference_image: str | None = None,
+                 reference_images: list | None = None,
                  stop_event=None) -> dict:
         self.ensure_page(cookies, expires, account_id=account_id)
         self.reset_thread(for_chat=False)
         self._scroll_bottom()
-        if reference_image:
-            self._attach_image(reference_image)
+        refs = [item for item in (reference_images or []) if item]
+        if not refs and reference_image:
+            refs = [reference_image]
+        if refs:
+            self._attach_images(refs)
         else:
             self._clear_attachments()
         atts_before = self.attachments()
@@ -1141,8 +1557,9 @@ class MuseEngine:
         base = atts_before[-1] if atts_before else {}
         baseline_src = base.get("src") or ""
         base_agent_cnt = self._agent_count()
-        if self._send(prompt) not in ("clicked", "enter-sent"):
-            raise MuseGenerationError("提示词发送未确认，已停止生成")
+        sent = self._send(prompt, wait=send_wait_budget(len(refs)))
+        if sent not in ("clicked", "enter-sent"):
+            raise MuseGenerationError(send_failure_message(sent))
         att = self._wait_attachment(
             baseline_src, timeout, expect, on_progress=on_progress,
             base_agent_cnt=base_agent_cnt, base_att_cnt=len(atts_before),

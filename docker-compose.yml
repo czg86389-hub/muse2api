@@ -12,12 +12,31 @@ services:
       # 管理与 API 鉴权 Key（从 .env 或宿主环境读取，留空则自动生成）
       - MUSE2API_KEY=${MUSE2API_KEY:-}
       # 服务对外基准 URL，如 https://your-domain.com（留空则管理前端自动检测当前域名）
-      - MUSE2API_PUBLIC_BASE=
+      - MUSE2API_PUBLIC_BASE=${MUSE2API_PUBLIC_BASE:-}
+      # 生成结果上传到图床，不在本地保留
+      - IMAGE_UPLOAD_BASE_URL=${IMAGE_UPLOAD_BASE_URL:-https://upload.openclaw-token.shop}
+      - UPLOAD_TOKEN=${UPLOAD_TOKEN:-}
+      - IMAGE_UPLOAD_TIMEOUT=${IMAGE_UPLOAD_TIMEOUT:-300}
+      # 只给 muse2api 用的 Redis，不映射宿主机端口
+      - REDIS_URL=redis://muse2api-redis:6379/0
       # 超时配置（秒）
       - MUSE2API_IMAGE_TIMEOUT=240
       - MUSE2API_VIDEO_TIMEOUT=600
       - MUSE2API_CHAT_TIMEOUT=300
+    depends_on:
+      - muse2api-redis
     volumes:
       # 持久化账号配置、任务日志及媒体文件
       - ./data:/app/data
     shm_size: '2gb' # 保证 Chromium 渲染多标签页时不因 /dev/shm 耗尽崩溃
+
+  muse2api-redis:
+    image: redis:7-alpine
+    container_name: muse2api-redis
+    restart: always
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - muse2api-redis:/data
+
+volumes:
+  muse2api-redis:

@@ -93,6 +93,14 @@ class Config:
     public_base: str = field(
         default_factory=lambda: _env("MUSE2API_PUBLIC_BASE", ""))
 
+    # 生成的图片和视频上传到图床，不在本地保留。
+    image_upload_base_url: str = field(
+        default_factory=lambda: _env("IMAGE_UPLOAD_BASE_URL",
+                                     "https://upload.openclaw-token.shop").rstrip("/"))
+    upload_token: str = field(default_factory=lambda: _env("UPLOAD_TOKEN", ""))
+    image_upload_timeout: int = field(
+        default_factory=lambda: int(_env("IMAGE_UPLOAD_TIMEOUT", "300")))
+
     # 允许跨域调用导入接口的来源（Cookie 助手脚本从 muse.ai 页面提交时用）
     cors_origins: str = field(
         default_factory=lambda: _env("MUSE2API_CORS_ORIGINS",
@@ -110,6 +118,11 @@ class Config:
     # 若目标模型行为有变，可设 MUSE2API_TOOL_PROTOCOL=1 打开这层适配再试。
     tool_protocol: bool = field(
         default_factory=lambda: _env("MUSE2API_TOOL_PROTOCOL", "0").strip() != "0")
+
+    # 任务队列。生产环境指向 muse2api 专用的 Redis。
+    # 测试使用 memory://，不连接外部 Redis。
+    redis_url: str = field(default_factory=lambda: _env(
+        "REDIS_URL", _env("MUSE2API_REDIS_URL", "redis://127.0.0.1:6379/0")))
 
     # 保活设置：是否对已禁用的账号执行自动保活，**默认关闭**。
     # 开启后，被管理员在后台手动禁用的账号仍会由后台守护进程执行自动保活与 VM 唤醒，
@@ -141,6 +154,10 @@ class Config:
     @property
     def tasks_file(self) -> str:
         return os.path.join(self.data_dir, "tasks.json")
+
+    @property
+    def settings_file(self) -> str:
+        return os.path.join(self.data_dir, "settings.json")
 
     def ensure_dirs(self):
         for d in (self.base_dir, self.data_dir, self.media_dir, self.download_dir,

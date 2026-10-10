@@ -207,6 +207,7 @@
     <div class="pills">
       <span class="pill" id="pSvc"><span class="led"></span>服务 <b>—</b></span>
       <span class="pill" id="pAcc"><span class="led"></span>账号 <b>—</b></span>
+      <span class="pill" id="pQueue"><span class="led"></span>队列 <b>—</b></span>
       <span class="pill" id="pBr"><span class="led"></span>浏览器 <b>—</b></span>
       <span class="live" id="live"><span class="led"></span>自动刷新</span>
       <span class="keybox" id="keyBox">
@@ -318,8 +319,9 @@
     <div class="card">
       <h3>添加账号 <span class="tag">支持批量</span></h3>
       <div class="hint">
-        从浏览器复制 <b>muse.ai</b> 的 Cookie 字符串粘贴进来即可。关键 cookie：
-        <code>hatch_sess</code>、<code>hatch_gw</code>、<code>hatch_vml</code>。
+        从浏览器扩展复制 <b>muse.ai</b> 的 Cookie 字符串粘贴进来即可。必填：
+        <code>hatch_sess</code>、<code>hatch_vml</code>、<code>hatch_native_auth_device</code>。
+        <code>hatch_gw</code> 可以没有。
         批量导入时每行一个账号，格式 <code>标签 | cookie串</code>（标签可省略）。
       </div>
       <div class="row">
@@ -329,7 +331,7 @@
         </div>
         <div style="flex:3">
           <label>Cookie 字符串</label>
-          <textarea id="newCookie" rows="4" placeholder="hatch_sess=...; hatch_gw=...; hatch_vml=...&#10;或批量：&#10;acc-01 | hatch_sess=...; hatch_gw=...&#10;acc-02 | hatch_sess=...; hatch_gw=..."></textarea>
+          <textarea id="newCookie" rows="4" placeholder="hatch_sess=...; hatch_vml=...; hatch_native_auth_device=...&#10;或批量：&#10;acc-01 | hatch_sess=...; hatch_vml=...&#10;acc-02 | hatch_sess=...; hatch_vml=..."></textarea>
         </div>
       </div>
       <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
@@ -389,14 +391,11 @@
         <div>
           <b>在浏览器里加载扩展</b>
           <div class="hint" style="margin:4px 0 9px">
-            以 Chrome 为例（Edge / Brave / 360 极速 等 Chromium 内核浏览器步骤类似）：
+            Chrome / Edge：打开 <code>chrome://extensions</code>，开启开发者模式，点「加载已解压的扩展程序」，选中解压出来的文件夹。
           </div>
-          <ol class="olsteps">
-            <li>地址栏输入 <code>chrome://extensions</code> 回车</li>
-            <li>打开右上角 <b>开发者模式</b> 开关</li>
-            <li>点左上角 <b>加载已解压的扩展程序</b></li>
-            <li>选中第 1 步解压出来的<b>文件夹</b>（不是里面的单个文件）</li>
-          </ol>
+          <div class="hint" style="margin:4px 0 9px">
+            <b>Roxy 浏览器</b>：窗口里不能用「加载已解压的扩展程序」。打开 Roxy「扩展中心 → 本地上传」，直接选择刚下载的 zip（不要先解压，压缩包根目录就是 manifest.json）。上传后把扩展关联到要登录 muse.ai 的项目，再打开该项目窗口。
+          </div>
         </div>
       </div>
 
@@ -406,8 +405,8 @@
           <b>登录 muse.ai，然后点扩展图标导入</b>
           <div class="hint" style="margin:4px 0 9px">
             先在你自己的浏览器里打开 <code>https://muse.ai/</code> 并登录
-            （登录到能看到聊天界面为止），再点浏览器工具栏上的扩展图标，
-            把下面两项填进去，点「读取并导入」。
+            （登录到能看到聊天界面为止），再点扩展图标。弹窗会列出必填 Cookie，
+            缺了会标红。点「复制」，粘到本页「Cookie 字符串」后导入。
           </div>
           <div class="row">
             <div style="flex:3">
@@ -462,7 +461,7 @@
         </div>
         <div style="flex:3">
           <label>Cookie 字符串</label>
-          <textarea id="mCookie" rows="3" placeholder="hatch_sess=...; hatch_gw=...; hatch_vml=...; hatch_native_auth_device=..."></textarea>
+          <textarea id="mCookie" rows="3" placeholder="hatch_sess=...; hatch_vml=...; hatch_native_auth_device=..."></textarea>
         </div>
       </div>
       <div style="margin-top:12px">
@@ -500,7 +499,7 @@
         <thead><tr><th>cookie</th><th>httpOnly</th><th>实测有效期</th><th>作用</th></tr></thead>
         <tbody>
           <tr><td class="mono">hatch_sess</td><td>是</td><td><b style="color:var(--ok)">约 30 天</b></td><td>主会话，决定能不能登录</td></tr>
-          <tr><td class="mono">hatch_gw</td><td>是</td><td><b style="color:var(--ok)">约 1 年</b></td><td>网关令牌</td></tr>
+          <tr><td class="mono">hatch_gw</td><td>是</td><td>可选</td><td>网关令牌。当前站点经常不下发，缺了不影响</td></tr>
           <tr><td class="mono">hatch_vml</td><td>是</td><td><b style="color:var(--bad)">约 2 天</b></td><td>短效校验令牌，<b>决定账号寿命</b></td></tr>
           <tr><td class="mono">hatch_native_auth_device</td><td>是</td><td><b style="color:var(--ok)">约 30 天</b></td><td>设备标识（匿名访客也有，不是登录凭证）</td></tr>
         </tbody>
@@ -525,8 +524,41 @@
   <!-- ==================== 任务记录 ==================== -->
   <section class="tab" id="tab-tasks">
     <div class="card">
+      <h3>排队与执行</h3>
+      <div class="hint">图片和视频超过当前可用账号数后，进入 Redis 排队。一个账号同时只跑一个任务，多个账号同时跑。对话不进这个队列；对话占满全部账号时，生成任务会继续排着。</div>
+      <div class="stats">
+        <div class="stat b"><div class="k">并发账号</div><div class="v" id="qCap">0</div></div>
+        <div class="stat g"><div class="k">正在执行</div><div class="v" id="qRun">0</div></div>
+        <div class="stat y"><div class="k">正在排队</div><div class="v" id="qWait">0 / 20</div></div>
+        <div class="stat" id="qRedisStat"><div class="k">Redis</div><div class="v" id="qRedis">—</div></div>
+      </div>
+      <div class="row" style="margin-bottom:14px">
+        <div style="flex:0 0 180px">
+          <label for="qLimit">队列长度（1–500）</label>
+          <input type="number" id="qLimit" min="1" max="500" value="20">
+        </div>
+        <div style="flex:0 0 auto">
+          <button id="qLimitBtn" onclick="saveQueueLimit()">保存</button>
+        </div>
+      </div>
+      <h3 style="margin-top:8px">正在执行</h3>
+      <div class="tblwrap"><table>
+        <thead><tr>
+          <th>任务</th><th>类型</th><th>提示词</th><th>账号</th><th>进度</th><th>已运行</th>
+        </tr></thead>
+        <tbody id="runBody"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+      </table></div>
+      <h3 style="margin-top:16px">正在排队</h3>
+      <div class="tblwrap"><table>
+        <thead><tr>
+          <th>位置</th><th>任务</th><th>类型</th><th>提示词</th><th>已等待</th>
+        </tr></thead>
+        <tbody id="queueBody"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
+      </table></div>
+    </div>
+    <div class="card">
       <h3>生成任务记录 <span class="tag" id="taskCount">0</span></h3>
-      <div class="hint">生视频是异步任务，状态会从 queued → processing → succeeded / failed。</div>
+      <div class="hint">图片和视频都会排队，状态从 queued → processing → completed / failed。上面是当前排队和执行，下面是历史记录。</div>
       <div style="margin-bottom:12px;display:flex;gap:9px">
         <button class="ghost mini" onclick="loadTasks()">刷新</button>
         <button class="danger mini" onclick="clearTasks()">清空全部</button>
@@ -585,6 +617,8 @@
         <div style="max-width:140px"><label>比例</label>
           <select id="vidSize"><option>16:9</option><option>9:16</option><option>1:1</option></select></div>
       </div>
+      <div style="margin-top:10px"><label>参考图（可多选，最多 10 张）</label>
+        <input type="file" id="vidRefs" accept="image/*" multiple></div>
       <div style="margin-top:12px"><button class="primary-lg" id="vidBtn" onclick="runVideo()">开始生成视频</button></div>
       <div class="result" id="vidRes"></div>
     </div>
@@ -633,10 +667,10 @@ curl -X POST <span class="s">"BASE/v1/chat/completions"</span> \
 <span class="c"># 返回</span>
 {<span class="k">"created"</span>:1790148495,<span class="k">"data"</span>:[{
   <span class="k">"revised_prompt"</span>:<span class="s">"一只戴宇航头盔的柴犬"</span>,
-  <span class="k">"url"</span>:<span class="s">"http://your-server:18610/v1/media/xxxx.webp"</span>,
+  <span class="k">"url"</span>:<span class="s">"https://source.openclaw-token.shop/uploads/xxxx.webp"</span>,
   <span class="k">"kind"</span>:<span class="s">"image"</span>,<span class="k">"bytes"</span>:23860}]}
 
-<span class="c"># url 是完整绝对地址，可直接给下游渲染 / 下载；/v1/media/* 无需鉴权。</span>
+<span class="c"># url 是图床公网地址，可直接给下游渲染 / 下载。生成文件不保存在本机。</span>
 <span class="c"># 想要 base64 就传 "response_format":"b64_json"。</span></pre>
 
       <h4>4. 生视频（curl，异步）</h4>
@@ -649,7 +683,7 @@ curl -X POST <span class="s">"BASE/v1/videos"</span> \
 
 <span class="c"># ② 轮询结果</span>
 curl <span class="s">"BASE/v1/videos/task_xxx"</span> -H <span class="s">"Authorization: Bearer $MUSE2API_KEY"</span>
-<span class="c"># → {"status":"succeeded","result":{"url":"/v1/media/xxx.mp4"}}</span></pre>
+<span class="c"># → {"status":"completed","result":{"url":"https://source.openclaw-token.shop/uploads/xxx.mp4"}}</span></pre>
 
       <h4>5. Python（openai SDK 兼容）</h4>
       <pre class="code"><span class="cp" onclick="cp(this)">复制</span><span class="k">from</span> openai <span class="k">import</span> OpenAI
@@ -668,7 +702,7 @@ t = requests.post(<span class="s">"BASE/v1/videos"</span>, json={<span class="s"
 <span class="k">while</span> <span class="k">True</span>:
     s = requests.get(<span class="s">f"BASE/v1/videos/{t['id']}"</span>,
                      headers={<span class="s">"Authorization"</span>:<span class="s">"Bearer m2a_..."</span>}).json()
-    <span class="k">if</span> s[<span class="s">"status"</span>] <span class="k">in</span> (<span class="s">"succeeded"</span>,<span class="s">"failed"</span>): <span class="k">break</span>
+    <span class="k">if</span> s[<span class="s">"status"</span>] <span class="k">in</span> (<span class="s">"completed"</span>,<span class="s">"failed"</span>): <span class="k">break</span>
     time.sleep(<span class="s">5</span>)
 <span class="k">print</span>(s)</pre>
 
@@ -685,6 +719,8 @@ t = requests.post(<span class="s">"BASE/v1/videos"</span>, json={<span class="s"
           <tr><td class="mono">POST</td><td class="mono">/admin/accounts/{id}/quota</td><td>实时读取该账号剩余额度</td></tr>
           <tr><td class="mono">POST</td><td class="mono">/admin/accounts/{id}/cookies</td><td>更新该账号 cookie</td></tr>
           <tr><td class="mono">GET</td><td class="mono">/admin/tasks</td><td>任务记录</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/admin/queue</td><td>排队与执行情况</td></tr>
+          <tr><td class="mono">PUT</td><td class="mono">/admin/queue</td><td>设置队列长度（1–500）</td></tr>
           <tr><td class="mono">GET</td><td class="mono">/admin/media</td><td>媒体库列表</td></tr>
           <tr><td class="mono">POST</td><td class="mono">/admin/media/delete</td><td>批量删除媒体文件</td></tr>
         </tbody>
@@ -1171,7 +1207,71 @@ async function delAcc(id, label){
 }
 
 /* ================= 任务记录 ================= */
+function kindBadge(kind){
+  return kind === 'video'
+    ? '<span class="badge info">视频</span>'
+    : '<span class="badge info">图片</span>';
+}
+function paintQueue(q){
+  q = q || {};
+  const run = q.running_count || 0;
+  const wait = q.queued_count || 0;
+  const limit = q.limit || 20;
+  const pill = $('pQueue');
+  if (pill){
+    pill.className = 'pill ' + (q.redis_ok ? 'on' : 'off');
+    pill.innerHTML = `<span class="led"></span>队列 <b>${wait}</b> · 执行 <b>${run}</b>`;
+  }
+  if ($('qCap')) $('qCap').textContent = q.capacity ?? 0;
+  if ($('qRun')) $('qRun').textContent = run;
+  if ($('qWait')) $('qWait').textContent = wait + ' / ' + limit;
+  if ($('qRedis')){
+    $('qRedis').textContent = q.redis_ok ? '正常' : '不可用';
+    if ($('qRedisStat')) $('qRedisStat').className = 'stat ' + (q.redis_ok ? 'g' : 'r');
+  }
+  const input = $('qLimit');
+  if (input && document.activeElement !== input) input.value = limit;
+  if ($('runBody')){
+    const rows = q.running || [];
+    $('runBody').innerHTML = rows.length ? rows.map(t => `<tr>
+      <td class="mono">${esc(t.id)}</td>
+      <td>${kindBadge(t.kind)}</td>
+      <td><span class="ellip" title="${esc(t.prompt)}">${esc(t.prompt)}</span></td>
+      <td>${esc(t.account_label || t.account || '—')}</td>
+      <td class="mono">${esc(t.progress || 0)}%</td>
+      <td class="mono">${t.elapsed != null ? t.elapsed + 's' : '—'}</td>
+    </tr>`).join('') : '<tr><td colspan="6" class="empty">没有正在执行的任务</td></tr>';
+  }
+  if ($('queueBody')){
+    const rows = q.queued || [];
+    $('queueBody').innerHTML = rows.length ? rows.map(t => `<tr>
+      <td class="mono">${esc(t.position)}</td>
+      <td class="mono">${esc(t.id)}</td>
+      <td>${kindBadge(t.kind)}</td>
+      <td><span class="ellip" title="${esc(t.prompt)}">${esc(t.prompt)}</span></td>
+      <td class="mono">${t.waited != null ? t.waited + 's' : '—'}</td>
+    </tr>`).join('') : '<tr><td colspan="5" class="empty">没有排队任务</td></tr>';
+  }
+}
+async function saveQueueLimit(){
+  const n = parseInt($('qLimit').value, 10);
+  if (!n || n < 1 || n > 500){ toast('队列长度需在 1 到 500 之间', 'bad'); return; }
+  const btn = $('qLimitBtn');
+  if (btn) btn.disabled = true;
+  try{
+    const q = await api('/admin/queue', {method:'PUT', body: JSON.stringify({limit: n})});
+    paintQueue(q);
+    toast('队列长度已保存', 'ok');
+  }catch(e){ toast('保存失败：' + e.message, 'bad'); }
+  finally{ if (btn) btn.disabled = false; }
+}
 async function loadTasks(){
+  try{
+    paintQueue(await api('/admin/queue'));
+  }catch(e){
+    if ($('runBody')) $('runBody').innerHTML = `<tr><td colspan="6" class="empty">加载失败：${esc(e.message)}</td></tr>`;
+    if ($('queueBody')) $('queueBody').innerHTML = `<tr><td colspan="5" class="empty">加载失败：${esc(e.message)}</td></tr>`;
+  }
   try{
     const d = await api('/admin/tasks?limit=60');
     const ts = d.tasks || [];
@@ -1334,7 +1434,7 @@ async function loadMedia(){
           <div class="ac">
             <a class="badge info" href="${esc(m.url)}" target="_blank">打开</a>
             <a class="badge mute" href="${esc(m.url)}" download>下载</a>
-            <a class="badge bad" href="javascript:void(0)" onclick="delSingleMedia('${esc(m.name)}')">删除</a>
+            ${m.remote ? '' : `<a class="badge bad" href="javascript:void(0)" onclick="delSingleMedia('${esc(m.name)}')">删除</a>`}
           </div>
         </div>
       </div>`;
@@ -1381,6 +1481,16 @@ async function runImage(){
   }finally{ btn.disabled = false; btn.textContent = '开始生成图片'; }
 }
 
+function filesToDataUrls(input){
+  const files = Array.from((input && input.files) || []);
+  return Promise.all(files.map(file => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error('读取参考图失败'));
+    reader.readAsDataURL(file);
+  })));
+}
+
 async function runVideo(){
   const btn = $('vidBtn'), box = $('vidRes');
   const prompt = $('vidPrompt').value.trim();
@@ -1390,8 +1500,10 @@ async function runVideo(){
   box.innerHTML = '<span class="spin"></span>正在创建视频任务…';
   const t0 = Date.now();
   try{
-    const t = await api('/v1/videos', {method:'POST', body: JSON.stringify({
-      prompt, duration: parseInt($('vidDur').value) || 5, size: $('vidSize').value})});
+    const refs = await filesToDataUrls($('vidRefs'));
+    const body = {prompt, duration: parseInt($('vidDur').value) || 5, size: $('vidSize').value};
+    if (refs.length) body.reference_images = refs;
+    const t = await api('/v1/videos', {method:'POST', body: JSON.stringify(body)});
     const tick = async () => {
       const s = await api('/v1/videos/' + t.id);
       const el = ((Date.now()-t0)/1000).toFixed(0);
@@ -1557,6 +1669,7 @@ async function loadStatus(){
     $('pBr').innerHTML = `<span class="led"></span>浏览器 <b>${d.browser_running ? '运行中' : '空闲'}</b>`;
     $('sMedia').textContent = d.media_count ?? 0;
     if (d.base_url){ $('dBase').textContent = d.base_url; $('inBase').value = d.base_url; }
+    if (d.queue) paintQueue(d.queue);
   }catch(e){
     if (authOK === false){
       $('pSvc').className = 'pill';
@@ -1564,6 +1677,11 @@ async function loadStatus(){
     } else {
       $('pSvc').className = 'pill off';
       $('pSvc').innerHTML = '<span class="led"></span>服务 <b>' + esc(e.message).slice(0,28) + '</b>';
+    }
+    const q = $('pQueue');
+    if (q){
+      q.className = 'pill off';
+      q.innerHTML = '<span class="led"></span>队列 <b>—</b>';
     }
   }
 }

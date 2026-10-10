@@ -1,0 +1,13 @@
+Muse2API Cookie importer
+========================
+
+Chrome / Edge: chrome://extensions -> Developer mode -> Load unpacked -> select this folder.
+
+Roxy: do not use Load unpacked inside the profile window.
+Extension Center -> Local upload -> choose muse2api-extension.zip
+(manifest.json must sit at the zip root). Then attach the extension to the
+project and open that project window.
+
+Log in at https://muse.ai/ until the chat page is visible, then click the
+extension icon and press 刷新会话. That requests /api/session in this window
+so muse.ai reissues hatch_vml before the cookies are read.
