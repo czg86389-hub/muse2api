@@ -240,6 +240,17 @@ curl -X POST "http://localhost:18610/v1/images/generations" \
 | `MUSE2API_IMAGE_TIMEOUT` | `240` | 生图超时上限（秒） |
 | `MUSE2API_VIDEO_TIMEOUT` | `600` | 生视频超时上限（秒） |
 | `MUSE2API_CHAT_TIMEOUT` | `300` | 对话生成超时上限（秒） |
+| `MUSE2API_REF_IMAGE_LOCAL_FILES` | `1` | 设为 `0` 禁止参考图读取本地路径，仅接受 `data:` 和 http(s) URL |
+| `MUSE2API_REF_IMAGE_PRIVATE_FETCH` | `1` | 设为 `0` 时，参考图下载及每次重定向均检查全部 DNS 解析结果，仅允许公网 IP；连接固定到已检查的 IP，保留原始 Host 与 TLS 服务器名称，不使用环境代理 |
+
+两个开关默认保持现有行为。多人共用时可均设为 `0`，限制所有生图、图像编辑、图片任务及视频接口的参考图输入。
+策略拒绝会在提交任务前返回 HTTP 400 并说明原因，不会忽略参考图继续生成；普通下载失败仍沿用原有错误处理。
+
+参考图安全回归检查（模拟 DNS 和 HTTP，无真实网络或账号）：
+
+```bash
+python tests/test_ref_image_safety.py
+```
 
 ---
 

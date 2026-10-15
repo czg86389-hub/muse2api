@@ -9,13 +9,18 @@
 from __future__ import annotations
 
 import base64
+import http.client
+import ipaddress
 import mimetypes
+import urllib.error
+import urllib.parse
 import urllib.request
 import json
 import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -38,6 +43,72 @@ class MuseAuthError(RuntimeError):
 
 class MuseGenerationError(RuntimeError):
     pass
+
+
+class RefImageSafetyError(ValueError):
+    pass
+
+
+class _RefImageHTTPHandler(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
+    def __init__(self, address):
+        super().__init__()
+        self.address = address
+
+    def _connection(self, host, connection_type, **kwargs):
+        connection = connection_type(host, **kwargs)
+
+        def create_connection(address, timeout, source_address):
+            return socket.create_connection((self.address, address[1]), timeout, source_address)
+
+        # 保留原始 host，供 HTTP Host、TLS SNI 与证书校验使用；只固定连接地址。
+        connection._create_connection = create_connection
+        return connection
+
+    def http_open(self, req):
+        return self.do_open(lambda host, **kw: self._connection(
+            host, http.client.HTTPConnection, **kw), req)
+
+    def https_open(self, req):
+        return self.do_open(lambda host, **kw: self._connection(
+            host, http.client.HTTPSConnection, **kw), req)
+
+
+class _NoRefImageRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_public_ref_image(url):
+    for _ in range(11):
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme not in ("http", "https"):
+            raise RefImageSafetyError("参考图重定向仅允许 http(s) URL")
+        addresses = socket.getaddrinfo(parsed.hostname, parsed.port or (
+            443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+        checked = []
+        for address in addresses:
+            ip = ipaddress.ip_address(address[4][0])
+            if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+                ip = ip.ipv4_mapped
+            if not ip.is_global:
+                raise RefImageSafetyError(
+                    "参考图地址被拒绝：MUSE2API_REF_IMAGE_PRIVATE_FETCH=0，仅允许公网地址")
+            checked.append(str(ip))
+        if not checked:
+            raise urllib.error.URLError("参考图域名未解析到地址")
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _NoRefImageRedirect(),
+            _RefImageHTTPHandler(checked[0]))
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            return opener.open(req, timeout=20)
+        except urllib.error.HTTPError as exc:
+            location = exc.headers.get("Location")
+            if exc.code not in (301, 302, 303, 307, 308) or not location:
+                raise
+            exc.close()
+            url = urllib.parse.urljoin(url, location)
+    raise urllib.error.URLError("参考图重定向次数过多")
 
 
 class MuseEngine:
@@ -1068,8 +1139,7 @@ class MuseEngine:
                     return p
         return None
 
-    @staticmethod
-    def _normalize_image(img: str) -> tuple[str, str]:
+    def _normalize_image(self, img: str) -> tuple[str, str]:
         """将各种形态的图片输入归一为 (base64_str, mime_type)。"""
         if not img:
             return "", "image/png"
@@ -1083,13 +1153,20 @@ class MuseEngine:
         if img.startswith("http://") or img.startswith("https://"):
             try:
                 req = urllib.request.Request(img, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=20) as resp:
+                response = (urllib.request.urlopen(req, timeout=20)
+                            if self.cfg.ref_image_private_fetch else _open_public_ref_image(img))
+                with response as resp:
                     data = resp.read()
                     mime = resp.headers.get_content_type() or "image/png"
                     return base64.b64encode(data).decode("ascii"), mime
+            except RefImageSafetyError:
+                raise
             except Exception as e:
                 log.warning("下载远程参考图失败: %s", e)
                 return "", "image/png"
+        if not self.cfg.ref_image_local_files:
+            raise RefImageSafetyError(
+                "参考图本地路径被拒绝：MUSE2API_REF_IMAGE_LOCAL_FILES=0，仅允许 data: 或 http(s) URL")
         if os.path.isfile(img):
             try:
                 with open(img, "rb") as f:

@@ -45,7 +45,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 from pydantic import BaseModel, Field
 
 from config import CFG
-from engine import ESSENTIAL_COOKIES, MuseAuthError, MuseEngine, MuseGenerationError
+from engine import (ESSENTIAL_COOKIES, MuseAuthError, MuseEngine, MuseGenerationError,
+                    RefImageSafetyError)
 from store import Store, account_expiry, min_expiry
 
 import sys
@@ -977,6 +978,16 @@ def _image_response(req: ImageRequest, res: dict) -> dict:
     return {"created": int(time.time()), "data": [item]}
 
 
+def _prepare_reference_image(image):
+    if not image or (CFG.ref_image_local_files and CFG.ref_image_private_fetch):
+        return image
+    try:
+        b64, mime = engine._normalize_image(image)
+    except RefImageSafetyError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return f"data:{mime};base64,{b64}"
+
+
 def _queue_image(req: ImageRequest, prompt: str, reference_image: str | None,
                  idempotency_key: str | None = None):
     """Opt-in polling avoids reverse-proxy timeouts; no generation is repeated by polling."""
@@ -1044,6 +1055,7 @@ def create_image_task(req: ImageRequest,
     if not ref_img and req.images:
         first = req.images[0]
         ref_img = first.get("image_url") or first.get("url") if isinstance(first, dict) else first
+    ref_img = _prepare_reference_image(ref_img)
     return _queue_image(req, build_image_prompt(req), ref_img, idempotency_key)
 
 
@@ -1069,6 +1081,7 @@ async def images_generations(req: ImageRequest, _=Depends(auth)):
         first = req.images[0]
         ref_img = first.get("image_url") or first.get("url") if isinstance(first, dict) else first
 
+    ref_img = await asyncio.to_thread(_prepare_reference_image, ref_img)
     prompt = build_image_prompt(req)
     timeout = req.timeout or CFG.image_timeout
     if req.async_:
@@ -1152,6 +1165,7 @@ async def images_edits(request: Request, _=Depends(auth)):
         reference_image=ref_image_data,
         **{"async": async_mode}
     )
+    ref_image_data = await asyncio.to_thread(_prepare_reference_image, ref_image_data)
     full_prompt = build_image_prompt(req_obj)
     gen_timeout = timeout or CFG.image_timeout
     if req_obj.async_:
@@ -1178,6 +1192,7 @@ async def create_video(req: VideoRequest, _=Depends(auth)):
     elif req.image:
         ref_img = req.image.get("url") if isinstance(req.image, dict) else req.image
 
+    ref_img = await asyncio.to_thread(_prepare_reference_image, ref_img)
     prompt = build_video_prompt(req)
     timeout = req.timeout or CFG.video_timeout
     task = store.create_task("video", req.prompt)

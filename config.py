@@ -104,6 +104,12 @@ class Config:
     chat_timeout: int = field(default_factory=lambda: int(_env("MUSE2API_CHAT_TIMEOUT", "300")))
     max_concurrency: int = field(default_factory=lambda: max(1, int(_env("MUSE2API_CONCURRENCY", "2"))))
 
+    # 参考图输入：默认保留本地文件与内网下载能力。
+    ref_image_local_files: bool = field(
+        default_factory=lambda: _env("MUSE2API_REF_IMAGE_LOCAL_FILES", "1").strip() != "0")
+    ref_image_private_fetch: bool = field(
+        default_factory=lambda: _env("MUSE2API_REF_IMAGE_PRIVATE_FETCH", "1").strip() != "0")
+
     # 工具调用（function calling）协议适配开关，**默认关闭**。
     # 实测 muse.ai 的助手会明确拒绝输出"伪工具调用"（原话：「我不会按这种 JSON
     # 格式输出'伪工具调用'」），强行注入协议反而会污染正常回答。
