@@ -8,6 +8,8 @@ import threading
 import time
 import uuid
 
+from proxy import public_proxy
+
 _LOCK = threading.Lock()
 
 # 决定账号生死的核心 cookie（与 engine.ESSENTIAL_COOKIES 保持一致）
@@ -122,10 +124,17 @@ class Store:
             _write(self.cfg.accounts_file, self.accounts)
             return acc
 
+    @staticmethod
+    def public_account(account: dict) -> dict:
+        item = {k: v for k, v in account.items() if k not in ("cookies", "proxy")}
+        item["proxy"] = public_proxy(account.get("proxy"))
+        item["cookie_count"] = len(account.get("cookies", {}))
+        return item
+
     def list_accounts(self) -> list[dict]:
         out = []
         for a in self.accounts:
-            item = {k: v for k, v in a.items() if k != "cookies"}
+            item = self.public_account(a)
             ce = a.get("cookies_exp") or {}
             if _is_pos(ce.get("hatch_vml")):
                 item["expires_at"] = int(ce["hatch_vml"])

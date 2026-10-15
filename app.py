@@ -42,11 +42,12 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                Response, StreamingResponse)
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr, field_validator
 
 from config import CFG
 from engine import ESSENTIAL_COOKIES, MuseAuthError, MuseEngine, MuseGenerationError
 from store import Store, account_expiry, min_expiry
+from proxy import normalize_server
 
 import sys
 log = logging.getLogger("muse2api")
@@ -77,6 +78,7 @@ app.add_middleware(CORSMiddleware,
 
 store = Store(CFG)
 engine = MuseEngine(CFG)
+engine.proxy_resolver = lambda aid: (store.get_account(aid) or {}).get("proxy")
 
 
 class ConcurrencyLock:
@@ -207,11 +209,14 @@ async def _http_exc(request: Request, exc: HTTPException):
 
 @app.exception_handler(RequestValidationError)
 async def _validation_exc(request: Request, exc: RequestValidationError):
+    # Never echo user-supplied proxy credentials in validation errors.
+    errors = [{k: v for k, v in error.items() if k not in ("input", "ctx")}
+              for error in exc.errors()]
     if request.url.path.startswith("/v1/"):
         return JSONResponse(status_code=422, content={"error": {
-            "message": "请求参数校验失败：" + str(exc.errors())[:400],
+            "message": "请求参数校验失败：" + str(errors)[:400],
             "type": "invalid_request_error", "param": None, "code": 422}})
-    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+    return JSONResponse(status_code=422, content={"detail": errors})
 
 MODELS = [
     {"id": "muse-spark", "object": "model", "owned_by": "muse",
@@ -291,7 +296,8 @@ def _renew_and_persist(acc_id: str, wake_vm: bool = True, force: bool = False) -
         engine._last_http_renew[acc_id] = last_sync
         return acc
     try:
-        res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"), wake_vm=wake_vm)
+        res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"), wake_vm=wake_vm,
+                                        **({"proxy": acc["proxy"]} if acc.get("proxy") else {}))
         engine._last_http_renew[acc_id] = now
         if res.get("cookies"):
             store.update_account(acc_id, cookies=res["cookies"],
@@ -477,17 +483,63 @@ class ResponsesRequest(BaseModel):
     store: bool | None = None
 
 
+class AccountProxy(BaseModel):
+    server: str
+    username: str = ""
+    password: SecretStr | None = None
+
+    @field_validator("server")
+    @classmethod
+    def validate_server(cls, value):
+        return normalize_server(value)
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, value):
+        if ":" in value or any(ord(c) < 32 for c in value):
+            raise ValueError("Proxy username cannot contain a colon or control characters")
+        try:
+            value.encode("latin-1")
+        except UnicodeError:
+            raise ValueError("Proxy credentials must use Latin-1 characters") from None
+        return value
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, value):
+        if value is not None:
+            try:
+                value.get_secret_value().encode("latin-1")
+            except UnicodeError:
+                raise ValueError("Proxy credentials must use Latin-1 characters") from None
+        return value
+
+    def configuration(self, previous=None):
+        previous = previous or {}
+        password = self.password.get_secret_value() if self.password is not None else None
+        if password is None:
+            if previous.get("server") == self.server and previous.get("username", "") == self.username:
+                password = previous.get("password", "")
+            elif self.username:
+                raise HTTPException(400, "Enter the proxy password when changing its server or username")
+            else:
+                password = ""
+        return {"server": self.server, "username": self.username, "password": password}
+
+
 class AccountRequest(BaseModel):
     label: str = ""
     cookies: dict[str, str] = Field(default_factory=dict)
     cookie_header: str | None = None
     batch: str | None = None          # 多行文本，每行一个账号
     expires: dict[str, int] = Field(default_factory=dict)   # cookie 名 -> 过期时间戳
+    proxy: AccountProxy | None = None
 
 
 class AccountPatch(BaseModel):
     label: str | None = None
     enabled: bool | None = None
+    proxy: AccountProxy | None = None
 
 
 # ------------------------- 提示词构造 -------------------------
@@ -1583,6 +1635,7 @@ def list_accounts(_=Depends(auth)):
 
 @app.post("/admin/accounts")
 def add_account(req: AccountRequest, _=Depends(auth)):
+    proxy = req.proxy.configuration() if req.proxy else None
     added: list[dict] = []
     seen: list[dict] = []          # 本次导入的所有 cookie，用来检查核心项是否齐全
 
@@ -1607,6 +1660,10 @@ def add_account(req: AccountRequest, _=Depends(auth)):
     if not added:
         raise HTTPException(400, "未解析到任何 cookie，请检查格式")
 
+    if proxy:
+        for account in added:
+            store.update_account(account["id"], proxy=proxy)
+
     # 只要有一个账号把核心 cookie 凑齐就算通过（批量时按整体判断）
     missing = [n for n in ESSENTIAL_COOKIES
                if not any(n in c for c in seen)]
@@ -1618,11 +1675,19 @@ def add_account(req: AccountRequest, _=Depends(auth)):
 
 @app.patch("/admin/accounts/{aid}")
 def patch_account(aid: str, req: AccountPatch, _=Depends(auth)):
-    acc = store.update_account(aid, label=req.label, enabled=req.enabled)
+    existing = store.get_account(aid)
+    if not existing:
+        raise HTTPException(404, "账号不存在")
+    changes = {"label": req.label, "enabled": req.enabled}
+    if "proxy" in req.model_fields_set:
+        # An empty dict clears the proxy; omitted fields preserve it.
+        changes["proxy"] = req.proxy.configuration(existing.get("proxy")) if req.proxy else {}
+        changes.update(synced_at=0, last_keepalive=0)
+        engine._last_http_renew.pop(aid, None)
+    acc = store.update_account(aid, **changes)
     if not acc:
         raise HTTPException(404, "账号不存在")
-    return {k: v for k, v in acc.items() if k != "cookies"} | {
-        "cookie_count": len(acc.get("cookies", {}))}
+    return store.public_account(acc)
 
 
 @app.delete("/admin/accounts/{aid}")
@@ -1646,7 +1711,7 @@ async def test_account(aid: str, _=Depends(auth)):
         with GEN_LOCK:
             try:
                 engine.start()
-                engine.refresh(acc["cookies"], acc.get("cookies_exp"))
+                engine.refresh(acc["cookies"], acc.get("cookies_exp"), account_id=aid)
                 synced = _sync_cookies(aid)
                 quota = None
                 quota_error = None
@@ -1712,7 +1777,7 @@ def relogin(_=Depends(auth)):
         raise HTTPException(400, "没有可用账号")
     try:
         engine.start()
-        engine.refresh(acc["cookies"], acc.get("cookies_exp"))
+        engine.refresh(acc["cookies"], acc.get("cookies_exp"), account_id=acc["id"])
         return {"ok": True, "account": acc["id"]}
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
@@ -1972,7 +2037,8 @@ def _probe_account_sync(aid: str, check_quota: bool = False) -> dict:
     if not acc or not acc.get("cookies"):
         return {"ok": False, "id": aid, "label": (acc or {}).get("label", aid), "error": "账号无有效 cookie"}
     try:
-        res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"), wake_vm=True)
+        res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"), wake_vm=True,
+                                        **({"proxy": acc["proxy"]} if acc.get("proxy") else {}))
         store.update_account(
             aid,
             cookies=res["cookies"],
@@ -2127,7 +2193,7 @@ def get_keepalive_status(_=Depends(auth)):
 # ------------------------- 仓库实时更新检测、通知与一键在线升级 -------------------------
 REPO_URL = "https://github.com/czg86389-hub/muse2api"
 TRACKED_REPO_PATHS = [
-    "app.py", "engine.py", "store.py", "cdp.py", "config.py",
+    "app.py", "engine.py", "store.py", "cdp.py", "config.py", "proxy.py",
     "admin.html", "README.md", "version.json", "requirements.txt",
     "Dockerfile", "docker-compose.yml", ".env.example", ".gitignore",
     "LICENSE", "extension", "deploy", "tools",
