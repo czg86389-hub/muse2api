@@ -95,12 +95,20 @@
 
   /* ---------- 表单 ---------- */
   label{display:block;font-size:12.5px;color:var(--muted);margin-bottom:5px}
-  input[type=text],input[type=number],textarea,select{
+  input[type=text],input[type=number],.proxy-dialog input[type=password],textarea,select{
     width:100%;background:var(--bg2);color:var(--text);border:1px solid var(--line);border-radius:9px;
     padding:9px 12px;font-size:13px;outline:none;transition:.15s;font-family:inherit
   }
   textarea{font-family:ui-monospace,monospace;resize:vertical;line-height:1.55}
   input:focus,textarea:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(79,140,255,.13)}
+  dialog.proxy-dialog{width:min(480px,calc(100% - 32px));max-height:calc(100dvh - 32px);overflow:auto;
+    background:var(--panel);color:var(--text);border:1px solid var(--line2);border-radius:var(--radius);padding:24px}
+  dialog.proxy-dialog::backdrop{background:rgba(0,0,0,.65)}
+  .proxy-dialog h2{margin:0 0 8px;font-size:18px}
+  .proxy-dialog label{margin-top:16px}
+  .proxy-dialog .proxy-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;margin-top:24px}
+  .proxy-summary{max-width:180px;font-size:11px;color:var(--muted);margin-top:4px}
+  #proxyError{color:var(--bad);margin-top:12px;font-size:13px}
   button{
     background:var(--accent2);color:#fff;border:0;border-radius:9px;padding:9px 16px;
     font-size:13px;cursor:pointer;transition:.15s;font-family:inherit;white-space:nowrap
@@ -757,6 +765,26 @@ t = requests.post(<span class="s">"BASE/v1/videos"</span>, json={<span class="s"
 
 <div id="toasts"></div>
 
+<dialog id="proxyDialog" class="proxy-dialog" aria-labelledby="proxyTitle" aria-describedby="proxyHelp">
+  <form id="proxyForm">
+    <h2 id="proxyTitle">账号代理 / Account proxy</h2>
+    <p class="hint" id="proxyHelp">该账号的浏览器与会话保活都通过此 HTTP 代理连接。保存后，新请求生效。</p>
+    <label for="proxyServer">HTTP proxy server</label>
+    <input id="proxyServer" type="text" placeholder="http://proxy.example.com:8080" required autocomplete="off" spellcheck="false">
+    <label for="proxyUsername">Username</label>
+    <input id="proxyUsername" type="text" autocomplete="off" spellcheck="false">
+    <label for="proxyPassword">Password</label>
+    <input id="proxyPassword" type="password" autocomplete="new-password" aria-describedby="proxyPasswordHelp">
+    <p class="hint" id="proxyPasswordHelp">密码不会回显。地址与用户名不变时，留空保留已保存密码。</p>
+    <div id="proxyError" role="alert"></div>
+    <div class="proxy-actions">
+      <button type="button" class="danger" id="proxyRemove">移除 / Remove</button>
+      <button type="button" class="ghost" onclick="$('proxyDialog').close()">取消 / Cancel</button>
+      <button type="submit" id="proxySave">保存 / Save</button>
+    </div>
+  </form>
+</dialog>
+
 <script>
 /* ================= 界面语言 / UI language =================
  * 中文是源语言；英文通过下面的词典在渲染时替换（静态文本、动态插入的节点、alert/confirm/prompt）。
@@ -1381,6 +1409,7 @@ async function api(path, opts){
     let msg = '';
     if (data) {
       if (typeof data.detail === 'string') msg = data.detail;
+      else if (Array.isArray(data.detail)) msg = data.detail.map(e => e.msg || 'Invalid value').join('; ');
       else if (typeof data.message === 'string') msg = data.message;
       else if (data.error) msg = typeof data.error === 'string' ? data.error : (data.error.message || JSON.stringify(data.error));
     }
@@ -1643,7 +1672,7 @@ async function loadPool(){
                   : '<span class="badge warn">○ 未检测</span>';
       const miss = a.essential_ok ? '' : ' <span class="badge bad" title="缺少核心 cookie，无法生成">缺核心</span>';
       return `<tr>
-        <td><b>${esc(a.label)}</b></td>
+        <td><b>${esc(a.label)}</b><div class="mono ellip proxy-summary" title="${esc(a.proxy?.server || '直连 / Direct')}">${esc(a.proxy?.server || '直连 / Direct')}</div></td>
         <td class="mono">${esc(a.id)}</td>
         <td>${badge}${miss}</td>
         <td>${expiryBadge(a)}</td>
@@ -1656,6 +1685,7 @@ async function loadPool(){
           <button class="ghost mini" onclick="testAcc('${a.id}')">测试</button>
           <button class="ghost mini" onclick="keepaliveOne('${a.id}')" title="静默刷新会话令牌与有效期">保活</button>
           <button class="ghost mini" onclick="queryQuota('${a.id}', this)">额度</button>
+          <button class="ghost mini" onclick="openProxy('${a.id}')">代理 / Proxy</button>
           <button class="ghost mini" onclick="toggleAcc('${a.id}', ${!a.enabled})">${a.enabled ? '禁用' : '启用'}</button>
           <button class="ghost mini" onclick="renameAcc('${a.id}','${esc(a.label)}')">改名</button>
           <button class="ghost mini" onclick="updateCookies('${a.id}')">更新Cookie</button>
@@ -1696,6 +1726,50 @@ async function testAcc(id){
     loadPool();
   }catch(e){ toast('测试失败：' + e.message, 'bad'); }
 }
+
+let proxyAccountId = null;
+function openProxy(id){
+  const account = accounts.find(a => a.id === id);
+  if (!account) return;
+  proxyAccountId = id;
+  $('proxyForm').reset();
+  $('proxyServer').value = account.proxy?.server || '';
+  $('proxyUsername').value = account.proxy?.username || '';
+  $('proxyError').textContent = '';
+  $('proxySave').disabled = false;
+  $('proxyRemove').disabled = !account.proxy;
+  $('proxyDialog').showModal();
+  $('proxyServer').focus();
+}
+$('proxyDialog').addEventListener('close', () => {
+  $('proxyForm').reset();
+  proxyAccountId = null;
+});
+async function saveProxy(remove){
+  const id = proxyAccountId;
+  if (!id) return;
+  let proxy = null;
+  if (!remove){
+    proxy = {server: $('proxyServer').value.trim(), username: $('proxyUsername').value};
+    if ($('proxyPassword').value) proxy.password = $('proxyPassword').value;
+  }
+  $('proxySave').disabled = true;
+  $('proxyRemove').disabled = true;
+  $('proxyError').textContent = '';
+  try{
+    await api(`/admin/accounts/${id}`, {method:'PATCH', body:JSON.stringify({proxy})});
+    $('proxyDialog').close();
+    toast(remove ? '代理已移除 / Proxy removed' : '代理已保存 / Proxy saved', 'ok');
+    loadPool();
+  }catch(e){
+    $('proxyError').textContent = e.message;
+  }finally{
+    $('proxySave').disabled = false;
+    $('proxyRemove').disabled = !accounts.find(a => a.id === id)?.proxy;
+  }
+}
+$('proxyForm').addEventListener('submit', event => { event.preventDefault(); saveProxy(false); });
+$('proxyRemove').addEventListener('click', () => saveProxy(true));
 
 async function keepaliveOne(id){
   toast('正在为该账号执行会话静默续期…');

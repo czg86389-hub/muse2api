@@ -146,6 +146,43 @@
 
 ## 📖 API 调用示例
 
+### Per-account HTTP proxy (with authentication)
+
+In the account pool, click **代理 / Proxy** next to an account. Enter the proxy
+server (for example, `http://proxy.example.com:8080`), username, and password,
+then click **Save**. Use **测试 / Test** to check that the Muse session works.
+The account's browser traffic and session renewal/VM wake requests use this proxy.
+Each account can use a different proxy. New requests use the updated setting;
+already running tasks finish with their existing connection.
+
+Passwords are stored alongside account cookies in the local `data/accounts.json`
+file and are never returned by the account API. When editing, leave the password
+blank to keep it, provided the server and username are unchanged. **Remove**
+restores direct connections. HTTP proxies with Basic authentication are supported;
+SOCKS proxies and HTTPS proxy endpoints are not supported by this setting.
+
+The authenticated admin API also accepts:
+
+```http
+PATCH /admin/accounts/{account_id}
+Content-Type: application/json
+Authorization: Bearer <MUSE2API_KEY>
+
+{
+  "proxy": {
+    "server": "http://proxy.example.com:8080",
+    "username": "your-proxy-user",
+    "password": "your-proxy-password"
+  }
+}
+```
+
+Omit `proxy` to leave the setting unchanged; send `{"proxy": null}` to remove it.
+`POST /admin/accounts` accepts the same optional `proxy` object, including for
+batch imports. Responses expose `server`, `username`, and `has_password` only.
+
+---
+
 所有受保护接口均需在 Header 中携带：
 ```http
 Authorization: Bearer <你的MUSE2API_KEY>
