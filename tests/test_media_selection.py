@@ -51,10 +51,20 @@ with tempfile.TemporaryDirectory(prefix='muse-media-test-', dir=Path.home(), ign
    engine._download_fallback('selected',timeout=0)
   else:engine._download_fallback(timeout=0)
   global_click=page.js('window.wrongDownload')
+  page.js('''document.body.innerHTML=`<form><div data-testid="hatch-composer-placeholder-overlay"></div><input type="file"></form>`;
+    document.querySelector('input').addEventListener('change',function(e){
+      for (var i=0;i<e.target.files.length;i++) {
+        var b=document.createElement('button');b.setAttribute('aria-label','Remove attachment');
+        e.target.closest('form').appendChild(b);
+      }
+    });''')
+  engine._normalize_image=lambda value:('eA==','image/png')
+  engine._attach_images(['first','second'])
+  multi_reference_uploaded=page.js("document.querySelectorAll('button[aria-label=\"Remove attachment\"]').length")
   engine._normalize_image=lambda _:('', 'image/png')
   try:engine._attach_image('bad-reference'); rejected=False
   except module.MuseGenerationError:rejected=True
-  result={'upload_only_accepted':len(upload)>0,'result_sources':[a['src'] for a in atts], 'extract_b64':extracted.get('b64'),'stale_selected':selected['src'],'video_selected':video['vSrc'],'fallback_video_rejected':fallback_video_rejected,'tid_video_cover_rejected':tid_video_cover_rejected,'global_download_clicked':global_click,'invalid_reference_rejected':rejected}
+  result={'upload_only_accepted':len(upload)>0,'result_sources':[a['src'] for a in atts], 'extract_b64':extracted.get('b64'),'stale_selected':selected['src'],'video_selected':video['vSrc'],'fallback_video_rejected':fallback_video_rejected,'tid_video_cover_rejected':tid_video_cover_rejected,'global_download_clicked':global_click,'invalid_reference_rejected':rejected,'multi_reference_uploaded':multi_reference_uploaded}
   print(json.dumps(result,sort_keys=True))
   if '--observe' not in sys.argv:
    assert not result['upload_only_accepted']
@@ -64,7 +74,7 @@ with tempfile.TemporaryDirectory(prefix='muse-media-test-', dir=Path.home(), ign
    assert result['video_selected']=='clip.mp4'
    assert result['fallback_video_rejected']
    assert result['tid_video_cover_rejected']
-   assert not global_click and rejected
-   print('PASS: input preview excluded; exact selected bytes; all old sources ignored; video retained; crossmodal fallback rejected; tid-video cover rejected; scoped download; upload failure closed')
+   assert not global_click and rejected and multi_reference_uploaded==2
+   print('PASS: input preview excluded; exact selected bytes; all old sources ignored; video retained; crossmodal fallback rejected; tid-video cover rejected; scoped download; multi-reference upload; upload failure closed')
  finally:
   engine.stop()

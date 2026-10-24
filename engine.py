@@ -1175,29 +1175,24 @@ class MuseEngine:
         except Exception:
             pass
 
-    def _attach_image(self, image_data: str):
-        """将参考图通过 DataTransfer 附加到输入框，杜绝使用旧历史图片。"""
-        if not image_data:
+    def _attach_images(self, image_data: list[str]):
+        """逐张附加参考图，并确认全部进入 composer。"""
+        images = []
+        for index, value in enumerate(image_data):
+            if not value:
+                continue
+            b64, mime = self._normalize_image(value)
+            if not b64:
+                raise MuseGenerationError(f"第 {index + 1} 张参考图读取失败，已停止生成")
+            images.append({"b64": b64, "mime": mime, "index": index + 1})
+        if not images:
             return
-        b64, mime = self._normalize_image(image_data)
-        if not b64:
-            raise MuseGenerationError("参考图读取失败，已停止生成")
 
         self._clear_attachments()
 
         _INJECT_JS = """
-        (function(b64, mime) {
+        (async function(images) {
             try {
-                var byteChars = atob(b64);
-                var byteNumbers = new Array(byteChars.length);
-                for (var i = 0; i < byteChars.length; i++) {
-                    byteNumbers[i] = byteChars.charCodeAt(i);
-                }
-                var byteArray = new Uint8Array(byteNumbers);
-                var blob = new Blob([byteArray], {type: mime});
-                var ext = mime.split('/')[1] || 'png';
-                if (ext === 'jpeg') ext = 'jpg';
-                var file = new File([blob], 'reference_image.' + ext, {type: mime});
                 // 现网 composer 里可能有多个 file input；优先取位于 composer 内的那个
                 var inputs = Array.from(document.querySelectorAll('input[type="file"]'));
                 if (!inputs.length) return JSON.stringify({ok: false, err: 'no-file-input'});
@@ -1215,21 +1210,37 @@ class MuseEngine:
                 }
                 // 有些版本 accept 为空，补上 image/* 让页面接受本次 File
                 if (!input.getAttribute('accept')) input.setAttribute('accept', 'image/*');
-                var dt = new DataTransfer();
-                dt.items.add(file);
-                input.files = dt.files;
-                input.dispatchEvent(new Event('change', {bubbles: true}));
-                input.dispatchEvent(new Event('input', {bubbles: true}));
-                return JSON.stringify({ok: true});
+                for (var image of images) {
+                    var byteChars = atob(image.b64);
+                    var byteNumbers = new Array(byteChars.length);
+                    for (var i = 0; i < byteChars.length; i++) {
+                        byteNumbers[i] = byteChars.charCodeAt(i);
+                    }
+                    var mime = image.mime || 'image/png';
+                    var byteArray = new Uint8Array(byteNumbers);
+                    var blob = new Blob([byteArray], {type: mime});
+                    var ext = mime.split('/')[1] || 'png';
+                    if (ext === 'jpeg') ext = 'jpg';
+                    var dt = new DataTransfer();
+                    dt.items.add(new File(
+                        [blob], 'reference_image_' + image.index + '.' + ext, {type: mime}));
+                    input.files = dt.files;
+                    input.dispatchEvent(new Event('change', {bubbles: true}));
+                    input.dispatchEvent(new Event('input', {bubbles: true}));
+                    await new Promise(function(resolve){ setTimeout(resolve, 350); });
+                }
+                return JSON.stringify({ok: true, count: images.length});
             } catch(e) {
                 return JSON.stringify({ok: false, err: String(e)});
             }
-        })(%s, %s)
+        })(%s)
         """
         try:
-            raw_res = self.page.js(_INJECT_JS % (json.dumps(b64), json.dumps(mime)))
+            raw_res = self.page.js(
+                _INJECT_JS % json.dumps(images), await_promise=True,
+                timeout=max(15, len(images) * 3))
             res_obj = json.loads(raw_res) if isinstance(raw_res, str) else raw_res
-            if not res_obj.get("ok"):
+            if not res_obj.get("ok") or res_obj.get("count") != len(images):
                 raise MuseGenerationError("附加参考图失败，已停止生成")
         except Exception as e:
             raise MuseGenerationError("附加参考图失败，已停止生成") from e
@@ -1238,41 +1249,49 @@ class MuseEngine:
         # 现网 UI 已切中文：确认按钮 aria-label = "附加文件"/"移除附件"；
         # 同时兼容英文（Remove attachment / Attach file），并以 composer 内缩略图兜底。
         deadline = time.time() + 15.0
+        attached_count = 0
         while time.time() < deadline:
-            has_attached = self.page.js(
+            attached_count = self.page.js(
                 """(function(){
                 var btns = Array.from(document.querySelectorAll('button[aria-label]'));
-                var hasRemove = btns.some(function(b){
+                var removeCount = btns.filter(function(b){
                     return /remove\\s*attachment|移除附件|删除附件/i.test(b.getAttribute('aria-label') || '');
-                });
-                if (hasRemove) return 'remove';
+                }).length;
+                if (removeCount) return removeCount;
                 // 兜底：composer 内出现附件缩略图（img/video）
                 var ov = document.querySelector('[data-testid="hatch-composer-placeholder-overlay"]');
                 var composer = ov ? (ov.closest('form') || ov.parentElement.parentElement.parentElement) : null;
                 if (composer) {
                     var media = composer.querySelectorAll('img, video');
-                    if (media.length > 0) return 'thumb';
+                    if (media.length > 0) return media.length;
                 }
-                return '';
+                return 0;
                 })()"""
             )
-            if has_attached:
+            if int(attached_count or 0) >= len(images):
                 break
             time.sleep(0.3)
         else:
-            raise MuseGenerationError("参考图上传未确认，已停止生成")
+            raise MuseGenerationError(
+                f"参考图上传未确认（{int(attached_count or 0)}/{len(images)}），已停止生成")
         time.sleep(0.5)
+
+    def _attach_image(self, image_data: str):
+        """Backward-compatible single-reference wrapper."""
+        self._attach_images([image_data])
     # ---------------- 主流程 ----------------
     def generate(self, cookies: dict, prompt: str, expect: str = "image",
                  timeout: int = 240, expires: dict | None = None, account_id: str | None = None,
                  on_progress=None, reference_image: str | None = None,
+                 reference_images: list[str] | None = None,
                  stop_event=None) -> dict:
         deadline = time.monotonic() + timeout
         self.ensure_page(cookies, expires, account_id=account_id)
         self.reset_thread(for_chat=False)
         self._scroll_bottom()
-        if reference_image:
-            self._attach_image(reference_image)
+        refs = list(reference_images or ([] if not reference_image else [reference_image]))
+        if refs:
+            self._attach_images(refs)
         else:
             self._clear_attachments()
         atts_before = self.attachments()
