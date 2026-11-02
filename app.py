@@ -26,6 +26,8 @@ from __future__ import annotations
 from typing import Any
 
 import asyncio
+import copy
+from contextlib import contextmanager
 import base64
 import binascii
 import io
@@ -43,14 +45,16 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                Response, StreamingResponse)
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr, field_validator
 
 from config import CFG
 from engine import (ESSENTIAL_COOKIES, MAX_REFERENCE_IMAGE_BYTES,
                     MAX_REFERENCE_IMAGES, MAX_REFERENCE_TOTAL_BYTES,
                     MuseAuthError, MuseEngine, MuseGenerationError,
                     MuseModelRefusalError, RefImageSafetyError)
+from engine import MuseProxyError
 from store import Store, account_expiry, min_expiry
+from proxy import normalize_server, request_proxy_context
 
 import sys
 log = logging.getLogger("muse2api")
@@ -61,7 +65,7 @@ if not log.handlers:
     log.addHandler(_h)
 
 CFG.ensure_dirs()
-app = FastAPI(title="muse2api", version="1.6.4")
+app = FastAPI(title="muse2api", version="1.6.5")
 
 # Cookie 助手脚本从 muse.ai 页面发起导入请求，需要放行该来源；
 # 浏览器扩展从 chrome-extension:// 发起，也一并放行。
@@ -81,6 +85,7 @@ app.add_middleware(CORSMiddleware,
 
 store = Store(CFG)
 engine = MuseEngine(CFG)
+engine.proxy_resolver = lambda aid: (store.get_account(aid) or {}).get("proxy")
 
 
 class ConcurrencyLock:
@@ -181,6 +186,49 @@ IMAGE_TASK_LOCK = threading.Lock()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def _bind_account_proxy(account: dict):
+    """Pin the selected account's route for the whole operation, including retries."""
+    if hasattr(engine, "_ensure_local"):
+        engine._ensure_local().proxy_snapshot = copy.deepcopy(account.get("proxy")) or None
+
+
+def _clear_account_proxy():
+    if hasattr(engine, "_ensure_local"):
+        local = engine._ensure_local()
+        if hasattr(local, "proxy_snapshot"):
+            del local.proxy_snapshot
+
+
+def _account_proxy(account: dict):
+    if hasattr(engine, "_ensure_local"):
+        local = engine._ensure_local()
+        if hasattr(local, "proxy_snapshot"):
+            return local.proxy_snapshot
+    return account.get("proxy")
+
+
+@contextmanager
+def _account_operation(aid: str):
+    """Maintenance and settings share the same account lease as generation."""
+    with ACCOUNT_POOL.cond:
+        account = store.get_account(aid)
+        if not account:
+            raise HTTPException(404, "账号不存在")
+        if aid in ACCOUNT_POOL.busy_accounts:
+            raise HTTPException(409, "账号正在执行任务或检测，请稍后再试")
+        ACCOUNT_POOL.busy_accounts.add(aid)
+        account = copy.deepcopy(account)
+    try:
+        _bind_account_proxy(account)
+        yield account
+    finally:
+        try:
+            engine.close_current_page()
+        finally:
+            _clear_account_proxy()
+            ACCOUNT_POOL.release(aid)
+
+
 # ------------------------- OpenAI 风格的错误响应 -------------------------
 # 各类智能体基本都按 OpenAI 的 {"error": {"message": ...}} 取错误信息；
 # FastAPI 默认返回的是 {"detail": ...}，客户端会读不到原因、只显示"未知错误"。
@@ -211,11 +259,14 @@ async def _http_exc(request: Request, exc: HTTPException):
 
 @app.exception_handler(RequestValidationError)
 async def _validation_exc(request: Request, exc: RequestValidationError):
+    # Never echo user-supplied proxy credentials in validation errors.
+    errors = [{k: v for k, v in error.items() if k not in ("input", "ctx")}
+              for error in exc.errors()]
     if request.url.path.startswith("/v1/"):
         return JSONResponse(status_code=422, content={"error": {
-            "message": "请求参数校验失败：" + str(exc.errors())[:400],
+            "message": "请求参数校验失败：" + str(errors)[:400],
             "type": "invalid_request_error", "param": None, "code": 422}})
-    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+    return JSONResponse(status_code=422, content={"detail": errors})
 
 MODELS = [
     {"id": "muse-spark", "object": "model", "owned_by": "muse",
@@ -295,7 +346,8 @@ def _renew_and_persist(acc_id: str, wake_vm: bool = True, force: bool = False) -
         engine._last_http_renew[acc_id] = last_sync
         return acc
     try:
-        res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"), wake_vm=wake_vm)
+        res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"), wake_vm=wake_vm,
+                                        **({"proxy": _account_proxy(acc)} if _account_proxy(acc) else {}))
         engine._last_http_renew[acc_id] = now
         if res.get("cookies"):
             store.update_account(acc_id, cookies=res["cookies"],
@@ -305,6 +357,8 @@ def _renew_and_persist(acc_id: str, wake_vm: bool = True, force: bool = False) -
             store.touch_keepalive(acc_id, True, f"会话正常 (VM: {res.get('vm_state') or 'RUNNING'})")
     except MuseAuthError as exc:
         store.mark(acc_id, False, str(exc))
+        raise
+    except MuseProxyError:
         raise
     except Exception as exc:
         log.warning("HTTP 预续签账号 %s 异常: %s", acc_id, exc)
@@ -354,6 +408,7 @@ def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
                 yielded = False
                 try:
                     if cur_id:
+                        _bind_account_proxy(store.get_account(cur_id) or {})
                         refreshed = _renew_and_persist(cur_id, wake_vm=True, force=(attempt > 0))
                         if refreshed:
                             cur_cookies = refreshed["cookies"]
@@ -395,6 +450,7 @@ def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
             if leased_id:
                 ACCOUNT_POOL.release(leased_id)
             engine.close_current_page()
+            _clear_account_proxy()
             q.put(("done", None))
 
     threading.Thread(target=worker, daemon=True).start()
@@ -482,17 +538,63 @@ class ResponsesRequest(BaseModel):
     store: bool | None = None
 
 
+class AccountProxy(BaseModel):
+    server: str
+    username: str = ""
+    password: SecretStr | None = None
+
+    @field_validator("server")
+    @classmethod
+    def validate_server(cls, value):
+        return normalize_server(value)
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, value):
+        if ":" in value or any(ord(c) < 32 for c in value):
+            raise ValueError("Proxy username cannot contain a colon or control characters")
+        try:
+            value.encode("latin-1")
+        except UnicodeError:
+            raise ValueError("Proxy credentials must use Latin-1 characters") from None
+        return value
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, value):
+        if value is not None:
+            try:
+                value.get_secret_value().encode("latin-1")
+            except UnicodeError:
+                raise ValueError("Proxy credentials must use Latin-1 characters") from None
+        return value
+
+    def configuration(self, previous=None):
+        previous = previous or {}
+        password = self.password.get_secret_value() if self.password is not None else None
+        if password is None:
+            if previous.get("server") == self.server and previous.get("username", "") == self.username:
+                password = previous.get("password", "")
+            elif self.username:
+                raise HTTPException(400, "Enter the proxy password when changing its server or username")
+            else:
+                password = ""
+        return {"server": self.server, "username": self.username, "password": password}
+
+
 class AccountRequest(BaseModel):
     label: str = ""
     cookies: dict[str, str] = Field(default_factory=dict)
     cookie_header: str | None = None
     batch: str | None = None          # 多行文本，每行一个账号
     expires: dict[str, int] = Field(default_factory=dict)   # cookie 名 -> 过期时间戳
+    proxy: AccountProxy | None = None
 
 
 class AccountPatch(BaseModel):
     label: str | None = None
     enabled: bool | None = None
+    proxy: AccountProxy | None = None
 
 
 # ------------------------- 提示词构造 -------------------------
@@ -967,6 +1069,7 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
                 cur_acc = alt
                 log.info("【生图/视频自动切号】切换到备用账号 %s (%s) 重试...", cur_acc.get("label"), cur_acc["id"])
             try:
+                _bind_account_proxy(cur_acc)
                 refreshed = _renew_and_persist(cur_acc["id"], wake_vm=True, force=(attempt > 0))
                 if refreshed:
                     cur_acc = refreshed
@@ -991,6 +1094,10 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
                 last_exc = exc
                 store.mark(cur_acc["id"], False, str(exc))
                 engine.close_current_page()
+            except MuseProxyError as exc:
+                last_exc = exc
+                store.touch_keepalive(cur_acc["id"], None, f"代理异常: {str(exc)[:160]}")
+                engine.close_current_page()
             except MuseGenerationError as exc:
                 last_exc = exc
                 store.mark(cur_acc["id"], True, f"任务异常: {str(exc)[:60]}")
@@ -1006,6 +1113,7 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
         if cur_acc:
             ACCOUNT_POOL.release(cur_acc.get("id"))
         engine.close_current_page()
+        _clear_account_proxy()
 
 
 # ------------------------- 基础接口 -------------------------
@@ -1659,6 +1767,7 @@ def list_accounts(_=Depends(auth)):
 
 @app.post("/admin/accounts")
 def add_account(req: AccountRequest, _=Depends(auth)):
+    proxy = req.proxy.configuration() if req.proxy else None
     added: list[dict] = []
     seen: list[dict] = []          # 本次导入的所有 cookie，用来检查核心项是否齐全
 
@@ -1683,6 +1792,10 @@ def add_account(req: AccountRequest, _=Depends(auth)):
     if not added:
         raise HTTPException(400, "未解析到任何 cookie，请检查格式")
 
+    if proxy:
+        for account in added:
+            store.update_account(account["id"], proxy=proxy)
+
     # 只要有一个账号把核心 cookie 凑齐就算通过（批量时按整体判断）
     missing = [n for n in ESSENTIAL_COOKIES
                if not any(n in c for c in seen)]
@@ -1694,11 +1807,59 @@ def add_account(req: AccountRequest, _=Depends(auth)):
 
 @app.patch("/admin/accounts/{aid}")
 def patch_account(aid: str, req: AccountPatch, _=Depends(auth)):
-    acc = store.update_account(aid, label=req.label, enabled=req.enabled)
-    if not acc:
-        raise HTTPException(404, "账号不存在")
-    return {k: v for k, v in acc.items() if k != "cookies"} | {
-        "cookie_count": len(acc.get("cookies", {}))}
+    with ACCOUNT_POOL.cond:
+        existing = store.get_account(aid)
+        if not existing:
+            raise HTTPException(404, "账号不存在")
+        changes = {"label": req.label, "enabled": req.enabled}
+        if "proxy" in req.model_fields_set:
+            if aid in ACCOUNT_POOL.busy_accounts:
+                raise HTTPException(409, "账号正在执行任务或检测，请稍后再修改代理")
+            proxy = req.proxy.configuration(existing.get("proxy")) if req.proxy else {}
+            if proxy != (existing.get("proxy") or {}):
+                changes.update(proxy=proxy, synced_at=0, last_keepalive=0,
+                               checked_at=0, proxy_status={}, ok=None,
+                               note="代理已修改，请重新测试")
+                engine._last_http_renew.pop(aid, None)
+        acc = store.update_account(aid, **changes)
+        return store.public_account(acc)
+
+
+@app.post("/admin/accounts/{aid}/proxy/test")
+def test_account_proxy(aid: str, _=Depends(auth)):
+    import ipaddress
+    import requests
+    with _account_operation(aid) as acc:
+        proxy = _account_proxy(acc)
+        if not proxy:
+            raise HTTPException(400, "请先保存该账号的代理")
+        result = {"ok": False, "proxy_configured": True, "proxy_reachable": False,
+                  "exit_ip": None, "session_ok": None, "workspace_status": None}
+        try:
+            # Fixed HTTPS endpoint receives no Muse cookies or proxy credentials.
+            with request_proxy_context(proxy) as proxy_options, requests.Session() as session:
+                session.trust_env = False
+                response = session.get("https://api.ipify.org?format=json",
+                                       timeout=(5, 10), allow_redirects=False,
+                                       **proxy_options)
+            if response.status_code != 200:
+                raise MuseProxyError("代理出口检测未成功，请检查代理连接或认证")
+            result["exit_ip"] = str(ipaddress.ip_address(response.json()["ip"]))
+            result["proxy_reachable"] = True
+            checked = engine.renew_session_http(acc.get("cookies") or {}, acc.get("cookies_exp"),
+                                                wake_vm=False, proxy=proxy)
+            result.update(ok=True, session_ok=True, workspace_status=checked.get("status"),
+                          message="代理出口与 Muse 会话检查通过；生成能力请使用账号测试和实际任务验证")
+        except MuseAuthError:
+            result.update(session_ok=False, message="代理可连接，但 Muse 会话认证失败，请重新导入 Cookie")
+        except MuseProxyError as exc:
+            result["message"] = str(exc)
+        except MuseGenerationError as exc:
+            result.update(session_ok=False, message=str(exc))
+        except (requests.RequestException, ValueError, KeyError, TypeError):
+            result["message"] = "代理出口检测失败，请检查代理地址、认证和网络"
+        store.update_account(aid, proxy_status={**result, "checked_at": int(time.time())})
+        return result
 
 
 @app.delete("/admin/accounts/{aid}")
@@ -1719,10 +1880,10 @@ async def test_account(aid: str, _=Depends(auth)):
         raise HTTPException(400, "该账号没有 cookie")
 
     def _probe():
-        with GEN_LOCK:
+        with GEN_LOCK, _account_operation(aid) as acc:
             try:
                 engine.start()
-                engine.refresh(acc["cookies"], acc.get("cookies_exp"))
+                engine.refresh(acc["cookies"], acc.get("cookies_exp"), account_id=aid)
                 synced = _sync_cookies(aid)
                 quota = None
                 quota_error = None
@@ -1787,9 +1948,12 @@ def relogin(_=Depends(auth)):
     if not acc:
         raise HTTPException(400, "没有可用账号")
     try:
-        engine.start()
-        engine.refresh(acc["cookies"], acc.get("cookies_exp"))
-        return {"ok": True, "account": acc["id"]}
+        with GEN_LOCK, _account_operation(acc["id"]) as selected:
+            engine.start()
+            engine.refresh(selected["cookies"], selected.get("cookies_exp"), account_id=selected["id"])
+            return {"ok": True, "account": selected["id"]}
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
 
@@ -1810,7 +1974,7 @@ async def query_quota(aid: str, _=Depends(auth)):
         raise HTTPException(400, "该账号没有 cookie")
 
     def _probe():
-        with GEN_LOCK:
+        with GEN_LOCK, _account_operation(aid) as acc:
             engine.start()
             q = engine.quota(acc["cookies"], acc.get("cookies_exp"), account_id=aid)
             if not q.get("found"):
@@ -1821,6 +1985,8 @@ async def query_quota(aid: str, _=Depends(auth)):
 
     try:
         return await asyncio.to_thread(_probe)
+    except HTTPException:
+        raise
     except MuseAuthError as exc:
         store.mark(aid, False, str(exc)[:200])
         raise HTTPException(401, str(exc)) from exc
@@ -2050,52 +2216,55 @@ KEEPALIVE_STATE = {
 
 
 def _probe_account_sync(aid: str, check_quota: bool = False) -> dict:
-    """通过 muse.ai/api/session 触发 Meta 网关签发新 hatch_vml (+48h) / hatch_sess (+30d) 并唤醒云端 VM。"""
-    acc = store.get_account(aid)
-    if not acc or not acc.get("cookies"):
-        return {"ok": False, "id": aid, "label": (acc or {}).get("label", aid), "error": "账号无有效 cookie"}
+    """Verify the upstream session through this account's saved route."""
     try:
-        res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"), wake_vm=True)
-        store.update_account(
-            aid,
-            cookies=res["cookies"],
-            cookies_exp=res["cookies_exp"],
-            ok=True if res.get("ok") else False,
-            synced_at=int(time.time()),
-        )
-        vm_state = res.get("vm_state") or "RUNNING"
-        store.touch_keepalive(aid, True, f"会话有效 · 自动保活 (VM: {vm_state})")
-        quota = acc.get("quota")
-        if check_quota and GEN_LOCK.acquire(blocking=False):
-            try:
-                engine.start()
-                quota = engine.quota(res["cookies"], res["cookies_exp"],
-                                     account_id=aid)
-                if not quota.get("found"):
-                    raise MuseGenerationError("额度面板未读到有效数据；旧缓存未覆盖")
-                quota["checked_at"] = int(time.time())
-                store.update_account(aid, quota=quota)
-            except Exception as qe:  # noqa: BLE001
-                log.warning("读取账号 %s 额度失败: %s", aid, qe)
-            finally:
-                GEN_LOCK.release()
-        updated = store.get_account(aid) or {}
-        return {
-            "ok": True,
-            "id": aid,
-            "label": acc.get("label", aid),
-            "vm_id": res.get("vm_id"),
-            "vm_state": vm_state,
-            "wake_ok": res.get("wake_ok"),
-            "expires_at": updated.get("expires_at"),
-            "quota": quota,
-        }
+        with _account_operation(aid) as acc:
+            if not acc.get("cookies"):
+                return {"ok": False, "id": aid, "label": acc.get("label", aid), "error": "账号无有效 cookie"}
+            res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"), wake_vm=True,
+                                            **({"proxy": _account_proxy(acc)} if _account_proxy(acc) else {}))
+            store.update_account(
+                aid,
+                cookies=res["cookies"],
+                cookies_exp=res["cookies_exp"],
+                ok=True if res.get("ok") else False,
+                synced_at=int(time.time()),
+            )
+            vm_state = res.get("vm_state") or "RUNNING"
+            store.touch_keepalive(aid, True, f"会话有效 · 自动保活 (VM: {vm_state})")
+            quota = acc.get("quota")
+            if check_quota and GEN_LOCK.acquire(blocking=False):
+                try:
+                    engine.start()
+                    quota = engine.quota(res["cookies"], res["cookies_exp"],
+                                         account_id=aid)
+                    if not quota.get("found"):
+                        raise MuseGenerationError("额度面板未读到有效数据；旧缓存未覆盖")
+                    quota["checked_at"] = int(time.time())
+                    store.update_account(aid, quota=quota)
+                except Exception as qe:  # noqa: BLE001
+                    log.warning("读取账号 %s 额度失败: %s", aid, qe)
+                finally:
+                    GEN_LOCK.release()
+            updated = store.get_account(aid) or {}
+            return {
+                "ok": True,
+                "id": aid,
+                "label": acc.get("label", aid),
+                "vm_id": res.get("vm_id"),
+                "vm_state": vm_state,
+                "wake_ok": res.get("wake_ok"),
+                "expires_at": updated.get("expires_at"),
+                "quota": quota,
+            }
+    except HTTPException as exc:
+        return {"ok": False, "id": aid, "busy": exc.status_code == 409, "error": str(exc.detail)}
     except MuseAuthError as exc:
         store.touch_keepalive(aid, False, f"保活认证失败: {str(exc)[:200]}")
-        return {"ok": False, "id": aid, "label": acc.get("label", aid), "error": str(exc)}
-    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "id": aid, "error": str(exc)}
+    except Exception as exc:
         store.touch_keepalive(aid, None, f"保活未确认（保留账号状态）: {str(exc)[:200]}")
-        return {"ok": False, "id": aid, "label": acc.get("label", aid), "error": str(exc)}
+        return {"ok": False, "id": aid, "error": str(exc)}
 
 
 async def run_keepalive_all(force: bool = False) -> dict:
@@ -2157,6 +2326,7 @@ def _warmup_browser_sync():
     try:
         acc = ACCOUNT_POOL.acquire(rotate=False, timeout=0.1, record_use=False)
         log.info("【浏览器预热】正在后台预热账号 %s (%s) 的热备标签页...", acc.get("label"), acc["id"])
+        _bind_account_proxy(acc)
         refreshed = _renew_and_persist(acc["id"], wake_vm=True, force=False) or acc
         engine.start()
         engine.ensure_page(refreshed["cookies"], refreshed.get("cookies_exp"), account_id=acc["id"])
@@ -2166,6 +2336,7 @@ def _warmup_browser_sync():
     finally:
         # Warmup runs in a worker thread; do not retain its account reservation or page.
         engine.close_current_page()
+        _clear_account_proxy()
         if acc:
             ACCOUNT_POOL.release(acc["id"])
         GEN_LOCK.release()
@@ -2210,7 +2381,7 @@ def get_keepalive_status(_=Depends(auth)):
 # ------------------------- 仓库实时更新检测、通知与一键在线升级 -------------------------
 REPO_URL = "https://github.com/czg86389-hub/muse2api"
 TRACKED_REPO_PATHS = [
-    "app.py", "engine.py", "store.py", "cdp.py", "config.py",
+    "app.py", "engine.py", "store.py", "cdp.py", "config.py", "proxy.py",
     "admin.html", "README.md", "version.json", "requirements.txt",
     "Dockerfile", "docker-compose.yml", ".env.example", ".gitignore",
     "LICENSE", "extension", "deploy", "tools",

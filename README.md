@@ -43,9 +43,11 @@
   - 支持导入无上限的 Muse 账号矩阵。
   - 基于热连接亲和（Warm-Tab Affinity）与 LRU 策略智能分发，兼顾 2 秒级极速响应与多号均衡消耗。
   - 遇到单号额度耗尽或会话异常时，自动标记并 0 秒无感故障转移至备用健康账号。
-- 🛡️ **48 小时会话全自动续期与云端 VM 保活**
-  - 独创后台心跳协程，直连 `/api/session` 自动续签 `hatch_vml`（+48h）与 `hatch_sess`（+30d），并自动调用 `/api/hatch/vm/wake` 保持云端工作区 VM 热备。
-  - 彻底解决 Meta Cookie 静态 48 小时到期与 VM 休眠断连难题，无需频繁重新登录。
+- 🛡️ **会话状态检测与云端 VM 保活**
+  - 后台请求 `/api/session` 检查会话，并按需调用 `/api/hatch/vm/wake` 唤醒工作区；配置账号代理后，这些请求与浏览器使用同一出口。
+  - 只保存上游实际返回的 Cookie 和到期时间，不会因检测成功而虚增有效期。上游未续签、会话被撤销或账号受限时，仍需在官网确认并重新导入。
+- 🌐 **账号独立 HTTP / SOCKS5 代理**
+  - 每个账号可配置不同的 HTTP 或 SOCKS5 代理及认证信息，并发任务的浏览器上下文与会话请求按账号隔离；代理失败不会静默回退直连。
 - 🧩 **配套 Chrome 一键导号扩展**
   - 无需手工 F12 抓包，点一下扩展图标即刻将当前浏览器登录态（含 `HttpOnly` 核心 Cookie 与真实过期时间）提取并安全推送至账号池。
 - 🖥️ **现代化深色运维面板（Web Console）与实时在线热升级**
@@ -145,6 +147,51 @@
 ---
 
 ## 📖 API 调用示例
+
+### 账号独立代理 / Per-account proxy
+
+在账号池点击账号旁的 **代理 / Proxy**：
+
+1. 选择 **指定代理 / Use a proxy**，填写服务器、用户名与密码；不需要认证时留空用户名和密码。
+2. 保存后重新打开窗口，点击 **测试已保存代理 / Test saved proxy**。结果分别显示代理连通性、出口 IP 与 Muse 会话状态。
+3. 继续使用账号的 **测试 / Test** 按钮，确认浏览器能加载聊天输入框。会话验证成功不保证上游一定允许某次图片或视频生成。
+
+支持 HTTP 代理端点（可选 Basic 认证）与 SOCKS5 代理端点（可选用户名/密码认证），例如 `http://proxy.example.com:8080`、`socks5://proxy.example.com:1080` 或 `socks5h://proxy.example.com:1080`。SOCKS5 的目标主机名经代理解析；HTTPS 网站照常支持。**HTTPS 代理端点、VLESS、VMess 与订阅链接暂不支持直接填写**；使用 Clash/Mihomo 等工具时，应填部署服务器可访问的 HTTP 或 SOCKS5 代理入口。`127.0.0.1:7890` 指的是部署服务器自身，不是导入 Cookie 的电脑。没有配置代理的旧账号保持原有网络行为。
+
+聊天、生图、视频、浏览器下载、账号检测、额度查询、会话续签与 VM 唤醒使用账号代理。代理断线、认证失败或浏览器上下文创建失败会报告错误，**不会静默回退直连**。账号切换同时切换代理。外部参考图在账号选取前按现有安全策略预取，继续执行公网地址、重定向与 DNS 重绑定防护，不承诺任意参考图 URL 都通过账号代理。
+
+账号忙碌时修改代理会返回 HTTP 409，请等待当前任务结束。修改后，下次请求会重建连接，不复用旧节点。代理连通性与账号会话是不同状态：HTTP 407、连接超时不会直接把 Cookie 标成失效；代理测试也不会覆盖账号已有的认证结果。
+
+代理密码与 Cookie 一起保存在本机 `data/accounts.json`，应保护此目录及备份。接口、日志和页面不回显密码。修改时地址与用户名不变，密码留空表示保留；改变地址或用户名时应重新输入认证密码。选择 **默认网络 / Default network** 或 **移除代理 / Remove proxy** 清除配置并恢复默认网络。
+
+管理 API 示例（需鉴权）：
+
+```http
+PATCH /admin/accounts/{account_id}
+Content-Type: application/json
+Authorization: Bearer <MUSE2API_KEY>
+
+{
+  "proxy": {
+    "server": "http://proxy.example.com:8080",
+    "username": "your-proxy-user",
+    "password": "your-proxy-password"
+  }
+}
+```
+
+省略 `proxy` 不修改设置；提交 `{"proxy": null}` 移除代理。`POST /admin/accounts` 也接受同一 `proxy` 对象，包括为本次批量导入设置相同代理。响应仅包含服务器、用户名和 `has_password`，不返回密码。
+
+```http
+POST /admin/accounts/{account_id}/proxy/test
+Authorization: Bearer <MUSE2API_KEY>
+```
+
+该测试通过已保存代理访问无 Cookie 的 HTTPS 出口检测，再验证 Muse 会话；返回的 `proxy_reachable`、`exit_ip`、`session_ok` 与 `workspace_status` 分别表示各层结果。没有配置代理时返回 400，账号忙碌时返回 409。此操作不生成内容，也不消耗图片/视频生成额度。
+
+**English:** Each account can use its own HTTP proxy with optional Basic authentication or a SOCKS5 proxy with optional username/password authentication. Select **Use a proxy**, save the server and credentials, then reopen the dialog and choose **Test saved proxy**. Both `socks5://` and `socks5h://` proxy origins are accepted, and target hostnames are resolved by the proxy. HTTPS sites are supported; HTTPS proxy endpoints, VLESS/VMess and subscription URLs are not supported directly. The proxy address must be reachable from the deployment server. A proxy failure never falls back to direct access. Unconfigured accounts retain their existing network behavior. Active accounts cannot change proxies (HTTP 409); the next request recreates the context after a saved change. Keep the password blank only to preserve it with an unchanged server and username. Neither API responses nor logs expose it. The proxy test reports connectivity, egress IP and Muse session status separately; it does not prove generation capability or replace the account's browser test.
+
+---
 
 所有受保护接口均需在 Header 中携带：
 ```http
@@ -328,6 +375,7 @@ python tests/test_ref_image_safety.py
 - 🌟 **[@gr219](https://github.com/gr219)** (PR [#31](https://github.com/czg86389-hub/muse2api/pull/31)) —— 为管理后台及 Chrome 扩展提供中英文国际化双语动态切换支持
 - 🌟 **[@Yeadon8888](https://github.com/Yeadon8888)** (PR [#32](https://github.com/czg86389-hub/muse2api/pull/32)) —— 增加有序多参考图生图、编辑与图生视频支持
 - 🌟 **[@pandalaohe](https://github.com/pandalaohe)** (PR [#24](https://github.com/czg86389-hub/muse2api/pull/24)) —— 提供参考图本地文件与私网 URL 安全策略、重定向复查和 DNS 重绑定防护
+- 🌟 **[@QuartzWarrior](https://github.com/QuartzWarrior)** (PR [#25](https://github.com/czg86389-hub/muse2api/pull/25)) —— 贡献账号独立 HTTP 代理基础、认证转接、配置界面与隔离回归测试
 
 欢迎大家提交 PR 与 Issue，共同把项目打磨得更强更好用！
 

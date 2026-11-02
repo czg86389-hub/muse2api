@@ -1,25 +1,19 @@
 {
-  "version": "1.6.4",
-  "updated_at": "2026-10-26",
+  "version": "1.6.5",
+  "updated_at": "2026-11-02",
   "repo": "https://github.com/czg86389-hub/muse2api",
   "highlights": [
-    "修复 Chrome 扩展和独立 Cookie 助手仍强制要求 hatch_gw 的问题；现在与服务端一致，只要求核心会话令牌。",
-    "修复视频遭 Muse 纯文字拒答时等待满 600 秒：稳定识别地区不可用等拒答并向调用方返回原文，长期无响应任务也会提前终止。",
-    "视频任务进度改为真实页面里程碑，不再用等待时间伪装成 92% 完成度。",
-    "合并 PR #32：图片生成、图片编辑与图生视频支持最多 4 张有序参考图。",
-    "多参考图增加字段冲突、无效项、MIME、单图 10 MiB 与总计 24 MiB 限制，并限定 composer 内附件计数。",
-    "参考图默认禁止服务器本地路径及私网/本机 URL；公网下载逐跳复查重定向并固定已验证 IP，可由可信管理员显式恢复旧能力。",
-    "修复同一账号连续查询额度时复用上次 Settings UI 导致的偶发失败；每次额度读取现在使用独立一次性页面，避免账号串页和菜单残留。",
-    "修复浏览器扩展下载包遗漏 _locales 子目录的问题，确保中英文扩展名称与说明随 ZIP 正确发布。"
+    "新增每账号独立 HTTP / SOCKS5 代理，支持用户名/密码认证；聊天、生图、视频、额度、会话续签和 VM 唤醒使用账号指定出口。",
+    "新增代理连接、出口 IP 与 Muse 会话分层检查；代理故障明确报错，不回退直连，也不误判为 Cookie 失效。",
+    "代理设置支持双语管理界面、密码不回显、忙碌账号保护及任务出口快照，旧账号未配置代理时保持原网络行为。",
+    "修复 #35：助手先回复“视频已生成”但附件晚到时继续等待真实视频，保留明确拒答快速失败和原总超时。",
+    "隔离每个浏览器上下文的下载目录，防止并发下载兜底取错其他账号的成品；上下文创建失败时停止而非回退共享页面。"
   ],
   "highlights_en": [
-    "Fixed the Chrome extension and standalone cookie helper incorrectly requiring hatch_gw; import requirements now match the server.",
-    "Video tasks now surface stable Muse text refusals such as regional unavailability instead of waiting the full 600-second timeout; stalled new-thread submissions also stop early.",
-    "Video progress now reports observed page milestones rather than a time-based fake 92%.",
-    "Merged PR #32: image generation, edits, and image-to-video accept up to four ordered reference images.",
-    "Added conflict, item, MIME, per-image 10 MiB and aggregate 24 MiB validation, plus composer-scoped attachment counting.",
-    "Reference images now deny server-local paths and private/loopback URLs by default; public downloads recheck every redirect and pin the validated IP, with explicit trusted-admin opt-ins for legacy access.",
-    "Fixed intermittent failures on consecutive quota reads by using a fresh disposable page for every read, preventing stale Settings UI and cross-account page reuse.",
-    "Fixed extension ZIP packaging so nested _locales resources are included and English/Chinese metadata ships correctly."
+    "Added per-account HTTP / SOCKS5 proxies with optional username/password authentication for chat, image/video generation, quota checks, session renewal and VM wake requests.",
+    "Added separate proxy reachability, egress IP and Muse-session checks; proxy failures never fall back to a direct connection or imply invalid cookies.",
+    "Added bilingual proxy settings, redacted passwords, busy-account protection and task-scoped route snapshots; unconfigured accounts retain their existing network behavior.",
+    "Fixed #35: wait for real video attachments after success text arrives, while preserving explicit refusal fast-fail and the existing total deadline.",
+    "Isolated browser-context download directories to prevent cross-account fallback results; context creation failures now stop instead of falling back to a shared page."
   ]
 }

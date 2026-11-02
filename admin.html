@@ -95,12 +95,20 @@
 
   /* ---------- 表单 ---------- */
   label{display:block;font-size:12.5px;color:var(--muted);margin-bottom:5px}
-  input[type=text],input[type=number],textarea,select{
+  input[type=text],input[type=number],.proxy-dialog input[type=password],textarea,select{
     width:100%;background:var(--bg2);color:var(--text);border:1px solid var(--line);border-radius:9px;
     padding:9px 12px;font-size:13px;outline:none;transition:.15s;font-family:inherit
   }
   textarea{font-family:ui-monospace,monospace;resize:vertical;line-height:1.55}
   input:focus,textarea:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(79,140,255,.13)}
+  dialog.proxy-dialog{width:min(480px,calc(100% - 32px));max-height:calc(100dvh - 32px);overflow:auto;
+    background:var(--panel);color:var(--text);border:1px solid var(--line2);border-radius:var(--radius);padding:24px}
+  dialog.proxy-dialog::backdrop{background:rgba(0,0,0,.65)}
+  .proxy-dialog h2{margin:0 0 8px;font-size:18px}
+  .proxy-dialog label{margin-top:16px}
+  .proxy-dialog .proxy-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;margin-top:24px}
+  .proxy-summary{max-width:180px;font-size:11px;color:var(--muted);margin-top:4px}
+  #proxyError{color:var(--bad);margin-top:12px;font-size:13px}
   button{
     background:var(--accent2);color:#fff;border:0;border-radius:9px;padding:9px 16px;
     font-size:13px;cursor:pointer;transition:.15s;font-family:inherit;white-space:nowrap
@@ -757,6 +765,37 @@ t = requests.post(<span class="s">"BASE/v1/videos"</span>, json={<span class="s"
 
 <div id="toasts"></div>
 
+<dialog id="proxyDialog" class="proxy-dialog" aria-labelledby="proxyTitle" aria-describedby="proxyHelp">
+  <form id="proxyForm">
+    <h2 id="proxyTitle">账号代理</h2>
+    <p class="hint" id="proxyHelp">该账号的浏览器、会话检测与保活使用同一代理。代理失败会报告错误，不会自动直连。</p>
+    <label for="proxyMode">连接方式</label>
+    <select id="proxyMode">
+      <option value="default">默认网络</option>
+      <option value="proxy">指定代理</option>
+    </select>
+    <div id="proxyFields">
+      <label for="proxyServer">代理地址</label>
+      <input id="proxyServer" type="text" placeholder="http://proxy.example.com:8080 或 socks5://proxy.example.com:1080" autocomplete="off" spellcheck="false">
+      <p class="hint">支持 HTTP 与 SOCKS5（socks5/socks5h）代理及用户名/密码认证。127.0.0.1 指部署服务器，不是你的电脑。</p>
+      <label for="proxyUsername">代理用户名（可选）</label>
+      <input id="proxyUsername" type="text" autocomplete="off" spellcheck="false">
+      <label for="proxyPassword">代理密码</label>
+      <input id="proxyPassword" type="password" autocomplete="new-password" aria-describedby="proxyPasswordHelp">
+      <p class="hint" id="proxyPasswordHelp">密码不会回显。地址与用户名不变时，留空保留已保存密码；修改地址或用户名后请重新输入密码。</p>
+    </div>
+    <p class="hint">账号正在执行任务时，请稍后再修改代理。保存后，下次请求使用新设置。</p>
+    <div id="proxyError" role="alert"></div>
+    <div id="proxyResult" class="hint" role="status" aria-live="polite" style="white-space:pre-line;overflow-wrap:anywhere"></div>
+    <div class="proxy-actions">
+      <button type="button" class="ghost" id="proxyTest">测试已保存代理</button>
+      <button type="button" class="danger" id="proxyRemove">移除代理</button>
+      <button type="button" class="ghost" onclick="$('proxyDialog').close()">取消</button>
+      <button type="submit" id="proxySave">保存</button>
+    </div>
+  </form>
+</dialog>
+
 <script>
 /* ================= 界面语言 / UI language =================
  * 中文是源语言；英文通过下面的词典在渲染时替换（静态文本、动态插入的节点、alert/confirm/prompt）。
@@ -772,6 +811,50 @@ function setLang(v){
 }
 /* 整句：中文 → 英文 */
 const I18N_EN = {
+  "取消": "Cancel",
+  "http://proxy.example.com:8080 或 socks5://proxy.example.com:1080": "http://proxy.example.com:8080 or socks5://proxy.example.com:1080",
+  "请先保存该账号的代理": "Save a proxy for this account first",
+  "账号正在执行任务或检测，请稍后再试": "The account is running a task or check; retry later",
+  "账号正在执行任务或检测，请稍后再修改代理": "The account is running a task or check; wait before changing its proxy",
+  "代理已修改，请重新测试": "Proxy changed; test the account again",
+  "请先保存该账号的 HTTP 代理": "Save an HTTP proxy for this account first",
+  "代理出口检测未成功，请检查代理连接或认证": "Proxy egress check did not succeed; check the connection or credentials",
+  "代理出口与 Muse 会话检查通过；生成能力请使用账号测试和实际任务验证": "Proxy egress and Muse session checks passed; use the account browser test and an actual task to verify generation",
+  "代理可连接，但 Muse 会话认证失败，请重新导入 Cookie": "The proxy is reachable, but Muse session authentication failed; re-import the cookies",
+  "代理出口检测失败，请检查代理地址、认证和网络": "Proxy egress check failed; check the server, credentials and network",
+  "账号代理认证失败 (HTTP 407)，请检查代理用户名和密码": "Account proxy authentication failed (HTTP 407); check the proxy username and password",
+  "账号代理认证失败 (HTTP 407)，未完成 VM 唤醒": "Account proxy authentication failed (HTTP 407); VM wake was not completed",
+  "账号代理认证失败 (HTTP 407)，未完成 VM 状态确认": "Account proxy authentication failed (HTTP 407); VM state was not confirmed",
+  "账号代理浏览器连接失败，请检查节点或认证；未回退直连": "The browser could not connect through the account proxy; check the node or credentials. Direct fallback was not used",
+  "代理未测试": "Proxy untested",
+  "代理已连通": "Proxy reachable",
+  "代理未通过": "Proxy failed",
+  "代理未确认": "Proxy unconfirmed",
+  "账号代理": "Account proxy",
+  "该账号的浏览器、会话检测与保活使用同一代理。代理失败会报告错误，不会自动直连。": "The account's browser, session checks and keep-alive use the same proxy. A proxy failure is reported without falling back to a direct connection.",
+  "连接方式": "Connection mode",
+  "默认网络": "Default network",
+  "指定代理": "Use a proxy",
+  "代理": "Proxy",
+  "代理地址": "Proxy server",
+  "代理用户名（可选）": "Proxy username (optional)",
+  "代理密码": "Proxy password",
+  "支持 HTTP 与 SOCKS5（socks5/socks5h）代理及用户名/密码认证。127.0.0.1 指部署服务器，不是你的电脑。": "Supports HTTP and SOCKS5 (socks5/socks5h) proxies with optional username/password authentication. 127.0.0.1 refers to the deployment server, not your computer.",
+  "密码不会回显。地址与用户名不变时，留空保留已保存密码；修改地址或用户名后请重新输入密码。": "The saved password is never shown. Leave it blank to keep it when the server and username are unchanged; enter it again after changing either.",
+  "账号正在执行任务时，请稍后再修改代理。保存后，下次请求使用新设置。": "Wait for the account's active task to finish before editing its proxy. Saved changes apply to the next request.",
+  "测试已保存代理": "Test saved proxy",
+  "移除代理": "Remove proxy",
+  "代理已保存，下次请求生效": "Proxy saved; applies to the next request",
+  "代理已移除，恢复默认网络": "Proxy removed; default network restored",
+  "请先保存代理设置，再重新打开此窗口测试": "Save the proxy settings first, then reopen this dialog to test them",
+  "正在通过已保存代理检测出口与 Muse 会话…": "Checking the egress IP and Muse session through the saved proxy…",
+  "代理连通：已确认": "Proxy connectivity: confirmed",
+  "代理连通：未通过": "Proxy connectivity: failed",
+  "代理连通：未确认": "Proxy connectivity: unconfirmed",
+  "Muse 会话：已确认": "Muse session: confirmed",
+  "Muse 会话：未通过": "Muse session: failed",
+  "Muse 会话：未确认": "Muse session: unconfirmed",
+  "账号或任务正在使用中，请稍后重试 (HTTP 409)": "The account or task is busy; retry later (HTTP 409)",
   "muse2api · 账号池控制台": "muse2api · Account Pool Console",
   "Muse 网页额度 · 反代 API": "Muse web quota · Reverse-proxy API",
   "打开 GitHub 开源仓库 (https://github.com/czg86389-hub/muse2api)": "Open the GitHub repository (https://github.com/czg86389-hub/muse2api)",
@@ -1159,6 +1242,11 @@ const I18N_EN_HTML = {
 };
 /* 含变量的文案：[正则源码, 替换串]，按顺序匹配整段文本 */
 const I18N_EN_PATTERNS = ([
+  ["账号代理请求失败 \\((.*?)\\)；请检查代理连接或认证，未回退直连", "Account proxy request failed ($1); check the proxy connection or credentials. Direct fallback was not used"],
+  ["经账号代理唤醒或确认 VM 失败 \\((.*?)\\)；未回退直连", "VM wake or verification through the account proxy failed ($1); direct fallback was not used"],
+  ["代理异常: (.*)", "Proxy error: $1"],
+  ["出口 IP：(.*)", "Egress IP: $1"],
+  ["工作区状态：(.*)", "Workspace status: $1"],
   ["(\\d+) 秒前", "$1s ago"],
   ["(\\d+) 分钟前", "$1 min ago"],
   ["(\\d+) 小时前", "$1 h ago"],
@@ -1381,6 +1469,7 @@ async function api(path, opts){
     let msg = '';
     if (data) {
       if (typeof data.detail === 'string') msg = data.detail;
+      else if (Array.isArray(data.detail)) msg = data.detail.map(e => e.msg || 'Invalid value').join('; ');
       else if (typeof data.message === 'string') msg = data.message;
       else if (data.error) msg = typeof data.error === 'string' ? data.error : (data.error.message || JSON.stringify(data.error));
     }
@@ -1389,6 +1478,7 @@ async function api(path, opts){
         400: '请求参数有误 (HTTP 400)，请检查输入内容',
         403: '服务器拒绝了该请求 (HTTP 403)，请确认登录状态与访问权限',
         404: '接口不存在 (HTTP 404)，可能是版本不匹配，请刷新页面或更新服务端',
+        409: '账号或任务正在使用中，请稍后重试 (HTTP 409)',
         405: '服务端不支持该请求方式 (HTTP 405)，请刷新页面或更新服务端',
         413: '提交内容过大 (HTTP 413)，请减少本次提交的数据量后重试',
         429: '请求过于频繁 (HTTP 429)，请稍等片刻后重试',
@@ -1598,6 +1688,16 @@ function expiryBadge(a){
 /* ================= 账号池 ================= */
 let accounts = [];
 
+function proxyStatus(account){
+  if (!account.proxy) return '';
+  const status = account.proxy_status;
+  const label = !status ? '代理未测试'
+    : status.proxy_reachable === true ? '代理已连通'
+    : status.proxy_reachable === false ? '代理未通过' : '代理未确认';
+  const title = status?.checked_at ? fmtTime(status.checked_at) : '';
+  return '<div class="proxy-summary" title="' + esc(title) + '">' + esc(t(label)) + '</div>';
+}
+
 async function loadPool(){
   try{
     const d = await api('/admin/accounts');
@@ -1643,7 +1743,7 @@ async function loadPool(){
                   : '<span class="badge warn">○ 未检测</span>';
       const miss = a.essential_ok ? '' : ' <span class="badge bad" title="缺少核心 cookie，无法生成">缺核心</span>';
       return `<tr>
-        <td><b>${esc(a.label)}</b></td>
+        <td><b>${esc(a.label)}</b><div class="mono ellip proxy-summary" title="${esc(a.proxy?.server || '默认网络')}">${esc(a.proxy?.server || '默认网络')}</div>${proxyStatus(a)}</td>
         <td class="mono">${esc(a.id)}</td>
         <td>${badge}${miss}</td>
         <td>${expiryBadge(a)}</td>
@@ -1656,6 +1756,7 @@ async function loadPool(){
           <button class="ghost mini" onclick="testAcc('${a.id}')">测试</button>
           <button class="ghost mini" onclick="keepaliveOne('${a.id}')" title="静默刷新会话令牌与有效期">保活</button>
           <button class="ghost mini" onclick="queryQuota('${a.id}', this)">额度</button>
+          <button class="ghost mini" onclick="openProxy('${a.id}')">代理</button>
           <button class="ghost mini" onclick="toggleAcc('${a.id}', ${!a.enabled})">${a.enabled ? '禁用' : '启用'}</button>
           <button class="ghost mini" onclick="renameAcc('${a.id}','${esc(a.label)}')">改名</button>
           <button class="ghost mini" onclick="updateCookies('${a.id}')">更新Cookie</button>
@@ -1696,6 +1797,110 @@ async function testAcc(id){
     loadPool();
   }catch(e){ toast('测试失败：' + e.message, 'bad'); }
 }
+
+let proxyAccountId = null;
+let proxyBusy = false;
+function updateProxyMode(){
+  const enabled = $('proxyMode').value === 'proxy';
+  $('proxyFields').hidden = !enabled;
+  for (const id of ['proxyServer', 'proxyUsername', 'proxyPassword']) $(id).disabled = !enabled || proxyBusy;
+  $('proxyServer').required = enabled;
+  $('proxyMode').disabled = proxyBusy;
+  $('proxySave').disabled = proxyBusy;
+  const saved = accounts.find(a => a.id === proxyAccountId)?.proxy;
+  $('proxyRemove').disabled = proxyBusy || !saved;
+  $('proxyTest').disabled = proxyBusy || !saved || !enabled;
+}
+function proxyHasChanges(){
+  const saved = accounts.find(a => a.id === proxyAccountId)?.proxy;
+  if ($('proxyMode').value !== (saved ? 'proxy' : 'default')) return true;
+  return !!saved && ($('proxyServer').value.trim() !== saved.server
+    || $('proxyUsername').value !== (saved.username || '') || !!$('proxyPassword').value);
+}
+function openProxy(id){
+  const account = accounts.find(a => a.id === id);
+  if (!account) return;
+  proxyAccountId = id;
+  proxyBusy = false;
+  $('proxyForm').reset();
+  $('proxyMode').value = account.proxy ? 'proxy' : 'default';
+  $('proxyServer').value = account.proxy?.server || '';
+  $('proxyUsername').value = account.proxy?.username || '';
+  $('proxyError').textContent = '';
+  $('proxyResult').textContent = '';
+  updateProxyMode();
+  $('proxyDialog').showModal();
+  $(account.proxy ? 'proxyServer' : 'proxyMode').focus();
+}
+$('proxyDialog').addEventListener('close', () => {
+  $('proxyForm').reset();
+  proxyAccountId = null;
+  proxyBusy = false;
+});
+$('proxyMode').addEventListener('change', updateProxyMode);
+$('proxyForm').addEventListener('input', () => {
+  $('proxyResult').textContent = '';
+  $('proxyError').textContent = '';
+});
+async function saveProxy(remove){
+  const id = proxyAccountId;
+  if (!id || proxyBusy) return;
+  let proxy = null;
+  if (!remove && $('proxyMode').value === 'proxy'){
+    proxy = {server: $('proxyServer').value.trim(), username: $('proxyUsername').value};
+    if ($('proxyPassword').value) proxy.password = $('proxyPassword').value;
+  }
+  proxyBusy = true;
+  updateProxyMode();
+  $('proxyError').textContent = '';
+  $('proxyResult').textContent = '';
+  try{
+    await api('/admin/accounts/' + encodeURIComponent(id), {method:'PATCH', body:JSON.stringify({proxy})});
+    if (proxyAccountId === id) $('proxyDialog').close();
+    toast(proxy ? '代理已保存，下次请求生效' : '代理已移除，恢复默认网络', 'ok');
+    await loadPool();
+  }catch(e){
+    if (proxyAccountId === id) $('proxyError').textContent = e.message;
+  }finally{
+    if (proxyAccountId === id) { proxyBusy = false; updateProxyMode(); }
+  }
+}
+async function testProxy(){
+  const id = proxyAccountId;
+  if (!id || proxyBusy) return;
+  $('proxyError').textContent = '';
+  if (proxyHasChanges()) {
+    $('proxyError').textContent = '请先保存代理设置，再重新打开此窗口测试';
+    return;
+  }
+  proxyBusy = true;
+  updateProxyMode();
+  $('proxyResult').textContent = '正在通过已保存代理检测出口与 Muse 会话…';
+  try{
+    const r = await api('/admin/accounts/' + encodeURIComponent(id) + '/proxy/test', {method:'POST'});
+    const label = value => value === true ? '已确认' : value === false ? '未通过' : '未确认';
+    const lines = ['代理连通：' + label(r.proxy_reachable)];
+    if (r.exit_ip) lines.push('出口 IP：' + r.exit_ip);
+    if ('session_ok' in r) lines.push('Muse 会话：' + label(r.session_ok));
+    if (r.workspace_status) lines.push('工作区状态：' + r.workspace_status);
+    if (r.message) lines.push(r.message);
+    if (proxyAccountId === id) {
+      $('proxyResult').textContent = lines.join('\n');
+      $('proxyResult').style.color = r.ok ? 'var(--ok)' : 'var(--warn)';
+    }
+    await loadPool();
+  }catch(e){
+    if (proxyAccountId === id) {
+      $('proxyResult').textContent = '';
+      $('proxyError').textContent = e.message;
+    }
+  }finally{
+    if (proxyAccountId === id) { proxyBusy = false; updateProxyMode(); }
+  }
+}
+$('proxyForm').addEventListener('submit', event => { event.preventDefault(); saveProxy(false); });
+$('proxyRemove').addEventListener('click', () => saveProxy(true));
+$('proxyTest').addEventListener('click', testProxy);
 
 async function keepaliveOne(id){
   toast('正在为该账号执行会话静默续期…');

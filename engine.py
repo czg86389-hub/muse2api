@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import http.client
 import ipaddress
 import mimetypes
@@ -23,12 +24,14 @@ import re
 import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
 import unicodedata
 
 from cdp import CDP, http_json
+from proxy import HTTPProxyRelay, request_proxy_context
 
 log = logging.getLogger("muse2api")
 
@@ -48,6 +51,10 @@ class MuseAuthError(RuntimeError):
 
 class MuseGenerationError(RuntimeError):
     pass
+
+
+class MuseProxyError(MuseGenerationError):
+    """The account's configured proxy failed; this is not Cookie invalidation."""
 
 
 class MuseModelRefusalError(MuseGenerationError):
@@ -132,6 +139,9 @@ class MuseEngine:
         self._start_lock = threading.Lock()
         self._active_contexts: set[str] = set()
         self._contexts_lock = threading.Lock()
+        self._proxy_relays: set[HTTPProxyRelay] = set()
+        self._download_dirs: set[str] = set()
+        self.proxy_resolver = None
         self._last_http_renew: dict[str, float] = {}
         self._log = None
         os.makedirs(cfg.profile_dir, exist_ok=True)
@@ -248,8 +258,30 @@ class MuseEngine:
                 except Exception:  # noqa: BLE001
                     self.proc.kill()
             self.proc = None
+            with self._contexts_lock:
+                relays = list(self._proxy_relays)
+                self._proxy_relays.clear()
+            for relay in relays:
+                relay.close()
+            with self._contexts_lock:
+                download_dirs = list(self._download_dirs)
+                self._download_dirs.clear()
+            for directory in download_dirs:
+                shutil.rmtree(directory, ignore_errors=True)
 
     # ---------------- 页面 ----------------
+    @property
+    def download_dir(self) -> str:
+        return getattr(self._ensure_local(), "download_dir", None) or self.cfg.download_dir
+
+    def _new_download_dir(self) -> str:
+        os.makedirs(self.cfg.download_dir, exist_ok=True)
+        directory = tempfile.mkdtemp(prefix="context-", dir=self.cfg.download_dir)
+        self._ensure_local().download_dir = directory
+        with self._contexts_lock:
+            self._download_dirs.add(directory)
+        return directory
+
     def _close_page(self):
         """关闭当前线程专属的页面并销毁隔离的 BrowserContext，彻底释放内存与 Session。"""
         p = self.page
@@ -269,122 +301,162 @@ class MuseEngine:
                 self._active_contexts.discard(ctx_id)
             self.current_context_id = None
         self.current_acc_id = None
+        local = self._ensure_local()
+        relay = getattr(local, "proxy_relay", None)
+        if relay:
+            relay.close()
+            with self._contexts_lock:
+                self._proxy_relays.discard(relay)
+            local.proxy_relay = None
+        local.proxy_config = None
+        directory = getattr(local, "download_dir", None)
+        if directory:
+            shutil.rmtree(directory, ignore_errors=True)
+            with self._contexts_lock:
+                self._download_dirs.discard(directory)
+            local.download_dir = None
 
-    def _open_page(self):
-        """为当前工作线程创建独立的页面。
-        若浏览器主连接存在，则创建独立的 Incognito BrowserContext，实现多账号 Cookies 与会话 100% 隔离。"""
-        if self.browser:
-            try:
+    def _open_page(self, proxy: dict | None = None):
+        """Create an isolated account context; never fall back to shared cookies."""
+        if not self.browser:
+            error = MuseProxyError if proxy else MuseGenerationError
+            raise error("浏览器未连接，无法创建独立账号会话；未回退共享标签页")
+        page = None
+        try:
+            if proxy:
+                relay = HTTPProxyRelay(proxy)
+                self._ensure_local().proxy_relay = relay
+                with self._contexts_lock:
+                    self._proxy_relays.add(relay)
+                res = self.browser.send("Target.createBrowserContext", {
+                    "proxyServer": relay.url,
+                    "proxyBypassList": "<-loopback>",
+                })
+            else:
                 res = self.browser.send("Target.createBrowserContext")
-                ctx_id = res.get("result", {}).get("browserContextId")
-                if ctx_id:
-                    self.current_context_id = ctx_id
-                    with self._contexts_lock:
-                        self._active_contexts.add(ctx_id)
-                    t_res = self.browser.send("Target.createTarget", {
-                        "url": "about:blank",
-                        "browserContextId": ctx_id
-                    })
-                    target_id = t_res.get("result", {}).get("targetId")
-                    if target_id:
-                        ws_url = f"ws://127.0.0.1:{self.cfg.cdp_port}/devtools/page/{target_id}"
-                        page = CDP(ws_url, timeout=180)
-                        page.send("Network.enable")
-                        page.send("Page.enable")
-                        page.send("Runtime.enable")
-                        page.send("Browser.setDownloadBehavior",
-                                  {"behavior": "allow", "downloadPath": self.cfg.download_dir})
-                        return page
-            except Exception as exc:
-                log.warning("Target.createBrowserContext 创建隔离上下文失败，回退到普通标签页: %s", exc)
-
-        import requests
-        tgt = requests.put(
-            f"http://127.0.0.1:{self.cfg.cdp_port}/json/new?about:blank",
-            timeout=10).json()
-        page = CDP(tgt["webSocketDebuggerUrl"], timeout=180)
-        page.send("Network.enable")
-        page.send("Page.enable")
-        page.send("Runtime.enable")
-        page.send("Browser.setDownloadBehavior",
-                  {"behavior": "allow", "downloadPath": self.cfg.download_dir})
-        return page
+            ctx_id = res.get("result", {}).get("browserContextId")
+            if not ctx_id:
+                raise MuseGenerationError("Chromium 未返回独立上下文 ID")
+            self.current_context_id = ctx_id
+            with self._contexts_lock:
+                self._active_contexts.add(ctx_id)
+            t_res = self.browser.send("Target.createTarget", {
+                "url": "about:blank", "browserContextId": ctx_id,
+            })
+            target_id = t_res.get("result", {}).get("targetId")
+            if not target_id:
+                raise MuseGenerationError("Chromium 未返回独立页面 ID")
+            ws_url = f"ws://127.0.0.1:{self.cfg.cdp_port}/devtools/page/{target_id}"
+            page = CDP(ws_url, timeout=180)
+            page.send("Network.enable")
+            page.send("Page.enable")
+            page.send("Runtime.enable")
+            page.send("Browser.setDownloadBehavior", {
+                "behavior": "allow", "downloadPath": self._new_download_dir(),
+                "browserContextId": ctx_id,
+            })
+            return page
+        except Exception:
+            if page:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            self._close_page()
+            error = MuseProxyError if proxy else MuseGenerationError
+            raise error("无法创建该账号的独立浏览器会话；未回退共享标签页或直连") from None
 
     @staticmethod
     def renew_session_http(cookies: dict, expires: dict | None = None,
-                           wake_vm: bool = True) -> dict:
+                           wake_vm: bool = True, proxy: dict | None = None) -> dict:
         """直接调用 muse.ai/api/session 续签 hatch_vml (+48h) / hatch_sess (+30d) / hatch_gw (+1y)，
         并按需调用 /api/hatch/vm/wake 唤醒云端工作区 VM。"""
         import requests
-        cur_cookies = dict(cookies or {})
-        cur_exp = dict(expires or {})
-        headers = {
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
-            "Origin": "https://muse.ai",
-            "Referer": "https://muse.ai/thread/new",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Dest": "empty",
-            "Cookie": "; ".join(f"{k}={v}" for k, v in cur_cookies.items() if v),
-        }
-        try:
-            r = requests.get("https://muse.ai/api/session", headers=headers,
-                             timeout=12, allow_redirects=False)
-        except requests.RequestException as exc:
-            # 不回显请求内容：异常可能包含带凭据的代理 URL。
-            raise MuseGenerationError(
-                f"/api/session 网络请求失败 ({type(exc).__name__})；请检查服务器网络/代理后重试") from None
-        if r.status_code == 401:
-            raise MuseAuthError("会话认证失败 (/api/session HTTP 401)，请在官网确认登录后重新导入 cookie")
-        if r.status_code != 200:
-            hint = ("访问被拒绝，请检查服务器出口/地区/访问限制；不能据此判定 Cookie 失效"
-                    if r.status_code == 403 else "上游请求未成功，请稍后重试并检查服务器网络")
-            raise MuseGenerationError(f"/api/session HTTP {r.status_code}：{hint}")
-        try:
-            sj = r.json()
-        except ValueError:
-            raise MuseGenerationError("/api/session HTTP 200 返回非 JSON；会话状态未确认") from None
-        if not isinstance(sj, dict) or sj.get("status") != "assigned":
-            raise MuseGenerationError("/api/session HTTP 200 未返回 assigned 会话；请在官网检查账号/工作区状态")
-        for c in r.cookies:
-            if c.value:
-                cur_cookies[c.name] = c.value
-            if c.expires:
-                cur_exp[c.name] = int(float(c.expires))
-        vm_id = sj.get("vm_id")
-        vm_state = sj.get("vm_state")
-        wake_ok = False
-        wake_requested = False
-        if wake_vm and vm_id and vm_state != "DISABLED":
+        with request_proxy_context(proxy) as proxy_options:
+            cur_cookies = dict(cookies or {})
+            cur_exp = dict(expires or {})
+            headers = {
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+                "Origin": "https://muse.ai",
+                "Referer": "https://muse.ai/thread/new",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Dest": "empty",
+                "Cookie": "; ".join(f"{k}={v}" for k, v in cur_cookies.items() if v),
+            }
             try:
-                headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cur_cookies.items() if v)
-                rw = requests.post("https://muse.ai/api/hatch/vm/wake", headers=headers, json={
-                    "vm_id": vm_id,
-                    "retry_count": 0,
-                    "connect_attempt_id": str(uuid.uuid4()),
-                }, timeout=8)
-                wake_requested = rw.status_code == 200
-                if wake_requested:
-                    # HTTP 200 acknowledges the request; only session state confirms the VM woke.
-                    verify = requests.get("https://muse.ai/api/session", headers=headers,
-                                          timeout=12, allow_redirects=False)
-                    if verify.status_code == 200:
-                        verified_session = verify.json()
-                        if isinstance(verified_session, dict) and verified_session.get("status") == "assigned":
-                            vm_state = verified_session.get("vm_state") or vm_state
-                            wake_ok = vm_state == "RUNNING"
-            except Exception:
-                pass
-        return {
-            "ok": sj.get("status") == "assigned",
-            "status": sj.get("status"),
-            "vm_id": vm_id,
-            "vm_state": vm_state,
-            "wake_ok": wake_ok,
-            "wake_requested": wake_requested,
-            "cookies": cur_cookies,
-            "cookies_exp": cur_exp,
-        }
+                r = requests.get("https://muse.ai/api/session", headers=headers,
+                                 timeout=12, allow_redirects=False, **proxy_options)
+            except requests.RequestException as exc:
+                # 不回显请求内容：异常可能包含带凭据的代理 URL。
+                if proxy:
+                    raise MuseProxyError(
+                        f"账号代理请求失败 ({type(exc).__name__})；请检查代理连接或认证，未回退直连") from None
+                raise MuseGenerationError(
+                    f"/api/session 网络请求失败 ({type(exc).__name__})；请检查服务器网络/代理后重试") from None
+            if proxy and r.status_code == 407:
+                raise MuseProxyError("账号代理认证失败 (HTTP 407)，请检查代理用户名和密码")
+            if r.status_code == 401:
+                raise MuseAuthError("会话认证失败 (/api/session HTTP 401)，请在官网确认登录后重新导入 cookie")
+            if r.status_code != 200:
+                hint = ("访问被拒绝，请检查服务器出口/地区/访问限制；不能据此判定 Cookie 失效"
+                        if r.status_code == 403 else "上游请求未成功，请稍后重试并检查服务器网络")
+                raise MuseGenerationError(f"/api/session HTTP {r.status_code}：{hint}")
+            try:
+                sj = r.json()
+            except ValueError:
+                raise MuseGenerationError("/api/session HTTP 200 返回非 JSON；会话状态未确认") from None
+            if not isinstance(sj, dict) or sj.get("status") != "assigned":
+                raise MuseGenerationError("/api/session HTTP 200 未返回 assigned 会话；请在官网检查账号/工作区状态")
+            for c in r.cookies:
+                if c.value:
+                    cur_cookies[c.name] = c.value
+                if c.expires:
+                    cur_exp[c.name] = int(float(c.expires))
+            vm_id = sj.get("vm_id")
+            vm_state = sj.get("vm_state")
+            wake_ok = False
+            wake_requested = False
+            if wake_vm and vm_id and vm_state != "DISABLED":
+                try:
+                    headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cur_cookies.items() if v)
+                    rw = requests.post("https://muse.ai/api/hatch/vm/wake", headers=headers, json={
+                        "vm_id": vm_id,
+                        "retry_count": 0,
+                        "connect_attempt_id": str(uuid.uuid4()),
+                    }, timeout=8, allow_redirects=False, **proxy_options)
+                    if proxy and rw.status_code == 407:
+                        raise MuseProxyError("账号代理认证失败 (HTTP 407)，未完成 VM 唤醒")
+                    wake_requested = rw.status_code == 200
+                    if wake_requested:
+                        # HTTP 200 acknowledges the request; only session state confirms the VM woke.
+                        verify = requests.get("https://muse.ai/api/session", headers=headers,
+                                              timeout=12, allow_redirects=False, **proxy_options)
+                        if proxy and verify.status_code == 407:
+                            raise MuseProxyError("账号代理认证失败 (HTTP 407)，未完成 VM 状态确认")
+                        if verify.status_code == 200:
+                            verified_session = verify.json()
+                            if isinstance(verified_session, dict) and verified_session.get("status") == "assigned":
+                                vm_state = verified_session.get("vm_state") or vm_state
+                                wake_ok = vm_state == "RUNNING"
+                except MuseProxyError:
+                    raise
+                except requests.RequestException as exc:
+                    if proxy:
+                        raise MuseProxyError(
+                            f"经账号代理唤醒或确认 VM 失败 ({type(exc).__name__})；未回退直连") from None
+                except Exception:
+                    pass
+            return {
+                "ok": sj.get("status") == "assigned",
+                "status": sj.get("status"),
+                "vm_id": vm_id,
+                "vm_state": vm_state,
+                "wake_ok": wake_ok,
+                "wake_requested": wake_requested,
+                "cookies": cur_cookies,
+                "cookies_exp": cur_exp,
+            }
 
     def _apply_cookies(self, page: CDP, cookies: dict, expires: dict | None = None):
         """注入 cookie。彻底清空旧账号 cookie 保证隔离，且绝不传入过去时间的 expires 防止 Chromium 丢弃 hatch_vml。"""
@@ -507,7 +579,14 @@ class MuseEngine:
             pass
 
     def ensure_page(self, cookies: dict, expires: dict | None = None, account_id: str | None = None):
-        if self.page is not None and (account_id is None or getattr(self, "current_acc_id", None) == account_id):
+        resolver = getattr(self, "proxy_resolver", None)
+        local = self._ensure_local()
+        # A lease snapshots routing; a concurrent config edit must never change its exit.
+        proxy = copy.deepcopy(local.proxy_snapshot if hasattr(local, "proxy_snapshot")
+                              else resolver(account_id) if resolver and account_id else None)
+        if (self.page is not None
+                and getattr(self._ensure_local(), "proxy_config", None) == proxy
+                and (account_id is None or getattr(self, "current_acc_id", None) == account_id)):
             try:
                 if self.page.js("!!document.querySelector('textarea')") and self._wait_ws_ready(self.page, timeout=8.0):
                     return self.page
@@ -522,22 +601,24 @@ class MuseEngine:
         now_ts = time.time()
         if not account_id or (now_ts - last_map.get(account_id, 0) > 600):
             try:
-                renewed = self.renew_session_http(cookies, expires, wake_vm=True)
+                renewed = self.renew_session_http(cookies, expires, wake_vm=True,
+                                                  **({"proxy": proxy} if proxy else {}))
                 if renewed.get("cookies"):
                     cookies = renewed["cookies"]
                 if renewed.get("cookies_exp"):
                     expires = renewed["cookies_exp"]
                 if account_id:
                     last_map[account_id] = now_ts
-            except MuseAuthError:
+            except (MuseAuthError, MuseProxyError):
                 raise
             except Exception as e:
                 log.warning("预续签 /api/session 失败（继续尝试浏览器加载）: %s", e)
 
-        page = self._open_page()
+        page = self._open_page(proxy=proxy) if proxy else self._open_page()
+        self.page = page  # Cleanup must also own pages that never become ready.
+        self._ensure_local().proxy_config = proxy
         self._apply_cookies(page, cookies, expires)
         page.send("Page.navigate", {"url": "https://muse.ai/thread/new"})
-        self.page = page  # Cleanup must also own pages that never become ready.
         if self._wait_ws_ready(page, timeout=self.cfg.login_wait):
             self.current_acc_id = account_id
             return page
@@ -546,6 +627,8 @@ class MuseEngine:
         except Exception:
             body = ""
         self._close_page()
+        if proxy and re.search(r"err_(?:proxy|tunnel)|proxy authentication|代理认证失败", body, re.I):
+            raise MuseProxyError("账号代理浏览器连接失败，请检查节点或认证；未回退直连")
         if "connecting..." in body:
             raise MuseGenerationError("页面网关连接超时 (Connecting...)，正在自动切换账号")
         # Distinguish an expired session from a page that never became ready.
@@ -558,9 +641,9 @@ class MuseEngine:
         """显式释放当前线程所持有的页面和隔离上下文。"""
         self._close_page()
 
-    def refresh(self, cookies: dict, expires: dict | None = None):
+    def refresh(self, cookies: dict, expires: dict | None = None, account_id: str | None = None):
         self._close_page()
-        return self.ensure_page(cookies, expires)
+        return self.ensure_page(cookies, expires, account_id=account_id)
 
     # ---------------- 额度查询（Settings 面板） ----------------
     # muse.ai 的额度在底部 Settings 菜单 → Settings 项 → 设置面板的
@@ -1008,9 +1091,7 @@ class MuseEngine:
 
             if cur_cnt > base_agent_cnt and cur_txt and not has_stop and len(atts) <= base_att_cnt:
                 # Media-status text can precede a real attachment; do not fail on it.
-                is_media_report = bool(re.search(
-                    r"\.(?:webp|png|jpe?g|mp4|webm)|imagine_media|deliverable|"
-                    r"generated\s+.*image|verified\s+generated|artifact", cur_txt, re.I))
+                is_media_report = self._media_status_pending(cur_txt)
                 if not is_media_report:
                     if cur_txt == last_txt:
                         txt_stable += 1
@@ -1040,6 +1121,34 @@ class MuseEngine:
     def _clean_model_text(text: str, limit: int = 240) -> str:
         clean = re.sub(r"\s+", " ", text or "").strip()
         return clean[:limit]
+
+    @staticmethod
+    def _media_status_pending(text: str) -> bool:
+        """A success claim can precede an attachment; it is never delivery proof."""
+        if re.search(
+                r"(?:未|没(?:有)?|无法|不能|未能)[^。！？!?\n]{0,16}(?:生成|制作|提供|完成)|"
+                r"(?:生成|制作|渲染|处理)[^。！？!?\n]{0,12}(?:失败|未成功)|"
+                r"\b(?:not|never|hasn['’]t|wasn['’]t|isn['’]t)\s+(?:(?:be|been|successfully)\s+){0,3}"
+                r"(?:generated|created|completed|ready)|"
+                r"\b(?:no|without)\s+(?:video|clip|image|picture|animation)\b"
+                r"[^.\n]{0,60}\b(?:generated|created|ready)|"
+                r"\b(?:failed|cannot|can['’]t|could not|couldn['’]t|unable to)\b"
+                r"[^.\n]{0,60}\b(?:generat(?:e|ed|ing)|creat(?:e|ed|ing)|render|provide|video|image)\b|"
+                r"\b(?:video|image|render|upload)\b[^.\n]{0,32}\bfailed\b",
+                text, re.I):
+            return False
+        return bool(re.search(
+            r"\.(?:webp|png|jpe?g|mp4|webm)|imagine_media|deliverable|"
+            r"generated\s+.*image|verified\s+generated|artifact|"
+            r"^(?:已(?:经)?(?:成功)?生成|生成好了|生成完毕|已完成|做好了)(?:[，。！\s]|$)|"
+            r"(?:视频|影片|短片|图片|图像)[^。！？!?\n]{0,40}"
+            r"(?:已(?:经)?(?:成功)?生成|生成(?:成功|好了|完毕|完成)|已(?:经)?完成|做好了)|"
+            r"(?:已(?:经)?(?:成功)?生成|生成好了|生成完毕|已完成|做好了)"
+            r"[^。！？!?\n]{0,32}(?:视频|影片|短片|图片|图像)|"
+            r"\b(?:video|clip|image|picture|animation)\b[^.\n]{0,60}"
+            r"\b(?:generated|created|rendered|completed|ready)\b|"
+            r"\b(?:generated|created|rendered|completed)\b[^.\n]{0,32}"
+            r"\b(?:video|clip|image|picture|animation)\b", text, re.I))
 
     @classmethod
     def _media_refusal_text(cls, text: str, expect: str) -> str:
@@ -1250,7 +1359,8 @@ class MuseEngine:
 
     # ---------------- 下载兜底 ----------------
     def _download_fallback(self, src: str, timeout: int = 180) -> str | None:
-        before = set(os.listdir(self.cfg.download_dir))
+        directory = self.download_dir
+        before = set(os.listdir(directory))
         # ponytail: fail closed when the selected result has no local download;
         # never click an unrelated/global button that can return the upload.
         clicked = self.page.js("""(function(src){
@@ -1269,11 +1379,11 @@ class MuseEngine:
         deadline = time.time() + timeout
         while time.time() < deadline:
             time.sleep(1.5)
-            new = [f for f in (set(os.listdir(self.cfg.download_dir)) - before)
+            new = [f for f in (set(os.listdir(directory)) - before)
                    if not f.endswith(".crdownload")]
             if new:
-                p = os.path.join(self.cfg.download_dir, max(
-                    new, key=lambda f: os.path.getmtime(os.path.join(self.cfg.download_dir, f))))
+                p = os.path.join(directory, max(
+                    new, key=lambda f: os.path.getmtime(os.path.join(directory, f))))
                 if os.path.getsize(p) > 0:
                     return p
         return None
