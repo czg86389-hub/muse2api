@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_IMPORT = ("hatch_sess", "hatch_vml")
+EXPECTED_IMPORT = ("hatch_sess",)
 
 
 def python_constant(path: Path, name: str):
@@ -39,7 +39,7 @@ assert tuple(map(int, manifest["version"].split("."))) >= (1, 0, 1)
 admin = (ROOT / "admin.html").read_text(encoding="utf-8")
 assert "muse.ai 的 4 条核心 cookie" not in admin
 assert "muse.ai's 4 core cookies" not in admin
-assert "<code>hatch_sess</code>、<code>hatch_vml</code>" in admin
+assert "缺少时不阻止导入" in admin
 assert "Required cookies:" in admin
-assert "<code>hatch_sess</code>, <code>hatch_vml</code>." in admin
-print("PASS: server and every cookie importer require exactly hatch_sess + hatch_vml")
+assert "does not block import" in admin
+print("PASS: server and every cookie importer require only hatch_sess; hatch_vml is optional")

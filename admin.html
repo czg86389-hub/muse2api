@@ -332,7 +332,7 @@
       <h3>添加账号 <span class="tag">支持批量</span></h3>
       <div class="hint" data-i18n="add-account-hint">
         从浏览器复制 <b>muse.ai</b> 的 Cookie 字符串粘贴进来即可。必要 cookie：
-        <code>hatch_sess</code>、<code>hatch_vml</code>。
+        <code>hatch_sess</code>。<code>hatch_vml</code> 为可选工作区令牌，缺少时不阻止导入。
         批量导入时每行一个账号，格式 <code>标签 | cookie串</code>（标签可省略）。
       </div>
       <div class="row">
@@ -379,7 +379,7 @@
       <div class="hint" data-i18n="ext-why-hint">
         用一个浏览器小扩展，把你<b>自己电脑上已经登录好的 muse.ai 登录态</b>同步过来。
         不用装 Python、不用开终端、不用敲命令。<br>
-        <b>为什么必须用扩展</b>：muse.ai 的 2 条必要 cookie 都带
+        <b>为什么必须用扩展</b>：muse.ai 的登录会话 cookie 带
         <code>httpOnly</code> 标记，网页脚本（F12 里敲 <code>document.cookie</code>、
         小书签）读不到；只有浏览器扩展的 <code>cookies</code> 接口能拿到。
       </div>
@@ -514,24 +514,11 @@
         <tbody>
           <tr><td class="mono">hatch_sess</td><td>是</td><td><b style="color:var(--ok)">约 30 天</b></td><td>主会话，决定能不能登录</td></tr>
           <tr><td class="mono">hatch_gw</td><td>是</td><td><b style="color:var(--ok)">约 1 年</b></td><td>可选的网关路由缓存（不是登录必要项）</td></tr>
-          <tr><td class="mono">hatch_vml</td><td>是</td><td><b style="color:var(--bad)">约 2 天</b></td><td data-i18n="vml-role">短效校验令牌，<b>决定账号寿命</b></td></tr>
+          <tr><td class="mono">hatch_vml</td><td>是</td><td><b style="color:var(--bad)">约 2 天</b></td><td data-i18n="vml-role">可选工作区令牌，<b>不是导入必要项</b></td></tr>
           <tr><td class="mono">hatch_native_auth_device</td><td>是</td><td><b style="color:var(--ok)">约 30 天</b></td><td>可选设备标识（匿名访客也有，不是登录凭证）</td></tr>
         </tbody>
       </table></div>
-      <div class="hint" style="margin:12px 0 0;line-height:1.85" data-i18n="lifetime-hint">
-        <b>账号实际能活多久？</b>取决于最早过期的那条核心 cookie，也就是
-        <code>hatch_vml</code> —— 大约 <b>2 天</b>。<br>
-        <b style="color:var(--warn)">注意：这个 2 天不会因为「用得多」而延长。</b>
-        本服务每次生成完成后确实会把 muse.ai 新下发的 cookie 读回来写进账号池
-        （所以你会看到「有效期」列的数值有更新），但核心 cookie 的到期时间
-        <b>不会被推后</b>（已做生成前后对照实验确认）。<br>
-        <b>所以：大约每 2 天要重新导入一次。</b>好在很快 —— 点一下扩展图标就行。<br>
-        <b>建议一次多导几个账号</b>：账号池按「最久未用」轮转，多账号既更稳，
-        也能把重导摊开（每天导一个，而不是所有账号同时失效）。<br>
-        <b>什么时候要重导？</b>账号列表里「有效期」变成
-        <span class="badge bad">已过期</span>、状态变成
-        <span class="badge bad">异常</span>，或出现「缺核心」标记时。
-      </div>
+      <div class="hint" style="margin:12px 0 0;line-height:1.85" data-i18n="lifetime-hint">登录会话是否有效以上游认证为准。hatch_vml 是可选工作区令牌，可能缺失或重新签发，不能仅凭缺少它或其到期时间判断账号失效。导入后请点击“测试”；收到 HTTP 401 时再重新登录并导入。</div>
     </div>
   </section>
 
@@ -1221,9 +1208,9 @@ const I18N_EN_HTML = {
   "repo-status-desc": "Comparing your local version with the latest version in the official GitHub repository… (online upgrades keep your <code>.env</code> keys and the <code>data/</code> Account Pool and media data)",
   "auth-banner": "\n      <b>Enter your API Key first so the page can load data</b><br>\n      <span style=\"color:var(--muted)\">\n        The API Key is this service's own \"access password\". It stops other people from using your Muse account quota.\n        It is <b style=\"color:var(--text)\">not</b> your Muse password. It is a random string generated at deploy time (it starts with <code>m2a_</code>).<br>\n        Paste it into the box at the top right and click \"Save\". Your browser remembers it, so you won't need to enter it again.\n      </span>\n    ",
   "model-names-hint": "\n        Model names: <code>muse-spark</code> (chat/code), <code>muse-image</code> (images), <code>muse-video</code> (videos).\n        See the \"Integration Docs\" tab for full examples.\n      ",
-  "add-account-hint": "\n        Copy the <b>muse.ai</b> cookie string from your browser and paste it here. Required cookies:\n        <code>hatch_sess</code>, <code>hatch_vml</code>.\n        For batch import, put one account per line in the format <code>label | cookie string</code> (label is optional).\n      ",
+  "add-account-hint": "\n        Copy the <b>muse.ai</b> cookie string from your browser and paste it here. Required cookies:\n        <code>hatch_sess</code>. <code>hatch_vml</code> is an optional workspace token and does not block import.\n        For batch import, put one account per line in the format <code>label | cookie string</code> (label is optional).\n      ",
   "keepalive-hint": "The system runs <b>a silent background keep-alive every 30 minutes</b> and <b>fair multi-account rotation (LRU)</b>. \"Test\" actually opens muse.ai to verify the session.",
-  "ext-why-hint": "\n        A small browser extension syncs <b>the muse.ai login you already have on your own computer</b>.\n        No Python, no terminal, no commands.<br>\n        <b>Why an extension is required</b>: muse.ai's 2 required cookies are both marked\n        <code>httpOnly</code>, so page scripts (typing <code>document.cookie</code> in F12,\n        bookmarklets) can't read them. Only a browser extension's <code>cookies</code> API can.\n      ",
+  "ext-why-hint": "\n        A small browser extension syncs <b>the muse.ai login you already have on your own computer</b>.\n        No Python, no terminal, no commands.<br>\n        <b>Why an extension is required</b>: muse.ai's login session cookie is marked\n        <code>httpOnly</code>, so page scripts (typing <code>document.cookie</code> in F12,\n        bookmarklets) can't read them. Only a browser extension's <code>cookies</code> API can.\n      ",
   "ext-unzip-hint": "\n            Unzip it to a folder you won't delete, e.g. <code>D:\\muse2api-extension</code>.\n          ",
   "ext-load-steps": "\n            <li>Type <code>chrome://extensions</code> in the address bar and press Enter</li>\n            <li>Turn on the <b>Developer mode</b> switch at the top right</li>\n            <li>Click <b>Load unpacked</b> at the top left</li>\n            <li>Select the <b>folder</b> you unzipped in step 1 (not a single file inside it)</li>\n          ",
   "ext-login-hint": "\n            First open <code>https://muse.ai/</code> in your own browser and log in\n            (until you can see the chat screen), then click the extension icon in the toolbar,\n            fill in the two values below, and click \"Read and import\".\n          ",
@@ -1231,8 +1218,8 @@ const I18N_EN_HTML = {
   "manual-copy-steps": "\n        <li>Open and log in to <code>https://muse.ai/</code> in your own browser and stay on the chat screen</li>\n        <li>Press <kbd>F12</kbd> to open developer tools and switch to the <b>Network</b> panel</li>\n        <li>Press <kbd>F5</kbd> to reload the page so the request list fills up</li>\n        <li>Click <b>any muse.ai request</b> in the list (the first one is fine)</li>\n        <li>On the right, find <b>Headers</b> → scroll down to <b>Request Headers</b></li>\n        <li>Find the line starting with <code>cookie:</code> and <b>copy the whole string after the colon</b>\n            (from <code>hatch_sess=</code> to the end of the line)</li>\n        <li>Paste it into the box under \"Option 3\" below and click Import</li>\n      ",
   "manual-copy-warn": "\n        Note: use the <code>cookie:</code> line in the <b>request headers</b>, not the \"response headers\".\n        The <code>set-cookie</code> in the response headers only has some of the cookies, so things will be missing.\n      ",
   "cli-script-hint": "\n        If you prefer the command line, or want to log in with a separate browser (without touching your everyday browser), you can use this script.\n        It only uses the Python standard library and <b>needs nothing installed via pip</b>.\n      ",
-  "vml-role": "Short-lived verification token; <b>determines account lifetime</b>",
-  "lifetime-hint": "\n        <b>How long does an account actually last?</b> It depends on the core cookie that expires first, which is\n        <code>hatch_vml</code>: about <b>2 days</b>.<br>\n        <b style=\"color:var(--warn)\">Note: these 2 days are not extended by heavy use.</b>\n        After each generation the service does read back the new cookies muse.ai issues and writes them to the Account Pool\n        (so you'll see the \"Expires\" column update), but the core cookie's expiry time\n        <b>is not pushed back</b> (confirmed by before/after generation experiments).<br>\n        <b>So: re-import roughly every 2 days.</b> Luckily it's quick: one click on the extension icon.<br>\n        <b>Import several accounts at once</b>: the pool rotates by \"least recently used\", so more accounts are more stable\n        and spread out the re-imports (one per day instead of all accounts expiring at once).<br>\n        <b>When should I re-import?</b> When the \"Expires\" column shows\n        <span class=\"badge bad\">Expired</span>, the status shows\n        <span class=\"badge bad\">Error</span>, or a \"missing core\" marker appears.\n      ",
+  "vml-role": "Optional workspace token; <b>not required for import</b>",
+  "lifetime-hint": "Session validity is determined by upstream authentication. hatch_vml is an optional workspace token that may be absent or reissued; its absence or expiry alone does not prove the login is invalid. Test the account after import. Log in and import again when the upstream returns HTTP 401.",
   "docs-intro": "\n        The API follows the OpenAI style; downstream projects only need to change <code>base_url</code> and <code>api_key</code>.\n        <br>BASE URL: <code id=\"dBase\">—</code>\n      ",
   "models-hint": "\n        These three are the real capabilities of the Muse family: <b>Muse Spark</b> (language / code), <b>Muse Image</b> (images),\n        <b>Muse Video</b> (videos). The muse.ai web app is an auto-routing agent with no model picker in the UI,\n        so the <code>model</code> field is only for downstream compatibility: common names like <code>gpt-4o</code>,\n        <code>claude-sonnet-4</code> and <code>dall-e-3</code> are mapped to the matching capability automatically.\n      ",
   "auth-hint": "\n        Except for <code>/healthz</code>, <code>/readyz</code> and <code>/v1/media/*</code>, all endpoints require\n        <code>Authorization: Bearer &lt;API Key&gt;</code>. The API Key is configured in\n        <code>MUSE2API_KEY</code> in <code>/opt/muse2api/.env</code> on the server.\n      ",

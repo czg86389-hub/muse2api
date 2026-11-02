@@ -45,7 +45,7 @@ import urllib.request
 
 SITE = "https://muse.ai/"
 CDP_PORT = 9333
-ESSENTIAL = ("hatch_sess", "hatch_vml")
+ESSENTIAL = ("hatch_sess",)
 DOMAIN_HINT = "muse.ai"
 
 

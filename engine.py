@@ -41,8 +41,8 @@ MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_REFERENCE_TOTAL_BYTES = 24 * 1024 * 1024
 
 # 决定账号生死的核心 cookie（缺失或过期 = 会话失效）
-# 注：hatch_gw 为网关路由缓存，会话生死主要依赖 hatch_sess 与 hatch_vml，缺 gw 亦可正常续签与生成
-ESSENTIAL_COOKIES = ("hatch_sess", "hatch_vml")
+# hatch_sess 是登录凭据；hatch_vml 可由工作区签发，缺少不阻止导入
+ESSENTIAL_COOKIES = ("hatch_sess",)
 
 
 class MuseAuthError(RuntimeError):

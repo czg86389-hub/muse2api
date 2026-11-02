@@ -134,7 +134,7 @@ def check(root, home, observe):
     
     # 真实测试生产 add_account API 路由返回值中的 essential_missing
     api_res = app.add_account(app.AccountRequest(cookies=invalid_cookies))
-    expect('hatch_sess' in api_res['essential_missing'] and 'hatch_vml' in api_res['essential_missing'], 'API response must report missing essential cookies')
+    expect(api_res['essential_missing'] == ['hatch_sess'], 'API response must report missing essential cookies')
     expect(bool(api_res.get('warning')), 'API response must contain warning string when core tokens missing')
     print('invalid_cookie_check', 'essential_ok', listed_invalid['essential_ok'], 'api_missing', api_res['essential_missing'])
 

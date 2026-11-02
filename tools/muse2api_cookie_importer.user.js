@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Muse2API Cookie 导入助手
 // @namespace    https://github.com/czg86389-hub/muse2api
-// @version      1.1.1
+// @version      1.1.2
 // @description  在 muse.ai 网页上一键导出并推送核心 Cookie 至 muse2api 账号池，支持现代化悬浮面板、状态指示与剪贴板备份
 // @author       MUSE2API Contributors
 // @match        https://muse.ai/*
@@ -22,7 +22,7 @@
   'use strict';
 
   const STORE_KEY = '***';
-  const ESSENTIAL = ['hatch_sess', 'hatch_vml'];
+  const ESSENTIAL = ['hatch_sess'];
 
   function loadCfg() {
     const fallback = { base: '', key: '', label: '' };
@@ -255,7 +255,7 @@
           <div style="display:flex; align-items:center; gap:8px;">
             <span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#38bdf8; box-shadow:0 0 10px #38bdf8;"></span>
             <b style="font-size:15px; color:#f1f5f9; letter-spacing:0.3px;">muse2api 导入面板</b>
-            <span style="font-size:11px; background:#1e293b; color:#94a3b8; padding:1px 6px; border-radius:6px;">v1.1.1</span>
+            <span style="font-size:11px; background:#1e293b; color:#94a3b8; padding:1px 6px; border-radius:6px;">v1.1.2</span>
           </div>
           <button id="muse-close-btn" style="background:transparent; border:none; color:#64748b; font-size:18px; cursor:pointer; padding:0 4px; line-height:1;">✕</button>
         </div>

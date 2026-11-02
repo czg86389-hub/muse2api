@@ -28,7 +28,7 @@ def main():
         assert len(names) == len(set(names)), "extension archive contains duplicate entries"
         assert all("\\" not in name for name in names), "ZIP paths must be portable"
         manifest = json.loads(archive.read("muse2api-extension/manifest.json"))
-        assert manifest["version"] == "1.0.1"
+        assert manifest["version"] == "1.0.2"
         assert manifest["name"] == "__MSG_extName__"
         for locale in ("en", "zh_CN"):
             messages = json.loads(archive.read(
