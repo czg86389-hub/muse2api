@@ -1,19 +1,17 @@
 {
-  "version": "1.6.5",
+  "version": "1.6.6",
   "updated_at": "2026-11-02",
   "repo": "https://github.com/czg86389-hub/muse2api",
   "highlights": [
-    "新增每账号独立 HTTP / SOCKS5 代理，支持用户名/密码认证；聊天、生图、视频、额度、会话续签和 VM 唤醒使用账号指定出口。",
-    "新增代理连接、出口 IP 与 Muse 会话分层检查；代理故障明确报错，不回退直连，也不误判为 Cookie 失效。",
-    "代理设置支持双语管理界面、密码不回显、忙碌账号保护及任务出口快照，旧账号未配置代理时保持原网络行为。",
-    "修复 #35：助手先回复“视频已生成”但附件晚到时继续等待真实视频，保留明确拒答快速失败和原总超时。",
-    "隔离每个浏览器上下文的下载目录，防止并发下载兜底取错其他账号的成品；上下文创建失败时停止而非回退共享页面。"
+    "【重要：请手动升级浏览器插件至 1.0.2】更新服务不会自动更新已加载的扩展；替换原扩展目录文件，再到 chrome://extensions 或 edge://extensions 点击重新加载。不同浏览器个人资料需要分别升级。",
+    "修复已登录且能够聊天的账号因缺少 hatch_vml / hatch_gw 被旧插件错误阻止导入的问题；所有导入端与服务端现在只要求 hatch_sess。",
+    "油猴脚本同步升级至 1.1.2；重新导入后请点击账号“测试”。导入成功只表示记录已保存，实际可用性仍以上游会话验证为准。",
+    "保留无效会话 HTTP 401 拒绝和 unavailable 未确认状态；不会将凭据齐全或导入成功误报为账号可用。"
   ],
   "highlights_en": [
-    "Added per-account HTTP / SOCKS5 proxies with optional username/password authentication for chat, image/video generation, quota checks, session renewal and VM wake requests.",
-    "Added separate proxy reachability, egress IP and Muse-session checks; proxy failures never fall back to a direct connection or imply invalid cookies.",
-    "Added bilingual proxy settings, redacted passwords, busy-account protection and task-scoped route snapshots; unconfigured accounts retain their existing network behavior.",
-    "Fixed #35: wait for real video attachments after success text arrives, while preserving explicit refusal fast-fail and the existing total deadline.",
-    "Isolated browser-context download directories to prevent cross-account fallback results; context creation failures now stop instead of falling back to a shared page."
+    "IMPORTANT: manually upgrade the extension to 1.0.2. Updating the service does not update unpacked extensions. Replace files in the original folder, then click Reload at chrome://extensions or edge://extensions. Upgrade each browser profile separately.",
+    "Fixed valid logged-in accounts being blocked when hatch_vml or hatch_gw was absent. All importers and the server now require only hatch_sess.",
+    "Updated the userscript to 1.1.2. Re-import, then run the account Test. Import success means the record was saved; upstream verification determines usability.",
+    "Invalid sessions still fail with HTTP 401, while unavailable remains inconclusive. Cookie presence or import success is never proof of a working account."
   ]
 }
