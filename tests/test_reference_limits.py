@@ -30,7 +30,7 @@ with tempfile.TemporaryDirectory() as home:
 
     for request in [
         app.ImageRequest(prompt="x", images=[None]),
-        app.ImageRequest(prompt="x", images=["a"] * 5),
+        app.ImageRequest(prompt="x", images=["a"] * (app.MAX_REFERENCE_IMAGES + 1)),
         app.ImageRequest(prompt="x", reference_image="old", images=["new"]),
     ]:
         try:
@@ -70,16 +70,16 @@ with tempfile.TemporaryDirectory() as home:
     try:
         engine._normalize_image(oversized)
     except app.MuseGenerationError as exc:
-        assert "10 MiB" in str(exc)
+        assert f"{app.MAX_REFERENCE_IMAGE_BYTES // (1024 * 1024)} MiB" in str(exc)
     else:
         raise AssertionError("oversized image was accepted")
 
     try:
-        engine._attach_images([valid] * 5)
+        engine._attach_images([valid] * (app.MAX_REFERENCE_IMAGES + 1))
     except app.MuseGenerationError as exc:
-        assert "最多 4 张" in str(exc)
+        assert f"最多 {app.MAX_REFERENCE_IMAGES} 个" in str(exc)
     else:
-        raise AssertionError("more than four images were accepted")
+        raise AssertionError("more references than the limit were accepted")
 
 print("PASS: reference count, item, conflict, MIME and byte limits")
 
@@ -161,7 +161,7 @@ finally:
 oversized = FakeUpload(b"x" * (app.MAX_REFERENCE_IMAGE_BYTES + 1))
 oversized_request = FakeMultipartRequest(FakeForm(
     [oversized], prompt="x", **{"async": True}))
-asyncio.run(expect_endpoint_400(oversized_request, "10 MiB"))
+asyncio.run(expect_endpoint_400(oversized_request, f"{app.MAX_REFERENCE_IMAGE_BYTES // (1024 * 1024)} MiB"))
 assert oversized.read_limit == app.MAX_REFERENCE_IMAGE_BYTES + 1
 assert oversized_request.form_options == {
     "max_files": app.MAX_REFERENCE_IMAGES, "max_fields": 20}
@@ -170,10 +170,10 @@ chunk = b"x" * (app.MAX_REFERENCE_TOTAL_BYTES // 3 + 1)
 total_request = FakeMultipartRequest(FakeForm(
     [FakeUpload(chunk), FakeUpload(chunk), FakeUpload(chunk)],
     prompt="x", **{"async": True}))
-asyncio.run(expect_endpoint_400(total_request, "24 MiB"))
+asyncio.run(expect_endpoint_400(total_request, f"{app.MAX_REFERENCE_TOTAL_BYTES // (1024 * 1024)} MiB"))
 
 count_request = FakeMultipartRequest(FakeForm(
     ["x"] * (app.MAX_REFERENCE_IMAGES + 1), prompt="x"))
-asyncio.run(expect_endpoint_400(count_request, "最多 4 张"))
+asyncio.run(expect_endpoint_400(count_request, f"最多 {app.MAX_REFERENCE_IMAGES} 个"))
 
 print("PASS: endpoint JSON conflicts plus multipart count, per-file and total byte limits")

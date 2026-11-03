@@ -115,7 +115,7 @@
        proxy_read_timeout 600s;      # 避免生图/视频耗时较长被 Nginx 报 502 Bad Gateway
        proxy_send_timeout 600s;
        proxy_buffering off;          # 保证 SSE 对话流式打字机 0 延迟吐字
-       client_max_body_size 64M;     # 支持参考图大文件上传
+       client_max_body_size 200M;    # 支持视频/音频等大参考素材上传
        proxy_set_header Host $host;
        proxy_set_header X-Real-IP $remote_addr;
        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -249,7 +249,7 @@ curl -X POST "http://localhost:18610/v1/images/generations" \
 }
 ```
 
-多图参考使用 `images` 数组（最多 4 张；单张不超过 10 MiB、合计不超过 24 MiB）；服务会按数组顺序逐张上传，并在全部附件得到网页确认后才发送提示词。`images` 不可与 `image` / `reference_image` 等旧版单图字段混用：
+多图参考使用 `images` 数组（最多 10 个素材；单个不超过 40 MiB、合计不超过 100 MiB，详见下方「参考素材」）；服务会按数组顺序逐张上传，并在全部附件得到网页确认后才发送提示词。`images` 不可与 `image` / `reference_image` 等旧版单图字段混用：
 
 ```bash
 curl -X POST "http://localhost:18610/v1/images/generations" \
@@ -323,6 +323,38 @@ curl -X POST "http://localhost:18610/v1/images/edits" \
     }
   }
   ```
+
+---
+
+## 🎞️ 参考素材：图片 / 视频 / 音频 / 文档
+
+生图、图像编辑、图片任务与视频接口都可以附带参考素材，限制与 muse.ai 网页端一致：
+
+| 项目 | 限制 |
+|---|---|
+| 数量 | 每次最多 10 个（所有字段合计） |
+| 单个大小 | 40 MiB；合计 100 MiB |
+| 图片 | jpg / png / gif / webp / heic / heif / avif |
+| 视频 | mp4 / mov / webm / 3gp，时长不超过 120 秒（mp4/mov 会预先校验） |
+| 音频 | mp3 / wav / m4a / ogg / flac / aac / opus |
+| 文档 | pdf / doc / docx |
+
+- JSON 字段：`images`（可混放任意素材）、`videos`、`audios`、`files`，按此顺序依次上传；每项可以是 URL、Data URL、Base64，或 `{"url": ...}` / `{"video_url": ...}` / `{"audio_url": ...}` 对象。
+- 类型取 Data URL / 响应头 / multipart 声明的 MIME；声明为空或 `application/octet-stream` 时按文件头识别。
+- `/v1/images/edits` 的 multipart 可重复提交 `image`、`video`、`audio`、`file` 字段。
+- 视频任务若第一个素材是图片，以它作为主要起始画面；成品绝不会是本次上传的素材本身（按内容哈希排除）。
+
+```bash
+curl -X POST "http://localhost:18610/v1/videos"   -H "Authorization: Bearer m2a_your_secret_key"   -H "Content-Type: application/json"   -d '{
+    "prompt": "参考视频的运镜节奏，配合音频的情绪，生成一段新的城市夜景",
+    "videos": [{"url": "https://example.com/ref.mp4"}],
+    "audios": [{"url": "https://example.com/bgm.mp3"}],
+    "duration": 8,
+    "size": "16:9"
+  }'
+```
+
+Nginx 反代需把 `client_max_body_size` 调到 200M 左右，否则大素材会被 413 拒绝。
 
 ---
 

@@ -29,6 +29,7 @@ import asyncio
 import copy
 from contextlib import contextmanager
 import base64
+import collections
 import binascii
 import io
 import hashlib
@@ -50,8 +51,8 @@ from pydantic import BaseModel, Field, SecretStr, field_validator
 from config import CFG
 from engine import (ESSENTIAL_COOKIES, MAX_REFERENCE_IMAGE_BYTES,
                     MAX_REFERENCE_IMAGES, MAX_REFERENCE_TOTAL_BYTES,
-                    MuseAuthError, MuseEngine, MuseGenerationError,
-                    MuseModelRefusalError, RefImageSafetyError)
+                    REFERENCE_MIME_EXT, MuseAuthError, MuseEngine, MuseGenerationError,
+                    MuseModelRefusalError, RefImageSafetyError, reference_kind)
 from engine import MuseProxyError
 from store import Store, account_expiry, min_expiry
 from proxy import normalize_server, request_proxy_context
@@ -479,6 +480,9 @@ class ImageRequest(BaseModel):
     extra: str | None = None
     image: Any = None
     images: list | None = None
+    videos: list | None = None
+    audios: list | None = None
+    files: list | None = None
     reference_image: str | None = None
     async_: bool = Field(False, alias="async")
 
@@ -494,6 +498,9 @@ class VideoRequest(BaseModel):
     extra: str | None = None
     image: Any = None
     images: list | None = None
+    videos: list | None = None
+    audios: list | None = None
+    files: list | None = None
     image_url: Any = None
     reference_image: str | None = None
 
@@ -602,44 +609,103 @@ def _image_value(value: Any) -> str | None:
     if isinstance(value, str):
         return value.strip() or None
     if isinstance(value, dict):
-        candidate = value.get("image_url") or value.get("url") or value.get("b64_json")
+        candidate = (value.get("image_url") or value.get("video_url") or value.get("audio_url")
+                     or value.get("file_url") or value.get("url") or value.get("b64_json")
+                     or value.get("data"))
         if isinstance(candidate, dict):
             candidate = candidate.get("url")
         return candidate.strip() if isinstance(candidate, str) and candidate.strip() else None
     return None
 
 
-def _reference_list(images: list | None, legacy: list[Any], field: str) -> list[str]:
-    """Validate ordered image references and make legacy precedence explicit."""
+def _reference_list(images: list | None, legacy: list[Any], field: str,
+                    extra: dict[str, list | None] | None = None) -> list[str]:
+    """Validate ordered references and make legacy precedence explicit.
+
+    顺序：images（或旧版单图字段）在前，其后依次是 videos / audios / files。
+    images 本身也可以混放视频、音频与文档，类型在预处理时按 MIME/文件头识别。
+    """
     primary = next((ref for value in legacy if (ref := _image_value(value))), None)
     if primary and images:
         raise HTTPException(400, f"{field} 不能与旧版单图字段同时使用")
+    groups: list[tuple[str, list]] = []
     if primary:
-        return [primary]
-    if images is None:
-        return []
-    if len(images) > MAX_REFERENCE_IMAGES:
-        raise HTTPException(400, f"{field} 最多 {MAX_REFERENCE_IMAGES} 张参考图")
+        groups.append((field, [primary]))
+    elif images is not None:
+        groups.append((field, images))
+    for name, values in (extra or {}).items():
+        if values is not None:
+            if not isinstance(values, list):
+                raise HTTPException(400, f"{name} 必须是数组")
+            groups.append((name, values))
+    total = sum(len(values) for _, values in groups)
+    if total > MAX_REFERENCE_IMAGES:
+        raise HTTPException(400, f"参考素材最多 {MAX_REFERENCE_IMAGES} 个（当前 {total} 个）")
     refs = []
-    for index, value in enumerate(images):
-        ref = _image_value(value)
-        if not ref:
-            raise HTTPException(400, f"{field}[{index}] 不是有效图片引用")
-        refs.append(ref)
+    for name, values in groups:
+        for index, value in enumerate(values):
+            ref = _image_value(value)
+            if not ref:
+                raise HTTPException(400, f"{name}[{index}] 不是有效素材引用")
+            refs.append(ref)
     return refs
 
 
+def _extra_media(req) -> dict[str, list | None]:
+    return {"videos": req.videos, "audios": req.audios, "files": req.files}
+
+
 def _image_references(req: ImageRequest) -> list[str]:
-    return _reference_list(req.images, [req.reference_image, req.image], "images")
+    return _reference_list(req.images, [req.reference_image, req.image], "images",
+                           _extra_media(req))
 
 
 def _video_references(req: VideoRequest) -> list[str]:
     return _reference_list(
-        req.images, [req.reference_image, req.image_url, req.image], "images")
+        req.images, [req.reference_image, req.image_url, req.image], "images",
+        _extra_media(req))
 
-def build_image_prompt(r: ImageRequest) -> str:
-    has_ref = bool(_image_references(r))
-    if has_ref:
+
+def _reference_kinds(prepared: list[str]) -> list[str]:
+    """预处理后的 data URL -> image/video/audio/document 列表（保持顺序）。"""
+    return [reference_kind(ref[5:].split(";", 1)[0]) for ref in prepared]
+
+
+_KIND_LABELS = {"image": ("张", "图片"), "video": ("段", "视频"),
+                "audio": ("段", "音频"), "document": ("份", "文档")}
+
+
+def _describe_kinds(kinds: list[str]) -> str:
+    counts = collections.Counter(kinds)
+    return "、".join(f"{counts[k]} {_KIND_LABELS[k][0]}{_KIND_LABELS[k][1]}"
+                    for k in ("image", "video", "audio", "document") if counts[k])
+
+
+# 工作台提示词用 [图N] / [视频N] / [音频N] 指代素材，按同类顺序编号（与上传顺序一致）。
+# muse 不认识这些标记，所以把「标记 -> 第几个附件」写进提示词。
+_KIND_TOKENS = {"image": "图", "video": "视频", "audio": "音频", "document": "文档"}
+_REFERENCE_TOKEN = re.compile(r"\[(?:图|视频|音频|文档)\d+\]")
+
+
+def _reference_legend(kinds: list[str]) -> str:
+    seen: collections.Counter = collections.Counter()
+    parts = []
+    for index, kind in enumerate(kinds, 1):
+        seen[kind] += 1
+        parts.append(f"[{_KIND_TOKENS[kind]}{seen[kind]}] 是第 {index} 个附件（{_KIND_LABELS[kind][1]}）")
+    return "附件对照：" + "，".join(parts)
+
+def build_image_prompt(r: ImageRequest, kinds: list[str] | None = None) -> str:
+    refs = _image_references(r)
+    has_ref = bool(refs)
+    kinds = kinds or ["image"] * len(refs)
+    if has_ref and any(k != "image" for k in kinds):
+        parts = [f"基于我本次上传附带的参考素材（{_describe_kinds(kinds)}；{_reference_legend(kinds)}；"
+                 f"只使用本次上传的这些附件，各附件的用途以下面的描述为准）"
+                 f"进行生图/编辑，输出一张图片：{r.prompt.strip()}"]
+    elif len(refs) > 1 and _REFERENCE_TOKEN.search(r.prompt):
+        parts = [f"基于我本次上传附带的参考图片（{_reference_legend(kinds)}）进行生图/编辑：{r.prompt.strip()}"]
+    elif has_ref:
         parts = [f"基于我本次上传附带的参考图片进行生图/编辑：{r.prompt.strip()}"]
     else:
         parts = [f"全新文生图创作（当前未提供任何参考图，请勿查找历史相册或向用户索要原图，直接根据文字描述从零绘制生成一张全新图片）：{r.prompt.strip()}"]
@@ -661,7 +727,7 @@ def build_image_prompt(r: ImageRequest) -> str:
     elif r.size:
         parts.append(f"尺寸/比例：{r.size}")
 
-    if has_ref:
+    if has_ref and "image" in kinds:
         parts.append("【纯净画面要求】：彻底清除并去除参考图中的所有文字、水印、签名、角标及Logo标记（clean image without any watermark, text, or logo），输出绝对纯净无字画面")
 
     if r.extra:
@@ -863,37 +929,50 @@ def parse_tool_calls(text: str) -> tuple[list[dict] | None, str]:
     return None, text
 
 
-def build_video_prompt(r: VideoRequest) -> str:
+def build_video_prompt(r: VideoRequest, kinds: list[str] | None = None) -> str:
     user_prompt = r.prompt.strip()
     ar = (r.aspect_ratio or "").strip().lower()
     sz = (r.size or "").strip().lower()
     dur = r.duration or 6
     refs = _video_references(r)
     has_ref = bool(refs)
-    reference_instruction = (
-        f"基于我本次上传的 {len(refs)} 张参考图片生成视频（以第一张作为主要起始画面，"
-        "其余图片作为主体、场景与风格参考，严禁使用历史图片或其他图像）"
-        if len(refs) > 1 else
-        "基于我本次上传的参考图片附件作为第一帧参考图（严禁使用历史图片或任何其他图像，"
-        "必须严格以我当前刚刚上传并附带在此处的这张图片为起始帧）"
-    )
+    kinds = kinds or ["image"] * len(refs)
+    if any(k != "image" for k in kinds):
+        # 不再默认「第一张图作起始画面」：实测会把模型拉回图片场景、忽略参考视频
+        reference_instruction = (
+            f"基于我本次上传的参考素材（{_describe_kinds(kinds)}）生成视频"
+            f"（{_reference_legend(kinds)}；只使用本次上传的这些附件，严禁使用历史素材；"
+            "各附件的用途以下面的描述为准）")
+    elif len(refs) > 1 and _REFERENCE_TOKEN.search(user_prompt):
+        reference_instruction = (
+            f"基于我本次上传的 {len(refs)} 张参考图片生成视频（{_reference_legend(kinds)}；"
+            "各图片的用途以下面的描述为准，未说明时以第一张作为主要起始画面；严禁使用历史图片或其他图像）")
+    elif len(refs) > 1:
+        reference_instruction = (
+            f"基于我本次上传的 {len(refs)} 张参考图片生成视频（以第一张作为主要起始画面，"
+            "其余图片作为主体、场景与风格参考，严禁使用历史图片或其他图像）")
+    else:
+        reference_instruction = (
+            "基于我本次上传的参考图片附件作为第一帧参考图（严禁使用历史图片或任何其他图像，"
+            "必须严格以我当前刚刚上传并附带在此处的这张图片为起始帧）")
 
+    gen_word = "图生视频" if all(k == "image" for k in kinds) else "视频"
     is_vertical = any(k in ar or k in sz for k in ("9:16", "9/16", "portrait", "竖屏", "720x1280", "1080x1920"))
 
     parts = []
     if is_vertical:
         if has_ref:
-            parts.append(f"{reference_instruction}：生成一个严格9:16竖屏手机满屏的动态图生视频（9:16 vertical portrait video，720x1280，高大于宽的手机全屏竖版画面，严禁生成横屏或黑边，时长严格为 {dur} 秒）：{user_prompt}")
+            parts.append(f"{reference_instruction}：生成一个严格9:16竖屏手机满屏的动态{gen_word}（9:16 vertical portrait video，720x1280，高大于宽的手机全屏竖版画面，严禁生成横屏或黑边，时长严格为 {dur} 秒）：{user_prompt}")
         else:
             parts.append(f"全新文生视频创作（纯文本全新生成，严禁参考任何历史图片或上下文）：生成一个严格9:16竖屏手机满屏视频（9:16 vertical portrait video，720x1280，高大于宽的手机全屏竖版画面，严禁生成横屏或带有左右黑边，保持垂直构图，时长严格为 {dur} 秒）：{user_prompt}")
     elif any(k in ar or k in sz for k in ("16:9", "16/9", "landscape", "横屏", "1280x720", "1920x1080")):
         if has_ref:
-            parts.append(f"{reference_instruction}：生成一个16:9宽屏横屏图生视频（16:9 widescreen landscape video，时长严格为 {dur} 秒）：{user_prompt}")
+            parts.append(f"{reference_instruction}：生成一个16:9宽屏横屏{gen_word}（16:9 widescreen landscape video，时长严格为 {dur} 秒）：{user_prompt}")
         else:
             parts.append(f"全新文生视频创作（纯文本全新生成，严禁参考任何历史图片或上下文）：生成一个16:9横屏宽屏视频（16:9 widescreen landscape video，时长严格为 {dur} 秒）：{user_prompt}")
     else:
         if has_ref:
-            parts.append(f"{reference_instruction}：生成动态图生视频（时长严格为 {dur} 秒）：{user_prompt}")
+            parts.append(f"{reference_instruction}：生成动态{gen_word}（时长严格为 {dur} 秒）：{user_prompt}")
         else:
             parts.append(f"全新文生视频创作（纯文本全新生成，严禁参考任何历史图片或上下文）：生成一个视频（时长严格为 {dur} 秒）：{user_prompt}")
 
@@ -1147,6 +1226,13 @@ def _image_response(req: ImageRequest, res: dict) -> dict:
     return {"created": int(time.time()), "data": [item]}
 
 
+def _generic_upload_mime(mime: str) -> bool:
+    """multipart 上传常见的笼统类型（交给文件头识别）以及别名写法。"""
+    return mime in ("application/octet-stream", "binary/octet-stream") or mime in (
+        "image/jpg", "audio/mp3", "audio/x-wav", "audio/wave", "audio/x-m4a",
+        "audio/m4a", "audio/x-flac", "audio/x-aac", "video/x-m4v")
+
+
 def _prepare_reference_images(images: list[str]) -> list[str]:
     """Validate and snapshot all sources before a task is accepted."""
     prepared = []
@@ -1159,7 +1245,8 @@ def _prepare_reference_images(images: list[str]) -> list[str]:
             raise HTTPException(400, f"images[{index}]: {exc}") from exc
         total_bytes += len(data)
         if total_bytes > MAX_REFERENCE_TOTAL_BYTES:
-            raise HTTPException(400, "参考图总大小超过 24 MiB 限制")
+            raise HTTPException(
+                400, f"参考素材总大小超过 {MAX_REFERENCE_TOTAL_BYTES // (1024 * 1024)} MiB 限制")
         prepared.append(f"data:{mime};base64,{b64}")
     return prepared
 
@@ -1226,7 +1313,7 @@ def _queue_image(req: ImageRequest, prompt: str, reference_images: list[str],
 def create_image_task(req: ImageRequest,
                       idempotency_key: str | None = Header(default=None), _=Depends(auth)):
     refs = _prepare_reference_images(_image_references(req))
-    return _queue_image(req, build_image_prompt(req), refs, idempotency_key)
+    return _queue_image(req, build_image_prompt(req, _reference_kinds(refs)), refs, idempotency_key)
 
 
 @app.get("/v1/images/tasks/{task_id}")
@@ -1247,7 +1334,7 @@ async def images_generations(req: ImageRequest, _=Depends(auth)):
     ref_images = await asyncio.to_thread(
         _prepare_reference_images, _image_references(req))
 
-    prompt = build_image_prompt(req)
+    prompt = build_image_prompt(req, _reference_kinds(ref_images))
     timeout = req.timeout or CFG.image_timeout
     if req.async_:
         return _queue_image(req, prompt, ref_images)
@@ -1289,27 +1376,31 @@ async def images_edits(request: Request, _=Depends(auth)):
                 timeout = int(timeout_val)
             except ValueError:
                 pass
-        img_fields = form.getlist("image")
+        # image 可重复提交；video / audio / file 同样可重复，按字段顺序排在 image 之后
+        img_fields = [(name, value) for name in ("image", "image[]", "video", "audio", "file")
+                      for value in form.getlist(name)]
         if len(img_fields) > MAX_REFERENCE_IMAGES:
-            raise HTTPException(400, f"image 最多 {MAX_REFERENCE_IMAGES} 张参考图")
+            raise HTTPException(400, f"参考素材最多 {MAX_REFERENCE_IMAGES} 个（当前 {len(img_fields)} 个）")
         total_upload_bytes = 0
-        for index, img_field in enumerate(img_fields):
+        mib = 1024 * 1024
+        for index, (name, img_field) in enumerate(img_fields):
             if img_field and hasattr(img_field, "read"):
-                ref_mime = getattr(img_field, "content_type", "image/png") or "image/png"
-                if not ref_mime.lower().startswith("image/"):
-                    raise HTTPException(400, f"image[{index}] 不是图片文件")
+                ref_mime = (getattr(img_field, "content_type", "") or "").split(";", 1)[0].strip().lower()
+                if ref_mime and ref_mime not in REFERENCE_MIME_EXT and not _generic_upload_mime(ref_mime):
+                    raise HTTPException(400, f"{name}[{index}] 文件类型不受支持（{ref_mime}）")
                 content = await img_field.read(MAX_REFERENCE_IMAGE_BYTES + 1)
                 if len(content) > MAX_REFERENCE_IMAGE_BYTES:
-                    raise HTTPException(400, f"image[{index}] 超过 10 MiB 限制")
+                    raise HTTPException(400, f"{name}[{index}] 超过 {MAX_REFERENCE_IMAGE_BYTES // mib} MiB 限制")
                 total_upload_bytes += len(content)
                 if total_upload_bytes > MAX_REFERENCE_TOTAL_BYTES:
-                    raise HTTPException(400, "参考图总大小超过 24 MiB 限制")
+                    raise HTTPException(400, f"参考素材总大小超过 {MAX_REFERENCE_TOTAL_BYTES // mib} MiB 限制")
+                ref_mime = ref_mime or "application/octet-stream"
                 ref_image_data.append(
                     f"data:{ref_mime};base64,{base64.b64encode(content).decode('ascii')}")
             elif isinstance(img_field, str) and img_field.strip():
                 ref_image_data.append(img_field.strip())
             else:
-                raise HTTPException(400, f"image[{index}] 不是有效图片引用")
+                raise HTTPException(400, f"{name}[{index}] 不是有效素材引用")
     else:
         body = await request.json()
         async_mode = body.get("async", False)
@@ -1323,7 +1414,8 @@ async def images_edits(request: Request, _=Depends(auth)):
         if raw_images is not None and not isinstance(raw_images, list):
             raise HTTPException(400, "images 必须是数组")
         legacy = [body.get("reference_image"), body.get("image_url"), body.get("image")]
-        ref_image_data = _reference_list(raw_images, legacy, "images")
+        ref_image_data = _reference_list(raw_images, legacy, "images", {
+            name: body.get(name) for name in ("videos", "audios", "files")})
 
     if not prompt:
         prompt = "参考此图片并进行生图创作"
@@ -1340,7 +1432,7 @@ async def images_edits(request: Request, _=Depends(auth)):
     )
     ref_image_data = await asyncio.to_thread(
         _prepare_reference_images, ref_image_data)
-    full_prompt = build_image_prompt(req_obj)
+    full_prompt = build_image_prompt(req_obj, _reference_kinds(ref_image_data))
     gen_timeout = timeout or CFG.image_timeout
     if req_obj.async_:
         return _queue_image(req_obj, full_prompt, ref_image_data)
@@ -1363,7 +1455,7 @@ async def create_video(req: VideoRequest, _=Depends(auth)):
     ref_images = await asyncio.to_thread(
         _prepare_reference_images, _video_references(req))
 
-    prompt = build_video_prompt(req)
+    prompt = build_video_prompt(req, _reference_kinds(ref_images))
     timeout = req.timeout or CFG.video_timeout
     task = store.create_task("video", req.prompt)
     store.update_task(task["id"], api_prompt=prompt)

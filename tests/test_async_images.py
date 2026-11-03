@@ -209,7 +209,8 @@ async def check(source, home):
 
         for bad in [
             {"prompt": "bad empty reference", "images": [None]},
-            {"prompt": "too many references", "images": ["data:image/png;base64,eA=="] * 5},
+            {"prompt": "too many references",
+             "images": ["data:image/png;base64,eA=="] * (module.MAX_REFERENCE_IMAGES + 1)},
             {"prompt": "conflicting references", "reference_image": "data:image/png;base64,eA==",
              "images": ["data:image/png;base64,eQ=="]},
         ]:
