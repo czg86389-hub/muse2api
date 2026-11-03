@@ -11,9 +11,11 @@ from __future__ import annotations
 import base64
 import binascii
 import copy
+import hashlib
 import http.client
 import ipaddress
 import mimetypes
+import math
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,6 +24,7 @@ import logging
 import os
 import re
 import shutil
+import struct
 import socket
 import subprocess
 import tempfile
@@ -36,9 +39,171 @@ from proxy import HTTPProxyRelay, request_proxy_context
 log = logging.getLogger("muse2api")
 
 ATT_SEL = '[data-testid^="hatch-chat-attachment-presentation-"]'
-MAX_REFERENCE_IMAGES = 4
-MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024
-MAX_REFERENCE_TOTAL_BYTES = 24 * 1024 * 1024
+# 参考素材上限对齐 muse.ai 网页端（maxFilesPerUpload=10 / maxFileSize=40 MiB /
+# maxVideoDurationSeconds=120）。常量名沿用 *_IMAGES，但统计的是全部素材。
+MAX_REFERENCE_IMAGES = 10
+MAX_REFERENCE_IMAGE_BYTES = 40 * 1024 * 1024
+MAX_REFERENCE_TOTAL_BYTES = 100 * 1024 * 1024
+MAX_REFERENCE_VIDEO_SECONDS = 120
+_MIB = 1024 * 1024
+
+# 允许上传到 muse 输入框的素材类型 -> 落盘扩展名。
+# 图片/视频/文档取自 muse 前端白名单；音频不在白名单里，但输入框接受，
+# 且实测模型能读出 wav 的内容，所以一并放开。
+REFERENCE_MIME_EXT = {
+    "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
+    "image/webp": ".webp", "image/heic": ".heic", "image/heif": ".heif",
+    "image/avif": ".avif",
+    "video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm",
+    "video/3gpp": ".3gp",
+    "audio/mpeg": ".mp3", "audio/wav": ".wav", "audio/mp4": ".m4a",
+    "audio/ogg": ".ogg", "audio/flac": ".flac", "audio/aac": ".aac",
+    "audio/opus": ".opus",
+    "application/pdf": ".pdf", "application/msword": ".doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+}
+_MIME_ALIASES = {
+    "image/jpg": "image/jpeg", "image/pjpeg": "image/jpeg",
+    "video/x-m4v": "video/mp4", "video/mov": "video/quicktime",
+    "audio/mp3": "audio/mpeg", "audio/x-mp3": "audio/mpeg", "audio/mpeg3": "audio/mpeg",
+    "audio/x-wav": "audio/wav", "audio/wave": "audio/wav", "audio/vnd.wave": "audio/wav",
+    "audio/x-m4a": "audio/mp4", "audio/m4a": "audio/mp4", "audio/x-flac": "audio/flac",
+    "audio/x-aac": "audio/aac", "audio/aacp": "audio/aac",
+}
+# 这些声明类型不可信，按文件头识别
+_GENERIC_MIMES = {"", "application/octet-stream", "binary/octet-stream",
+                  "application/binary", "application/unknown"}
+
+
+def reference_kind(mime: str) -> str:
+    """image / video / audio / document。"""
+    head = (mime or "").split("/", 1)[0]
+    return head if head in ("image", "video", "audio") else "document"
+
+
+def _sniff_mime(data: bytes) -> str | None:
+    """按文件头识别素材类型；识别不了返回 None。"""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        return "audio/wav"
+    if data[4:8] == b"ftyp":
+        brand = data[8:12]
+        if brand == b"qt  ":
+            return "video/quicktime"
+        if brand in (b"M4A ", b"M4B "):
+            return "audio/mp4"
+        if brand in (b"heic", b"heix", b"hevc", b"heim", b"heis"):
+            return "image/heic"
+        if brand in (b"mif1", b"msf1", b"heif"):
+            return "image/heif"
+        if brand in (b"avif", b"avis"):
+            return "image/avif"
+        if brand.startswith(b"3g"):
+            return "video/3gpp"
+        return "video/mp4"
+    if data.startswith(b"\x1a\x45\xdf\xa3"):
+        return "video/webm"
+    if data.startswith(b"ID3") or data[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
+        return "audio/mpeg"
+    if data[:2] in (b"\xff\xf1", b"\xff\xf9"):
+        return "audio/aac"
+    if data.startswith(b"OggS"):
+        return "audio/opus" if b"OpusHead" in data[:64] else "audio/ogg"
+    if data.startswith(b"fLaC"):
+        return "audio/flac"
+    if data.startswith(b"%PDF"):
+        return "application/pdf"
+    return None
+
+
+def _mp4_duration(data: bytes) -> float | None:
+    """读 mp4/mov 的 moov/mvhd 时长（秒）；解析不了返回 None。"""
+    def boxes(start: int, end: int):
+        pos = start
+        while pos + 8 <= end:
+            size = int.from_bytes(data[pos:pos + 4], "big")
+            kind = data[pos + 4:pos + 8]
+            header = 8
+            if size == 1 and pos + 16 <= end:
+                size = int.from_bytes(data[pos + 8:pos + 16], "big")
+                header = 16
+            elif size == 0:
+                size = end - pos
+            if size < header or pos + size > end:
+                return
+            yield kind, pos + header, pos + size
+            pos += size
+
+    for kind, body, end in boxes(0, len(data)):
+        if kind != b"moov":
+            continue
+        for sub, sbody, send in boxes(body, end):
+            if sub != b"mvhd" or send - sbody < 20:
+                continue
+            if data[sbody] == 1:
+                if send - sbody < 32:
+                    return None
+                scale = int.from_bytes(data[sbody + 20:sbody + 24], "big")
+                duration = int.from_bytes(data[sbody + 24:sbody + 32], "big")
+            else:
+                scale = int.from_bytes(data[sbody + 12:sbody + 16], "big")
+                duration = int.from_bytes(data[sbody + 16:sbody + 20], "big")
+            return duration / scale if scale else None
+    return None
+
+
+def _webm_duration(data: bytes) -> float | None:
+    """Read EBML Segment/Info duration; unknown or malformed metadata fails closed."""
+    def vint(pos, end, keep_marker=False):
+        if pos >= end or not data[pos]:
+            raise ValueError("invalid EBML integer")
+        width = 1
+        while width <= 8 and not (data[pos] & (0x80 >> (width - 1))):
+            width += 1
+        if width > 8 or pos + width > end:
+            raise ValueError("truncated EBML integer")
+        value = int.from_bytes(data[pos:pos + width], "big")
+        if not keep_marker:
+            value &= (1 << (7 * width)) - 1
+            if value == (1 << (7 * width)) - 1:
+                value = None
+        return value, pos + width
+
+    def elements(start, end):
+        while start < end:
+            tag, pos = vint(start, end, True)
+            size, body = vint(pos, end)
+            stop = end if size is None else body + size
+            if stop > end or stop <= start:
+                raise ValueError("invalid EBML element size")
+            yield tag, body, stop
+            start = stop
+
+    try:
+        for tag, body, end in elements(0, len(data)):
+            if tag != 0x18538067:  # Segment
+                continue
+            for tag, body, end in elements(body, end):
+                if tag != 0x1549A966:  # Info
+                    continue
+                scale, duration = 1000000, None
+                for tag, body, end in elements(body, end):
+                    if tag == 0x2AD7B1 and 0 < end - body <= 8:
+                        scale = int.from_bytes(data[body:end], "big")
+                    elif tag == 0x4489 and end - body in (4, 8):
+                        duration = struct.unpack(">f" if end - body == 4 else ">d", data[body:end])[0]
+                return duration * scale / 1e9 if duration is not None and scale else None
+    except (ValueError, struct.error):
+        return None
+    return None
+
 
 # 决定账号生死的核心 cookie（缺失或过期 = 会话失效）
 # hatch_sess 是登录凭据；hatch_vml 可由工作区签发，缺少不阻止导入
@@ -1389,24 +1554,42 @@ class MuseEngine:
         return None
 
     def _normalize_image(self, img: str) -> tuple[str, str]:
-        """Normalize one image and enforce source, MIME and size policy."""
+        """Normalize one reference file (image/video/audio/document) and enforce
+        source, MIME, size and video-duration policy."""
         if not img:
             return "", "image/png"
         img = str(img).strip()
 
-        def checked(data: bytes, mime: str) -> tuple[str, str]:
-            mime = (mime or "image/png").split(";", 1)[0].strip().lower()
-            if not mime.startswith("image/"):
-                raise MuseGenerationError(f"参考文件不是图片（{mime or 'unknown'}）")
+        def checked(data: bytes, mime: str, fallback: str = "image/png",
+                    name: str = "") -> tuple[str, str]:
+            mime = (mime or "").split(";", 1)[0].strip().lower()
+            mime = _MIME_ALIASES.get(mime, mime)
+            if mime in _GENERIC_MIMES:
+                mime = (_sniff_mime(data)
+                        or _MIME_ALIASES.get(mimetypes.guess_type(name)[0] or "",
+                                             mimetypes.guess_type(name)[0] or "")
+                        or "")
+            if mime not in REFERENCE_MIME_EXT:
+                raise MuseGenerationError(
+                    f"参考文件类型不受支持（{mime or 'unknown'}）；"
+                    "支持图片、视频(mp4/mov/webm/3gp)、音频(mp3/wav/m4a/ogg/flac/aac/opus)与 PDF/Word")
             if len(data) > MAX_REFERENCE_IMAGE_BYTES:
-                raise MuseGenerationError("单张参考图超过 10 MiB 限制")
+                raise MuseGenerationError(
+                    f"单个参考素材超过 {MAX_REFERENCE_IMAGE_BYTES // _MIB} MiB 限制")
+            if mime.startswith("video/"):
+                seconds = _webm_duration(data) if mime == "video/webm" else _mp4_duration(data)
+                if seconds is None or not math.isfinite(seconds) or seconds <= 0:
+                    raise MuseGenerationError("无法确认参考视频时长，请提供带有效时长信息的 MP4/MOV/WebM/3GP 文件")
+                if seconds > MAX_REFERENCE_VIDEO_SECONDS:
+                    raise MuseGenerationError(
+                        f"参考视频时长 {seconds:.0f} 秒，超过 {MAX_REFERENCE_VIDEO_SECONDS} 秒限制")
             return base64.b64encode(data).decode("ascii"), mime
 
         if img.startswith("data:"):
             head, sep, payload = img.partition(",")
             if not sep:
                 raise MuseGenerationError("参考图 Data URL 格式无效")
-            mime = head[5:].split(";", 1)[0] or "image/png"
+            mime = head[5:].split(";", 1)[0]
             try:
                 data = (base64.b64decode(payload.strip(), validate=True)
                         if ";base64" in head.lower()
@@ -1422,9 +1605,10 @@ class MuseEngine:
                             if self.cfg.ref_image_private_fetch
                             else _open_public_ref_image(img))
                 with response as resp:
-                    mime = resp.headers.get_content_type() or "image/png"
+                    declared = resp.headers.get("Content-Type")
+                    mime = resp.headers.get_content_type() if declared else ""
                     data = resp.read(MAX_REFERENCE_IMAGE_BYTES + 1)
-                return checked(data, mime)
+                return checked(data, mime, name=urllib.parse.urlsplit(img).path)
             except (RefImageSafetyError, MuseGenerationError):
                 raise
             except Exception as exc:
@@ -1433,7 +1617,7 @@ class MuseEngine:
 
         # Raw Base64 contains no server-side path and remains safe in restricted mode.
         try:
-            return checked(base64.b64decode(img, validate=True), "image/png")
+            return checked(base64.b64decode(img, validate=True), "")
         except (binascii.Error, ValueError):
             pass
 
@@ -1444,10 +1628,11 @@ class MuseEngine:
         if os.path.isfile(img):
             try:
                 if os.path.getsize(img) > MAX_REFERENCE_IMAGE_BYTES:
-                    raise MuseGenerationError("单张参考图超过 10 MiB 限制")
+                    raise MuseGenerationError(
+                        f"单个参考素材超过 {MAX_REFERENCE_IMAGE_BYTES // _MIB} MiB 限制")
                 with open(img, "rb") as f:
                     return checked(f.read(MAX_REFERENCE_IMAGE_BYTES + 1),
-                                   mimetypes.guess_type(img)[0] or "image/png")
+                                   mimetypes.guess_type(img)[0] or "", name=img)
             except MuseGenerationError:
                 raise
             except Exception as exc:
@@ -1472,111 +1657,124 @@ class MuseEngine:
         except Exception:
             pass
 
-    def _attach_images(self, image_data: list[str]):
-        """逐张附加参考图，并确认全部进入 composer。"""
+    # 新版 muse 页面已没有 hatch-composer-placeholder-overlay，也不包 <form>：
+    # 输入框所在容器是 textarea 往上第二层，附件的「Remove attachment」按钮在那里。
+    # 旧结构（overlay / form）优先，新结构从 textarea 逐级向上找最近的一层。
+    _COMPOSER_ROOTS_JS = """
+        function __composerRoots(){
+            var ov = document.querySelector('[data-testid="hatch-composer-placeholder-overlay"]');
+            var legacy = ov ? (ov.closest('form') || ov.parentElement.parentElement.parentElement) : null;
+            if (legacy) return [legacy];
+            var ta = document.querySelector('textarea');
+            if (!ta) return [];
+            var form = ta.closest('form');
+            if (form) return [form];
+            var out = [], el = ta.parentElement;
+            for (var i = 0; i < 4 && el && el !== document.body; i++) { out.push(el); el = el.parentElement; }
+            return out;
+        }
+    """
+
+    _FILE_INPUT_JS = "(function(){" + _COMPOSER_ROOTS_JS + """
+        var inputs = Array.from(document.querySelectorAll('input[type="file"]'));
+        var roots = __composerRoots();
+        for (var r of roots) {
+            var hit = inputs.find(function(x){ return r.contains(x); });
+            if (hit) return hit;
+        }
+        return null;
+    })()"""
+
+    _ATTACHED_COUNT_JS = "(function(){" + _COMPOSER_ROOTS_JS + """
+        var rx = /remove\\s*attachment|移除附件|删除附件/i;
+        var bubble = '[class*=chat-user-bubble], [class*="group/msg"], [class*=hatch-chat-groupable-bubble]';
+        var roots = __composerRoots();
+        for (var r of roots) {
+            var n = Array.from(r.querySelectorAll('button[aria-label]')).filter(function(b){
+                return rx.test(b.getAttribute('aria-label') || '') && !b.closest(bubble);
+            }).length;
+            if (n) return n;
+        }
+        return 0;
+    })()"""
+
+    def _set_input_files(self, paths: list[str]):
+        """用 CDP 直接把磁盘文件交给上传控件（大视频不再经 base64 注入页面）。"""
+        res = self.page.send("Runtime.evaluate", {
+            "expression": self._FILE_INPUT_JS, "returnByValue": False})
+        object_id = (res.get("result", {}).get("result", {}) or {}).get("objectId")
+        if not object_id:
+            raise MuseGenerationError("找不到上传控件，已停止生成")
+        self.page.send("DOM.setFileInputFiles",
+                       {"files": paths, "objectId": object_id}, timeout=60)
+
+    def _attach_images(self, image_data: list[str]) -> dict | None:
+        """逐个附加参考素材（图片/视频/音频/文档），并确认全部进入输入框。
+
+        返回 {"dir": 临时目录, "hashes": 素材 sha256 集合}；调用方在生成结束后
+        删除临时目录（Chromium 在发送时才读取文件内容），并用 hashes 防止把
+        刚上传的素材当成生成结果交付。
+        """
         if len(image_data) > MAX_REFERENCE_IMAGES:
-            raise MuseGenerationError(f"参考图最多 {MAX_REFERENCE_IMAGES} 张")
-        images = []
+            raise MuseGenerationError(f"参考素材最多 {MAX_REFERENCE_IMAGES} 个")
+        files = []
         total_bytes = 0
         for index, value in enumerate(image_data):
             if not value:
                 continue
             b64, mime = self._normalize_image(value)
             if not b64:
-                raise MuseGenerationError(f"第 {index + 1} 张参考图读取失败，已停止生成")
+                raise MuseGenerationError(f"第 {index + 1} 个参考素材读取失败，已停止生成")
             try:
-                total_bytes += len(base64.b64decode(b64, validate=True))
+                data = base64.b64decode(b64, validate=True)
             except (binascii.Error, ValueError) as exc:
-                raise MuseGenerationError(f"第 {index + 1} 张参考图编码无效") from exc
+                raise MuseGenerationError(f"第 {index + 1} 个参考素材编码无效") from exc
+            total_bytes += len(data)
             if total_bytes > MAX_REFERENCE_TOTAL_BYTES:
-                raise MuseGenerationError("参考图总大小超过 24 MiB 限制")
-            images.append({"b64": b64, "mime": mime, "index": index + 1})
-        if not images:
-            return
+                raise MuseGenerationError(
+                    f"参考素材总大小超过 {MAX_REFERENCE_TOTAL_BYTES // _MIB} MiB 限制")
+            files.append((index + 1, data, mime))
+        if not files:
+            return None
 
         self._clear_attachments()
-
-        _INJECT_JS = """
-        (async function(images) {
-            try {
-                // 现网 composer 里可能有多个 file input；优先取位于 composer 内的那个
-                var inputs = Array.from(document.querySelectorAll('input[type="file"]'));
-                if (!inputs.length) return JSON.stringify({ok: false, err: 'no-file-input'});
-                var ov = document.querySelector('[data-testid="hatch-composer-placeholder-overlay"]');
-                var composer = ov ? ov.closest('form') : null;
-                var input = null;
-                if (composer) {
-                    input = inputs.find(function(x){ return composer.contains(x); }) || null;
-                }
-                if (!input) {
-                    // 退而求其次：取不在对话气泡里的那个 input
-                    input = inputs.find(function(x){
-                        return !x.closest('[class*=chat-user-bubble], [class*="group/msg"]');
-                    }) || inputs[0];
-                }
-                // 有些版本 accept 为空，补上 image/* 让页面接受本次 File
-                if (!input.getAttribute('accept')) input.setAttribute('accept', 'image/*');
-                for (var image of images) {
-                    var byteChars = atob(image.b64);
-                    var byteNumbers = new Array(byteChars.length);
-                    for (var i = 0; i < byteChars.length; i++) {
-                        byteNumbers[i] = byteChars.charCodeAt(i);
-                    }
-                    var mime = image.mime || 'image/png';
-                    var byteArray = new Uint8Array(byteNumbers);
-                    var blob = new Blob([byteArray], {type: mime});
-                    var ext = mime.split('/')[1] || 'png';
-                    if (ext === 'jpeg') ext = 'jpg';
-                    var dt = new DataTransfer();
-                    dt.items.add(new File(
-                        [blob], 'reference_image_' + image.index + '.' + ext, {type: mime}));
-                    input.files = dt.files;
-                    input.dispatchEvent(new Event('change', {bubbles: true}));
-                    input.dispatchEvent(new Event('input', {bubbles: true}));
-                    await new Promise(function(resolve){ setTimeout(resolve, 350); });
-                }
-                return JSON.stringify({ok: true, count: images.length});
-            } catch(e) {
-                return JSON.stringify({ok: false, err: String(e)});
-            }
-        })(%s)
-        """
+        # Snap Chromium cannot read the host's /tmp; profile_dir is shared with it.
+        os.makedirs(self.cfg.profile_dir, exist_ok=True)
+        upload_dir = tempfile.mkdtemp(prefix="muse2api-refs-", dir=self.cfg.profile_dir)
+        hashes = set()
         try:
-            raw_res = self.page.js(
-                _INJECT_JS % json.dumps(images), await_promise=True,
-                timeout=max(15, len(images) * 3))
-            res_obj = json.loads(raw_res) if isinstance(raw_res, str) else raw_res
-            if not res_obj.get("ok") or res_obj.get("count") != len(images):
-                raise MuseGenerationError("附加参考图失败，已停止生成")
+            for index, data, mime in files:
+                path = os.path.join(
+                    upload_dir, f"reference_{index}{REFERENCE_MIME_EXT.get(mime, '.bin')}")
+                with open(path, "wb") as f:
+                    f.write(data)
+                hashes.add(hashlib.sha256(data).hexdigest())
+                self._set_input_files([path])
+                time.sleep(0.35)
+        except MuseGenerationError:
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            raise
         except Exception as e:
-            raise MuseGenerationError("附加参考图失败，已停止生成") from e
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            raise MuseGenerationError("附加参考素材失败，已停止生成") from e
 
-        # 等待输入框附件确认；历史图片不能证明本次上传成功。
-        # 现网 UI 已切中文：确认按钮 aria-label = "附加文件"/"移除附件"；
-        # 同时兼容英文（Remove attachment / Attach file），并以 composer 内缩略图兜底。
-        deadline = time.time() + 15.0
-        attached_count = 0
-        while time.time() < deadline:
-            attached_count = self.page.js(
-                """(function(){
-                var ov = document.querySelector('[data-testid="hatch-composer-placeholder-overlay"]');
-                var composer = ov ? (ov.closest('form') || ov.parentElement.parentElement.parentElement) : null;
-                if (!composer) return 0;
-                var btns = Array.from(composer.querySelectorAll('button[aria-label]'));
-                var removeCount = btns.filter(function(b){
-                    return /remove\\s*attachment|移除附件|删除附件/i.test(b.getAttribute('aria-label') || '');
-                }).length;
-                if (removeCount) return removeCount;
-                return composer.querySelectorAll('img, video').length;
-                })()"""
-            )
-            if int(attached_count or 0) >= len(images):
-                break
-            time.sleep(0.3)
-        else:
-            raise MuseGenerationError(
-                f"参考图上传未确认（{int(attached_count or 0)}/{len(images)}），已停止生成")
-        time.sleep(0.5)
+        try:
+            # A remove button proves attachment presence, not upstream processing success.
+            deadline = time.monotonic() + 30.0
+            attached_count = 0
+            while time.monotonic() < deadline:
+                attached_count = self.page.js(self._ATTACHED_COUNT_JS)
+                if int(attached_count or 0) >= len(files):
+                    break
+                time.sleep(0.3)
+            else:
+                raise MuseGenerationError(
+                    f"参考素材上传未确认（{int(attached_count or 0)}/{len(files)}），已停止生成")
+            time.sleep(0.5)
+            return {"dir": upload_dir, "hashes": hashes}
+        except Exception:
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            raise
 
     def _attach_image(self, image_data: str):
         """Backward-compatible single-reference wrapper."""
@@ -1592,10 +1790,18 @@ class MuseEngine:
         self.reset_thread(for_chat=False)
         self._scroll_bottom()
         refs = list(reference_images or ([] if not reference_image else [reference_image]))
-        if refs:
-            self._attach_images(refs)
-        else:
+        upload = self._attach_images(refs) if refs else None
+        if not refs:
             self._clear_attachments()
+        try:
+            return self._generate_attached(prompt, expect, deadline, on_progress,
+                                           stop_event, (upload or {}).get("hashes") or set())
+        finally:
+            if upload:
+                shutil.rmtree(upload["dir"], ignore_errors=True)
+
+    def _generate_attached(self, prompt: str, expect: str, deadline: float,
+                           on_progress, stop_event, upload_hashes: set) -> dict:
         atts_before = self.attachments()
         baseline_sources = {a.get(k) for a in atts_before for k in ("src", "vSrc", "iSrc") if a.get(k)}
         base = atts_before[-1] if atts_before else {}
@@ -1605,51 +1811,70 @@ class MuseEngine:
             raise MuseGenerationError("任务准备超时，已停止发送")
         if self._send(prompt) not in ("clicked", "enter-sent"):
             raise MuseGenerationError("提示词发送未确认，已停止生成")
-        att = self._wait_attachment(
-            baseline_src, max(0, deadline - time.monotonic()), expect, on_progress=on_progress,
-            base_agent_cnt=base_agent_cnt, base_att_cnt=len(atts_before),
-            stop_event=stop_event, baseline_sources=baseline_sources
-        )
-        if not att:
-            self._debug_dump("no-attachment")
-            raise MuseGenerationError("等待生成超时，未出现新的生成结果")
-
         os.makedirs(self.cfg.media_dir, exist_ok=True)
-        data = mime = url = None
-        selected_src = (att.get("vSrc") if expect == "video" else None) or att.get("src") or ""
-        try:
-            data, mime, url = self.extract_bytes(selected_src, expect=expect)
-        except Exception:  # noqa: BLE001
-            self._debug_dump("extract-fail")
+        # 页面若把刚上传的素材渲染成"结果"，按哈希识别出来并继续等待真正的成品
+        while time.monotonic() < deadline:
+            if stop_event is not None and stop_event.is_set():
+                raise MuseGenerationError("任务已取消")
+            att = self._wait_attachment(
+                baseline_src, max(0, deadline - time.monotonic()), expect, on_progress=on_progress,
+                base_agent_cnt=base_agent_cnt, base_att_cnt=len(atts_before),
+                stop_event=stop_event, baseline_sources=baseline_sources
+            )
+            if not att:
+                self._debug_dump("no-attachment")
+                raise MuseGenerationError("等待生成超时，未出现新的生成结果")
 
-        if data:
-            ext = self._pick_ext(mime, url, expect)
+            data = mime = url = None
+            selected_src = (att.get("vSrc") if expect == "video" else None) or att.get("src") or ""
+            try:
+                data, mime, url = self.extract_bytes(selected_src, expect=expect)
+            except Exception:  # noqa: BLE001
+                self._debug_dump("extract-fail")
+
+            if data and hashlib.sha256(data).hexdigest() in upload_hashes:
+                log.warning("命中的附件是本次上传的参考素材，忽略并继续等待: %s", selected_src[:80])
+                baseline_sources |= {att.get(k) for k in ("src", "vSrc", "iSrc") if att.get(k)}
+                time.sleep(0.1)
+                continue
+
+            if data:
+                ext = self._pick_ext(mime, url, expect)
+                name = f"{uuid.uuid4().hex}{ext}"
+                dst = os.path.join(self.cfg.media_dir, name)
+                with open(dst, "wb") as f:
+                    f.write(data)
+                kind = "video" if ext in (".mp4", ".webm", ".mov") else "image"
+                if expect == "video" and kind != "video":
+                    raise MuseGenerationError(f"期望生成视频，但提取成品类型为图片 ({ext})，拒绝以图片冒充视频交付")
+                return {"path": dst, "filename": name, "size": len(data), "ext": ext, "mime": mime,
+                        "kind": kind,
+                        "via": "blob", "attachment": att.get("tid"),
+                        "w": att.get("w"), "h": att.get("h")}
+
+            path = self._download_fallback(selected_src)
+            if not path:
+                raise MuseGenerationError("已生成但未能取回文件")
+            with open(path, "rb") as f:
+                digest = hashlib.sha256(f.read()).hexdigest()
+            if digest in upload_hashes:
+                os.remove(path)
+                log.warning("下载到的文件是本次上传的参考素材，忽略并继续等待")
+                baseline_sources |= {att.get(k) for k in ("src", "vSrc", "iSrc") if att.get(k)}
+                time.sleep(0.1)
+                continue
+            ext = os.path.splitext(path)[1].lower() or ".bin"
             name = f"{uuid.uuid4().hex}{ext}"
             dst = os.path.join(self.cfg.media_dir, name)
-            with open(dst, "wb") as f:
-                f.write(data)
+            shutil.move(path, dst)
             kind = "video" if ext in (".mp4", ".webm", ".mov") else "image"
             if expect == "video" and kind != "video":
-                raise MuseGenerationError(f"期望生成视频，但提取成品类型为图片 ({ext})，拒绝以图片冒充视频交付")
-            return {"path": dst, "filename": name, "size": len(data), "ext": ext, "mime": mime,
+                raise MuseGenerationError(f"期望生成视频，但下载成品类型为图片 ({ext})，拒绝以图片冒充视频交付")
+            return {"path": dst, "filename": name, "size": os.path.getsize(dst), "ext": ext, "mime": "",
                     "kind": kind,
-                    "via": "blob", "attachment": att.get("tid"),
+                    "via": "download", "attachment": att.get("tid"),
                     "w": att.get("w"), "h": att.get("h")}
-
-        path = self._download_fallback(selected_src)
-        if not path:
-            raise MuseGenerationError("已生成但未能取回文件")
-        ext = os.path.splitext(path)[1].lower() or ".bin"
-        name = f"{uuid.uuid4().hex}{ext}"
-        dst = os.path.join(self.cfg.media_dir, name)
-        shutil.move(path, dst)
-        kind = "video" if ext in (".mp4", ".webm", ".mov") else "image"
-        if expect == "video" and kind != "video":
-            raise MuseGenerationError(f"期望生成视频，但下载成品类型为图片 ({ext})，拒绝以图片冒充视频交付")
-        return {"path": dst, "filename": name, "size": os.path.getsize(dst), "ext": ext, "mime": "",
-                "kind": kind,
-                "via": "download", "attachment": att.get("tid"),
-                "w": att.get("w"), "h": att.get("h")}
+        raise MuseGenerationError("页面只返回了本次上传的参考素材，未出现新的生成结果")
 
     @staticmethod
     def _pick_ext(mime: str, url: str, expect: str) -> str:

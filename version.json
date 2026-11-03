@@ -1,17 +1,19 @@
 {
-  "version": "1.6.6",
-  "updated_at": "2026-11-02",
+  "version": "1.6.7",
+  "updated_at": "2026-11-03",
   "repo": "https://github.com/czg86389-hub/muse2api",
   "highlights": [
-    "【重要：请手动升级浏览器插件至 1.0.2】更新服务不会自动更新已加载的扩展；替换原扩展目录文件，再到 chrome://extensions 或 edge://extensions 点击重新加载。不同浏览器个人资料需要分别升级。",
-    "修复已登录且能够聊天的账号因缺少 hatch_vml / hatch_gw 被旧插件错误阻止导入的问题；所有导入端与服务端现在只要求 hatch_sess。",
-    "油猴脚本同步升级至 1.1.2；重新导入后请点击账号“测试”。导入成功只表示记录已保存，实际可用性仍以上游会话验证为准。",
-    "保留无效会话 HTTP 401 拒绝和 unavailable 未确认状态；不会将凭据齐全或导入成功误报为账号可用。"
+    "修复 Muse 新版无 overlay/form 输入区的附件定位和确认，兼容旧版并排除历史聊天附件。",
+    "新增视频、音频、PDF/Word 参考素材：最多 10 个，单个 40 MiB、合计 100 MiB；MP4/MOV/3GP/WebM 必须含有效时长且不超过 120 秒。",
+    "混合素材提示词支持 [图N]/[视频N]/[音频N]/[文档N] 对照，避免强制第一张图片为起始帧而忽略视频参考。",
+    "修复原始参考素材误当成品、3 次过滤后提前失败、CDP 异常临时文件残留，以及 Snap Chromium 无法读取系统 /tmp 素材的问题。",
+    "浏览器插件继续使用 1.0.2、油猴脚本 1.1.2；仍使用旧插件的用户必须手动升级并重新加载，每个浏览器个人资料分别操作。"
   ],
   "highlights_en": [
-    "IMPORTANT: manually upgrade the extension to 1.0.2. Updating the service does not update unpacked extensions. Replace files in the original folder, then click Reload at chrome://extensions or edge://extensions. Upgrade each browser profile separately.",
-    "Fixed valid logged-in accounts being blocked when hatch_vml or hatch_gw was absent. All importers and the server now require only hatch_sess.",
-    "Updated the userscript to 1.1.2. Re-import, then run the account Test. Import success means the record was saved; upstream verification determines usability.",
-    "Invalid sessions still fail with HTTP 401, while unavailable remains inconclusive. Cookie presence or import success is never proof of a working account."
+    "Fix attachment selection and confirmation for the new Muse composer without an overlay/form, retaining old-layout support and excluding chat history.",
+    "Add video, audio and PDF/Word references: up to 10 files, 40 MiB each, 100 MiB total. MP4/MOV/3GP/WebM require readable positive duration metadata of no more than 120 seconds.",
+    "Map mixed-reference markers to attachment order without forcing the first image to be the opening frame when video/audio references are present.",
+    "Fix uploaded references being returned as results, premature failure after three skipped references, temporary-file leaks after CDP errors, and Snap Chromium file access.",
+    "Extension remains 1.0.2 and userscript 1.1.2. Users on older extensions must replace files and reload manually in every browser profile."
   ]
 }

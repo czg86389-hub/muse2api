@@ -115,7 +115,7 @@
        proxy_read_timeout 600s;      # 避免生图/视频耗时较长被 Nginx 报 502 Bad Gateway
        proxy_send_timeout 600s;
        proxy_buffering off;          # 保证 SSE 对话流式打字机 0 延迟吐字
-       client_max_body_size 64M;     # 支持参考图大文件上传
+       client_max_body_size 200M;    # 支持视频/音频等大参考素材上传
        proxy_set_header Host $host;
        proxy_set_header X-Real-IP $remote_addr;
        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -249,7 +249,7 @@ curl -X POST "http://localhost:18610/v1/images/generations" \
 }
 ```
 
-多图参考使用 `images` 数组（最多 4 张；单张不超过 10 MiB、合计不超过 24 MiB）；服务会按数组顺序逐张上传，并在全部附件得到网页确认后才发送提示词。`images` 不可与 `image` / `reference_image` 等旧版单图字段混用：
+多图参考使用 `images` 数组（最多 10 个素材；单个不超过 40 MiB、合计不超过 100 MiB，详见下方「参考素材」）；服务会按数组顺序逐张上传，并在全部附件得到网页确认后才发送提示词。`images` 不可与 `image` / `reference_image` 等旧版单图字段混用：
 
 ```bash
 curl -X POST "http://localhost:18610/v1/images/generations" \
@@ -326,6 +326,38 @@ curl -X POST "http://localhost:18610/v1/images/edits" \
 
 ---
 
+## 🎞️ 参考素材：图片 / 视频 / 音频 / 文档
+
+生图、图像编辑、图片任务与视频接口都可以附带参考素材，限制与 muse.ai 网页端一致：
+
+| 项目 | 限制 |
+|---|---|
+| 数量 | 每次最多 10 个（所有字段合计） |
+| 单个大小 | 40 MiB；合计 100 MiB |
+| 图片 | jpg / png / gif / webp / heic / heif / avif |
+| 视频 | mp4 / mov / webm / 3gp，时长不超过 120 秒（mp4/mov 会预先校验） |
+| 音频 | mp3 / wav / m4a / ogg / flac / aac / opus |
+| 文档 | pdf / doc / docx |
+
+- JSON 字段：`images`（可混放任意素材）、`videos`、`audios`、`files`，按此顺序依次上传；每项可以是 URL、Data URL、Base64，或 `{"url": ...}` / `{"video_url": ...}` / `{"audio_url": ...}` 对象。
+- 类型取 Data URL / 响应头 / multipart 声明的 MIME；声明为空或 `application/octet-stream` 时按文件头识别。
+- `/v1/images/edits` 的 multipart 可重复提交 `image`、`video`、`audio`、`file` 字段。
+- 视频任务若第一个素材是图片，以它作为主要起始画面；成品绝不会是本次上传的素材本身（按内容哈希排除）。
+
+```bash
+curl -X POST "http://localhost:18610/v1/videos"   -H "Authorization: Bearer m2a_your_secret_key"   -H "Content-Type: application/json"   -d '{
+    "prompt": "参考视频的运镜节奏，配合音频的情绪，生成一段新的城市夜景",
+    "videos": [{"url": "https://example.com/ref.mp4"}],
+    "audios": [{"url": "https://example.com/bgm.mp3"}],
+    "duration": 8,
+    "size": "16:9"
+  }'
+```
+
+Nginx 反代需把 `client_max_body_size` 调到 200M 左右，否则大素材会被 413 拒绝。
+
+---
+
 ## ⚙️ 环境变量配置一览
 
 | 变量名 | 默认值 | 作用与说明 |
@@ -383,6 +415,7 @@ python tests/test_ref_image_safety.py
 - 🌟 **[@Yeadon8888](https://github.com/Yeadon8888)** (PR [#32](https://github.com/czg86389-hub/muse2api/pull/32)) —— 增加有序多参考图生图、编辑与图生视频支持
 - 🌟 **[@pandalaohe](https://github.com/pandalaohe)** (PR [#24](https://github.com/czg86389-hub/muse2api/pull/24)) —— 提供参考图本地文件与私网 URL 安全策略、重定向复查和 DNS 重绑定防护
 - 🌟 **[@QuartzWarrior](https://github.com/QuartzWarrior)** (PR [#25](https://github.com/czg86389-hub/muse2api/pull/25)) —— 贡献账号独立 HTTP 代理基础、认证转接、配置界面与隔离回归测试
+- [@Roins-hub](https://github.com/Roins-hub)：新版 Muse 输入区兼容、视频/音频/文档参考素材（PR #40）。
 
 欢迎大家提交 PR 与 Issue，共同把项目打磨得更强更好用！
 
@@ -462,3 +495,8 @@ python tests/test_session_health.py
 - 修复保活成功误报：区分唤醒请求已接受与 VM 已运行，只有复核状态为 RUNNING 才报告唤醒成功。
 - 管理页显示额度查询时间和过期提示；账号测试分别反馈会话有效性与额度读取状态。
 - 新增离线回归测试，覆盖账号额度隔离及 VM 唤醒状态确认。
+
+参考素材校验说明：视频必须含有可解析且不超过 120 秒的时长信息（MP4/MOV/3GP/WebM）；
+缺失或损坏的时长信息会被拒绝。PDF 页数、文档解析和账号权限仍由 Muse 上游校验，
+本项目的附件确认只表示文件进入输入区，不保证上游能够读取每一种文件。
+Chromium 与服务必须能访问同一份素材文件；临时素材位于浏览器 profile 目录并在任务结束后清理。

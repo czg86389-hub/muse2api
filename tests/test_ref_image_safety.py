@@ -68,7 +68,8 @@ def check(home):
         expect_error(lambda: engine._normalize_image("http://localhost/ref"),
                      module.RefImageSafetyError, "MUSE2API_REF_IMAGE_PRIVATE_FETCH=1")
         build.assert_not_called()
-    assert engine._normalize_image("cmVmZXJlbmNl") == ("cmVmZXJlbmNl", "image/png")
+    raw_png = base64.b64encode(b"\x89PNG\r\n\x1a\nfixture").decode()
+    assert engine._normalize_image(raw_png) == (raw_png, "image/png")
     data_url = "data:image/jpeg;base64," + expected[0]
     assert engine._normalize_image(data_url) == expected
     print("safe_defaults_local_private_denied_data_and_raw_base64_allowed=PASS")
