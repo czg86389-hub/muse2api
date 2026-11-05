@@ -53,7 +53,8 @@ from engine import (ESSENTIAL_COOKIES, MAX_REFERENCE_IMAGE_BYTES,
                     MAX_REFERENCE_IMAGES, MAX_REFERENCE_TOTAL_BYTES,
                     REFERENCE_MIME_EXT, MuseAuthError, MuseEngine, MuseGenerationError,
                     MuseModelRefusalError, RefImageSafetyError, reference_kind)
-from engine import MuseProxyError
+from engine import MuseProxyError, MuseSubmissionUncertainError, _mp4_duration
+from video_extend import MAX_VIDEO_BYTES, valid_thread
 from store import Store, account_expiry, min_expiry
 from proxy import normalize_server, request_proxy_context
 
@@ -1086,7 +1087,7 @@ def _run_generation(prompt: str, kind: str, timeout: int,
                     account_id: str | None = None, on_progress=None,
                     reference_image: str | None = None,
                     reference_images: list[str] | None = None,
-                    on_acquired=None) -> tuple[dict, str | None]:
+                    on_acquired=None, on_submission=None) -> tuple[dict, str | None]:
     # Browser ownership covers account selection, retry and cleanup, not just generate().
     deadline = time.monotonic() + max(1, timeout)
     if not GEN_LOCK.acquire(timeout=max(1, timeout)):
@@ -1099,16 +1100,15 @@ def _run_generation(prompt: str, kind: str, timeout: int,
                 pass
         return _run_generation_locked(prompt, kind, timeout, account_id,
                                       on_progress, reference_image, reference_images,
-                                      deadline=deadline)
+                                      deadline=deadline, on_submission=on_submission)
     finally:
         GEN_LOCK.release()
 
 
 def _run_generation_locked(prompt: str, kind: str, timeout: int,
                     account_id: str | None = None, on_progress=None,
-                    reference_image: str | None = None,
-                    reference_images: list[str] | None = None,
-                    deadline=None) -> tuple[dict, str | None]:
+                    reference_image: str | None = None, reference_images: list[str] | None = None, deadline=None, on_submission=None) -> tuple[dict, str | None]:
+
     remaining_wait = int(deadline - time.monotonic()) if deadline is not None else timeout
     preferred_id = getattr(engine, "current_acc_id", None)
     if kind == "video" and not account_id:
@@ -1129,6 +1129,8 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
     try:
         for attempt in range(2):
             if deadline is not None and time.monotonic() >= deadline:
+                if last_exc is not None:
+                    raise last_exc
                 raise MuseGenerationError("任务总等待时限已到，停止重试")
             if attempt > 0:
                 if isinstance(last_exc, MuseModelRefusalError):
@@ -1147,6 +1149,12 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
                     break
                 cur_acc = alt
                 log.info("【生图/视频自动切号】切换到备用账号 %s (%s) 重试...", cur_acc.get("label"), cur_acc["id"])
+            delivery = {}
+            def record_submission(evidence):
+                delivery.update(evidence)
+                delivery['account'] = cur_acc['id']
+                if on_submission:
+                    on_submission(delivery)
             try:
                 _bind_account_proxy(cur_acc)
                 refreshed = _renew_and_persist(cur_acc["id"], wake_vm=True, force=(attempt > 0))
@@ -1162,22 +1170,34 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
                     reference_image = refs[0]
                 elif len(refs) > 1:
                     engine_kwargs["reference_images"] = refs
+                if on_submission:
+                    engine_kwargs["on_submission"] = record_submission
                 res = engine.generate(cur_acc["cookies"], prompt, expect=kind,
                                       timeout=remaining, expires=cur_acc.get("cookies_exp"),
                                       account_id=cur_acc["id"], on_progress=on_progress,
                                       reference_image=reference_image, **engine_kwargs)
+
                 store.mark(cur_acc["id"], True, "")
                 _sync_cookies(cur_acc["id"])
                 return res, cur_acc["id"]
+            except (MuseSubmissionUncertainError, MuseModelRefusalError):
+                # Already delivered or explicitly refused: never automatically resubmit.
+                raise
             except MuseAuthError as exc:
+                if delivery:
+                    raise MuseSubmissionUncertainError('已送达原会话后认证中断，不自动重发: '+str(exc)) from exc
                 last_exc = exc
                 store.mark(cur_acc["id"], False, str(exc))
                 engine.close_current_page()
             except MuseProxyError as exc:
+                if delivery:
+                    raise MuseSubmissionUncertainError('已送达原会话后代理中断，不自动重发: '+str(exc)) from exc
                 last_exc = exc
                 store.touch_keepalive(cur_acc["id"], None, f"代理异常: {str(exc)[:160]}")
                 engine.close_current_page()
             except MuseGenerationError as exc:
+                if delivery:
+                    raise MuseSubmissionUncertainError('已送达原会话，不自动重发: '+str(exc)) from exc
                 last_exc = exc
                 store.mark(cur_acc["id"], True, f"任务异常: {str(exc)[:60]}")
                 try:
@@ -1185,6 +1205,8 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
                 except Exception:
                     pass
             except Exception as exc:  # noqa: BLE001
+                if delivery:
+                    raise MuseSubmissionUncertainError('已送达原会话，取回结果未确认，不自动重发: '+str(exc)) from exc
                 engine.close_current_page()
                 last_exc = MuseGenerationError(f"生成失败: {exc}")
         raise last_exc
@@ -1471,7 +1493,9 @@ async def create_video(req: VideoRequest, _=Depends(auth)):
             def prog_cb(p):
                 store.update_task(task["id"], progress=p)
             res, acc_id = _run_generation(prompt, "video", timeout, on_progress=prog_cb,
-                                          reference_images=ref_images, on_acquired=_on_acquired)
+                                          reference_images=ref_images, on_acquired=_on_acquired,
+                                          on_submission=lambda evidence: store.update_task(task["id"], **evidence))
+
             vurl = media_url(res["filename"])
             store.update_task(task["id"], status="completed", progress=100, account=acc_id,
                               elapsed=round(time.time() - timing["t0"], 1),
@@ -1482,11 +1506,129 @@ async def create_video(req: VideoRequest, _=Depends(auth)):
                                       "bytes": res["size"], "kind": res["kind"]})
         except Exception as exc:  # noqa: BLE001
             store.update_task(task["id"], status="failed",
-                              elapsed=round(time.time() - timing["t0"], 1), error=str(exc))
+                              elapsed=round(time.time() - timing["t0"], 1), error=str(exc),
+                              provider_response=getattr(exc,"provider_response",None),
+                              retry_safe=not isinstance(exc,(MuseSubmissionUncertainError, MuseModelRefusalError)))
 
     threading.Thread(target=worker, daemon=True).start()
     return {"id": task["id"], "task_id": task["id"], "object": "video.task", "status": "queued",
             "progress": 10, "created_at": task["created_at"]}
+
+
+class VideoExtendRequest(BaseModel):
+    instruction: str = Field(default="", max_length=1000)
+    timeout: int = Field(default=1200, ge=60, le=1800)
+
+
+def _video_extension_source(task_id: str):
+    from pathlib import Path
+    source = store.get_task(task_id)
+    if not source or source.get("kind") != "video" or source.get("status") != "completed":
+        raise HTTPException(404, "未找到已完成的视频任务")
+    aid = source.get("account")
+    account = store.get_account(aid) if aid else None
+    if not account or not account.get("enabled", True):
+        raise HTTPException(409, "原视频所属账号不存在或已禁用")
+    if not valid_thread(source.get("provider_thread")):
+        raise HTTPException(409, "原视频没有可验证的 Muse 会话，无法安全续写")
+    result = source.get("result") or {}
+    name = result.get("filename") if isinstance(result, dict) else None
+    root = Path(CFG.media_dir).resolve()
+    if not isinstance(name, str) or Path(name).name != name or not name.lower().endswith(".mp4"):
+        raise HTTPException(409, "原视频文件信息无效或不是 MP4")
+    path = root / name
+    if path.is_symlink() or not path.is_file() or path.resolve().parent != root:
+        raise HTTPException(409, "原视频文件不存在或无法安全读取")
+    if path.stat().st_size > MAX_VIDEO_BYTES:
+        raise HTTPException(409, "原视频超过续写文件大小限制")
+    with path.open("rb") as stream:
+        data = stream.read(MAX_VIDEO_BYTES + 1)
+    duration = _mp4_duration(data) if len(data) <= MAX_VIDEO_BYTES else None
+    if not duration or duration <= 0:
+        raise HTTPException(409, "无法识别原视频时长")
+    if duration >= 60:
+        raise HTTPException(409, "视频已达到约 60 秒的续写目标上限")
+    return source, str(path)
+
+
+def _run_video_extension(task_id: str, source: dict, source_path: str, instruction: str, timeout: int):
+    acquired_global = False
+    acc = None
+    started = time.monotonic()
+    deadline = started + timeout
+    def mark_before_send():
+        if not store.update_task(task_id, submission_started=True, retry_safe=False):
+            raise MuseGenerationError("续写任务记录不可用；未发送")
+    def mark_sent(evidence):
+        if not store.update_task(task_id, **evidence, retry_safe=False):
+            raise MuseSubmissionUncertainError("续写已发送但任务记录不可用，请勿重试")
+    try:
+        if not GEN_LOCK.acquire(timeout=max(1, timeout)):
+            raise MuseGenerationError("等待浏览器队列超时；尚未发送")
+        acquired_global = True
+        remaining = int(deadline-time.monotonic())
+        if remaining <= 0:
+            raise MuseGenerationError("等待浏览器队列超时；尚未发送")
+        acc = ACCOUNT_POOL.acquire(account_id=source["account"], timeout=remaining)
+        store.update_task(task_id, status="processing", progress=15)
+        _bind_account_proxy(acc)
+        acc = _renew_and_persist(acc["id"], wake_vm=True) or acc
+        engine.start()
+        remaining = int(deadline-time.monotonic())
+        if remaining <= 0:
+            raise MuseGenerationError("准备超时；尚未发送")
+        result = engine.extend_video(acc["cookies"], source["provider_thread"], source_path,
+                     instruction, timeout=remaining, expires=acc.get("cookies_exp"), account_id=acc["id"],
+                     on_progress=lambda p: store.update_task(task_id, progress=p),
+                     on_submission=mark_sent, on_before_submission=mark_before_send)
+        _sync_cookies(acc["id"])
+        url = media_url(result["filename"])
+        common = dict(elapsed=round(time.monotonic()-started,1), url=url, video={"url":url},
+                      result={"url":url,"filename":result["filename"],"bytes":result["size"],"kind":"video"},
+                      source_duration=result.get("source_duration"), duration=result.get("duration"))
+        if not result.get("duration_verified"):
+            store.update_task(task_id, status="needs_review", progress=90, retry_safe=False,
+                              error="Muse 已返回视频，但无法确认时长增长，请检查结果和原会话后再操作", **common)
+        else:
+            store.update_task(task_id, status="completed", progress=100, account=acc["id"], **common)
+    except Exception as exc:
+        t = store.get_task(task_id) or {}
+        maybe_sent = bool(t.get("submission_started")) or isinstance(exc, MuseSubmissionUncertainError)
+        store.update_task(task_id, status="needs_review" if maybe_sent else "failed",
+                          elapsed=round(time.monotonic()-started,1), retry_safe=not maybe_sent,
+                          error=("续写可能已发送，请先检查 Muse 原会话，勿重复提交：" if maybe_sent else "续写未发送：") + str(exc)[:300])
+    finally:
+        if acc:
+            ACCOUNT_POOL.release(acc.get("id"))
+        if acquired_global:
+            engine.close_current_page()
+            _clear_account_proxy()
+            GEN_LOCK.release()
+
+
+@app.post("/v1/videos/{task_id}/extend")
+def extend_video(task_id: str, req: VideoExtendRequest = Body(default=VideoExtendRequest()), _=Depends(auth)):
+    source, source_path = _video_extension_source(task_id)
+    try:
+        task = store.create_video_extension(task_id, req.instruction.strip())
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    threading.Thread(target=_run_video_extension,
+                     args=(task["id"], source.copy(), source_path, req.instruction.strip(), req.timeout), daemon=True).start()
+    return {"id":task["id"],"task_id":task["id"],"object":"video.task","status":"queued",
+            "source_task_id":task_id,"progress":10,"created_at":task["created_at"]}
+
+
+@app.post("/v1/videos/{task_id}/resolve-review")
+def resolve_video_extension_review(task_id: str, payload: dict = Body(...), _=Depends(auth)):
+    task = store.get_task(task_id)
+    if not task or task.get("operation") != "extend" or task.get("status") != "needs_review":
+        raise HTTPException(409, "该续写任务不处于待核查状态")
+    if payload.get("confirmed_checked") is not True:
+        raise HTTPException(400, "请先检查 Muse 原会话并确认后再解除阻塞")
+    store.update_task(task_id, status="failed", review_resolved_at=int(time.time()), retry_safe=False,
+                      error="用户已检查并解除待核查状态；请在原会话确认后决定是否重新提交")
+    return {"ok":True}
 
 
 @app.get("/v1/videos/{task_id}")
@@ -2207,7 +2349,11 @@ def admin_tasks(limit: int = 50, _=Depends(auth)):
 
 @app.delete("/admin/tasks/{tid}")
 def del_task(tid: str, _=Depends(auth)):
-    if not store.delete_task(tid):
+    try:
+        deleted = store.delete_task(tid)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not deleted:
         raise HTTPException(404, "任务不存在")
     return {"deleted": True}
 
@@ -2800,7 +2946,11 @@ async def admin_repo_push(payload: dict = Body(default={}), _=Depends(auth)):
 async def _startup():
     for task in list(store.tasks.values()):
         if task.get("kind") in ("image", "video") and task.get("status") in ("queued", "processing"):
-            store.update_task(task["id"], status="failed", error="服务重启中断了任务，请重新提交")
+            if task.get("operation") == "extend" and task.get("submission_started"):
+                store.update_task(task["id"], status="needs_review", retry_safe=False,
+                                  error="服务重启时续写可能已发送，请检查 Muse 原会话，勿重复提交")
+            else:
+                store.update_task(task["id"], status="failed", error="服务重启中断了任务，请重新提交")
     if not CFG.api_key:
         import secrets
         new_key = "m2a_" + secrets.token_hex(24)

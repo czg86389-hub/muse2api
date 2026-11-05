@@ -500,3 +500,12 @@ python tests/test_session_health.py
 缺失或损坏的时长信息会被拒绝。PDF 页数、文档解析和账号权限仍由 Muse 上游校验，
 本项目的附件确认只表示文件进入输入区，不保证上游能够读取每一种文件。
 Chromium 与服务必须能访问同一份素材文件；临时素材位于浏览器 profile 目录并在任务结束后清理。
+
+
+## 视频续写
+
+在「任务记录」中，对带有原 Muse 会话和所属账号的已完成 MP4 任务点击「续写视频」。可输入下一段画面要求；留空时请求自然延续。续写使用原账号额度，单次请求一个步骤，连续续写最多 6 次、源视频达到约 60 秒后停止。生成时长和画面连续性由 Muse 决定。
+
+API：`POST /v1/videos/{task_id}/extend`，JSON 如 `{"instruction":"镜头缓缓向前", "timeout":1200}`；返回新任务 ID，使用 `GET /v1/videos/{id}` 查询。系统会在原账号和原会话中核对视频字节，再向 Muse 发送续写指令；历史记录缺少会话、文件被删除、已不是会话最新视频或无法核对时将拒绝发送。
+
+结果状态 `needs_review` 表示可能已经发送或返回视频无法确认时长增长，应先查看原 Muse 会话和任务结果，勿重复提交。确认会话已检查后，可调用 `POST /v1/videos/{id}/resolve-review` 并提供 `{"confirmed_checked":true}` 解除阻塞。续写方法参考 Muse4AI，见 `LICENSES/muse4ai.txt`。

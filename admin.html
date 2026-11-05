@@ -1963,6 +1963,9 @@ async function loadTasks(){
       const cls = (t.status === 'succeeded' || t.status === 'completed') ? 'ok' : t.status === 'failed' ? 'bad'
                 : t.status === 'processing' ? 'info' : 'warn';
       let out = '—';
+      const canExtend = t.kind === 'video' && t.status === 'completed' && !!t.provider_thread && !!t.account;
+      const extendButton = canExtend ? `<button class="secondary mini" onclick="extendVideo('${esc(t.id)}')">续写视频</button> ` : '';
+      const reviewButton = t.operation === 'extend' && t.status === 'needs_review' ? `<button class="secondary mini" onclick="resolveVideoReview('${esc(t.id)}')">已核查</button> ` : '';
       if (t.result && t.result.url) out = `<a href="${esc(t.result.url)}" target="_blank">查看结果</a> <span class="mono">${fmtBytes(t.result.bytes)}</span>`;
       else if (t.error) out = `<span style="color:var(--bad)">${esc(t.error).slice(0,120)}</span>`;
       return `<tr>
@@ -1973,12 +1976,29 @@ async function loadTasks(){
         <td class="mono">${t.elapsed ? t.elapsed + 's' : '—'}</td>
         <td class="mono">${fmtTime(t.created_at)}</td>
         <td>${out}</td>
-        <td><button class="danger mini" onclick="delTask('${t.id}')">删</button></td>
+        <td>${extendButton}${reviewButton}<button class="danger mini" onclick="delTask('${t.id}')">删</button></td>
       </tr>`;
     }).join('');
   }catch(e){
     $('taskBody').innerHTML = `<tr><td colspan="8" class="empty">加载失败：${esc(e.message)}</td></tr>`;
   }
+}
+async function extendVideo(id){
+  const instruction = prompt('请输入续写要求（可留空，保持原画面自然延续）。续写使用原账号的生成额度。', '');
+  if (instruction === null) return;
+  try{
+    const result = await api('/v1/videos/' + encodeURIComponent(id) + '/extend', {method:'POST', body:JSON.stringify({instruction})});
+    toast('续写任务已提交，可在任务记录查看进度：' + result.id, 'ok');
+    loadTasks();
+  }catch(e){ toast('续写未提交：' + e.message, 'bad'); }
+}
+async function resolveVideoReview(id){
+  if (!confirm('请先在 Muse 原会话确认续写没有继续运行或重复计费。确认已经核查并解除阻塞？')) return;
+  try{
+    await api('/v1/videos/' + encodeURIComponent(id) + '/resolve-review', {method:'POST', body:JSON.stringify({confirmed_checked:true})});
+    toast('已记录核查结果；是否重试请根据原会话判断。', 'ok');
+    loadTasks();
+  }catch(e){ toast('操作失败：' + e.message, 'bad'); }
 }
 async function delTask(id){
   try{ await api('/admin/tasks/' + id, {method:'DELETE'}); loadTasks(); }
