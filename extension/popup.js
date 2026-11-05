@@ -129,8 +129,8 @@ async function loadCfg() {
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       const u = tab && tab.url ? new URL(tab.url) : null;
-      if (u && /\/admin/.test(u.pathname)) {
-        $('base').value = u.origin;
+      if (u && /\/admin\/?$/.test(u.pathname)) {
+        $('base').value = u.origin + u.pathname.replace(/\/admin\/?$/, '');
         const k = new URLSearchParams(u.search).get('key');
         if (k) $('key').value = k;
       }

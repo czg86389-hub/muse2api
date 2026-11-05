@@ -64,6 +64,7 @@
   .row>div{flex:1;min-width:170px}
   .copyline{display:flex;gap:7px;align-items:center}
   .copyline input{flex:1;font-family:ui-monospace,monospace;font-size:12.5px}
+  .native-login [hidden]{display:none!important}
 
   /* ---------- 分步引导 ---------- */
   .stepbox{display:flex;gap:13px;align-items:flex-start;padding:15px 0;border-bottom:1px solid rgba(32,41,61,.6)}
@@ -95,7 +96,7 @@
 
   /* ---------- 表单 ---------- */
   label{display:block;font-size:12.5px;color:var(--muted);margin-bottom:5px}
-  input[type=text],input[type=number],.proxy-dialog input[type=password],textarea,select{
+  input[type=text],input[type=number],.proxy-dialog input[type=password],.native-login input[type=password],textarea,select{
     width:100%;background:var(--bg2);color:var(--text);border:1px solid var(--line);border-radius:9px;
     padding:9px 12px;font-size:13px;outline:none;transition:.15s;font-family:inherit
   }
@@ -280,7 +281,7 @@
 
   <nav class="tabs">
     <button class="active" data-t="pool">账号池</button>
-    <button data-t="cookie">获取 Cookie</button>
+    <button data-t="cookie">导入账号</button>
     <button data-t="tasks">任务记录</button>
     <button data-t="media">媒体库</button>
     <button data-t="play">接口测试</button>
@@ -376,14 +377,52 @@
 
   <!-- ==================== 获取 Cookie ==================== -->
   <section class="tab" id="tab-cookie">
+    <div class="card native-login" id="nativeLoginCard" style="border-color:rgba(79,140,255,.5)">
+      <h3>账号验证码登录 <span class="tag">自动保存登录会话</span></h3>
+      <div class="hint">填写 Muse 账号，获取验证码后在这里完成登录，无需手动复制 Cookie。</div>
+      <div class="row">
+        <div style="flex:2">
+          <label for="nativeLoginIdentifier">手机号或邮箱</label>
+          <input type="text" id="nativeLoginIdentifier" maxlength="254" autocomplete="off" placeholder="邮箱，或带国家区号的手机号">
+        </div>
+        <div>
+          <label for="nativeLoginLabel">备注（可选）</label>
+          <input type="text" id="nativeLoginLabel" maxlength="80" autocomplete="off" placeholder="例如：我的主账号">
+        </div>
+      </div>
+      <div id="nativeLoginCodeRow" class="row" style="margin-top:14px" hidden>
+        <div style="max-width:260px">
+          <label for="nativeLoginCode">6 位验证码</label>
+          <input type="password" id="nativeLoginCode" inputmode="numeric" maxlength="6" autocomplete="one-time-code" pattern="[0-9]{6}" placeholder="请输入收到的验证码" onkeydown="if(event.key==='Enter'){event.preventDefault();nativeLoginVerify();}">
+        </div>
+        <div class="hint" id="nativeLoginExpiry" style="margin:0 0 8px"></div>
+      </div>
+      <div style="margin-top:14px;display:flex;gap:9px;flex-wrap:wrap">
+        <button class="primary-lg" id="nativeLoginStartBtn" onclick="nativeLoginStart()">获取验证码</button>
+        <button class="ghost" id="nativeLoginRecoverBtn" onclick="nativeLoginRecover()">找回未完成登录</button>
+        <button class="primary-lg" id="nativeLoginVerifyBtn" onclick="nativeLoginVerify()" hidden>验证并登录</button>
+        <button class="ghost" id="nativeLoginResendBtn" onclick="nativeLoginResend()" hidden>重新发送</button>
+        <button class="ghost" id="nativeLoginRefreshBtn" onclick="nativeLoginRefresh()" hidden>刷新登录状态</button>
+        <button class="ghost" id="nativeLoginCancelBtn" onclick="nativeLoginCancel()" hidden>取消</button>
+      </div>
+      <div class="hint" id="nativeLoginContact" style="margin:10px 0 0"></div>
+      <div class="hint" id="nativeLoginMessage" role="status" aria-live="polite" style="margin:12px 0 0"></div>
+      <div class="hint" id="nativeLoginWebsiteHelp" style="margin:10px 0 0" hidden>
+        如果官网要求密码、人机验证或新账号注册，请先在
+        <a href="https://muse.ai/" target="_blank" rel="noopener noreferrer">Muse 官网</a>
+        完成，再回到这里重新开始。这里只在服务端确认登录并保存账号后显示成功。
+      </div>
+    </div>
+
+    <h3 style="font-size:14px;color:var(--muted);margin:22px 0 12px">其他导入方式</h3>
     <div class="card" style="border-color:rgba(52,211,153,.45)">
       <h3>方式一：浏览器扩展 <span class="tag">推荐 · 零命令行 · 全平台</span></h3>
       <div class="hint" data-i18n="ext-why-hint">
         用一个浏览器小扩展，把你<b>自己电脑上已经登录好的 muse.ai 登录态</b>同步过来。
         不用装 Python、不用开终端、不用敲命令。<br>
-        <b>为什么必须用扩展</b>：muse.ai 的登录会话 cookie 带
+        <b>扩展如何读取登录态</b>：muse.ai 的登录会话 cookie 带
         <code>httpOnly</code> 标记，网页脚本（F12 里敲 <code>document.cookie</code>、
-        小书签）读不到；只有浏览器扩展的 <code>cookies</code> 接口能拿到。
+        小书签）读不到；浏览器扩展可以通过 <code>cookies</code> 接口读取。
       </div>
 
       <div class="stepbox">
@@ -393,7 +432,7 @@
           <div class="hint" style="margin:4px 0 9px" data-i18n="ext-unzip-hint">
             解压到一个你不会删掉的目录，比如 <code>D:\muse2api-extension</code>。
           </div>
-          <a class="btnlike" href="/admin/extension" download>⬇ 下载 muse2api-extension.zip</a>
+          <a class="btnlike" href="admin/extension" data-app-path="/admin/extension" download>⬇ 下载 muse2api-extension.zip</a>
           <button class="ghost mini" onclick="loadExtFiles()">查看包含哪些文件</button>
           <span class="hint" id="extFiles" style="margin-left:8px"></span>
         </div>
@@ -492,8 +531,8 @@
         <div style="flex:2">
           <label>① 下载脚本</label>
           <div class="copyline">
-            <a class="btnlike ghostlike" href="/admin/cookie-helper?download=1" download>⬇ get_muse_cookie.py</a>
-            <a class="btnlike ghostlike" href="/admin/cookie-helper" target="_blank">查看源码</a>
+            <a class="btnlike ghostlike" href="admin/cookie-helper?download=1" data-app-path="/admin/cookie-helper?download=1" download>⬇ get_muse_cookie.py</a>
+            <a class="btnlike ghostlike" href="admin/cookie-helper" data-app-path="/admin/cookie-helper" target="_blank">查看源码</a>
           </div>
         </div>
         <div style="flex:4;min-width:0">
@@ -886,6 +925,8 @@ const I18N_EN = {
   "账号总数": "Total accounts",
   "可用": "Available",
   "异常": "Error",
+  "工作区不可用": "Workspace unavailable",
+  "暂不可查询": "Temporarily unavailable",
   "已禁用": "Disabled",
   "媒体文件": "Media files",
   "添加账号": "Add accounts",
@@ -1213,7 +1254,7 @@ const I18N_EN_HTML = {
   "model-names-hint": "\n        Model names: <code>muse-spark</code> (chat/code), <code>muse-image</code> (images), <code>muse-video</code> (videos).\n        See the \"Integration Docs\" tab for full examples.\n      ",
   "add-account-hint": "\n        Copy the <b>muse.ai</b> cookie string from your browser and paste it here. Required cookies:\n        <code>hatch_sess</code>. <code>hatch_vml</code> is an optional workspace token and does not block import.\n        For batch import, put one account per line in the format <code>label | cookie string</code> (label is optional).\n      ",
   "keepalive-hint": "The system runs <b>a silent background keep-alive every 30 minutes</b> and <b>fair multi-account rotation (LRU)</b>. \"Test\" actually opens muse.ai to verify the session.",
-  "ext-why-hint": "\n        A small browser extension syncs <b>the muse.ai login you already have on your own computer</b>.\n        No Python, no terminal, no commands.<br>\n        <b>Why an extension is required</b>: muse.ai's login session cookie is marked\n        <code>httpOnly</code>, so page scripts (typing <code>document.cookie</code> in F12,\n        bookmarklets) can't read them. Only a browser extension's <code>cookies</code> API can.\n      ",
+  "ext-why-hint": "\n        A small browser extension syncs <b>the muse.ai login you already have on your own computer</b>.\n        No Python, no terminal, no commands.<br>\n        <b>How the extension reads your session</b>: muse.ai's login session cookie is marked\n        <code>httpOnly</code>, so page scripts (typing <code>document.cookie</code> in F12,\n        bookmarklets) can't read it. Browser extensions can use the <code>cookies</code> API to read it.\n      ",
   "ext-unzip-hint": "\n            Unzip it to a folder you won't delete, e.g. <code>D:\\muse2api-extension</code>.\n          ",
   "ext-load-steps": "\n            <li>Type <code>chrome://extensions</code> in the address bar and press Enter</li>\n            <li>Turn on the <b>Developer mode</b> switch at the top right</li>\n            <li>Click <b>Load unpacked</b> at the top left</li>\n            <li>Select the <b>folder</b> you unzipped in step 1 (not a single file inside it)</li>\n          ",
   "ext-login-hint": "\n            First open <code>https://muse.ai/</code> in your own browser and log in\n            (until you can see the chat screen), then click the extension icon in the toolbar,\n            fill in the two values below, and click \"Read and import\".\n          ",
@@ -1409,10 +1450,17 @@ if (LANG === 'en') {
 
 /* ================= 基础 ================= */
 const $ = id => document.getElementById(id);
+// 管理页可部署在 /、/admin 或反向代理子路径（如 /muse/、/muse/admin）。
+const APP_PATH = location.pathname.replace(/\/admin\/?$/, '').replace(/\/+$/, '');
+const APP_BASE = location.origin + APP_PATH;
+const appUrl = path => APP_PATH + path;
+document.querySelectorAll('a[data-app-path]').forEach(link => {
+  link.href = appUrl(link.dataset.appPath);
+});
 const KEY_STORE = 'muse2api_key';
 let KEY = localStorage.getItem(KEY_STORE) || new URLSearchParams(location.search).get('key') || '';
 $('key').value = KEY;
-$('dBase').textContent = location.origin + '/v1';
+$('dBase').textContent = APP_BASE + '/v1';
 
 /* 登录状态：控制提示条和 Key 输入框高亮 */
 let authOK = null;
@@ -1447,7 +1495,7 @@ async function api(path, opts){
   opts = opts || {};
   opts.headers = Object.assign({'Content-Type':'application/json'}, opts.headers || {});
   if (KEY) opts.headers['Authorization'] = 'Bearer ' + KEY;
-  const r = await fetch(path, opts);
+  const r = await fetch(appUrl(path), opts);
   const txt = await r.text();
   let data; try { data = JSON.parse(txt); } catch(e){ data = null; }
   if (r.status === 401){
@@ -1538,13 +1586,13 @@ async function loadApikey(){
   try{
     const d = await api('/admin/apikey');
     realKey = d.api_key || '';
-    $('inBase').value = d.base_url || (location.origin + '/v1');
+    $('inBase').value = d.base_url || (APP_BASE + '/v1');
     renderKey();
     fillExtFields(d.base_url);
     $('cmdText').textContent = buildCmd(d.base_url);
   }catch(e){
-    $('inBase').value = location.origin + '/v1';
-    fillExtFields(location.origin);
+    $('inBase').value = APP_BASE + '/v1';
+    fillExtFields(APP_BASE);
     $('cmdText').textContent = '（先在右上角填入 API Key，这里会生成完整命令）';
   }
 }
@@ -1560,7 +1608,7 @@ function renderKey(){
 function toggleKey(){ keyShown = !keyShown; renderKey(); }
 
 function buildCmd(baseUrl){
-  const root = (baseUrl || location.origin).replace(/\/v1\/?$/, '').replace(/\/+$/, '');
+  const root = (baseUrl || APP_BASE).replace(/\/v1\/?$/, '').replace(/\/+$/, '');
   return `python get_muse_cookie.py --base ${root} --key ${realKey || '你的API_KEY'} --label muse-01`;
 }
 
@@ -1585,7 +1633,7 @@ async function copyExKey(){ await copyText($('exKey').value); }
 
 /* 扩展方案：把 BASE URL / API Key 填进页面上的复制框 */
 function fillExtFields(baseUrl){
-  const root = (baseUrl || location.origin)
+  const root = (baseUrl || APP_BASE)
     .replace(/\/v1\/?$/i, '').replace(/\/+$/, '');
   if ($('exBase')) $('exBase').value = root;
   if ($('exKey')) $('exKey').value = realKey || '';
@@ -1621,6 +1669,9 @@ async function rotateKey(){
 
 /* ================= 额度显示 ================= */
 function quotaBadge(a){
+  if (a.workspace_available === false) {
+    return '<span class="badge warn" title="当前导入会话的 Muse 工作区不可用，无法查询额度；已有缓存仍保留">暂不可查询</span>';
+  }
   const q = a.quota;
   if (!q || !q.found){
     return '<span class="badge mute" title="还没查过。点「操作」里的「额度」实时查询">未查</span>';
@@ -1654,6 +1705,7 @@ async function queryQuota(aid, btn){
   }catch(e){
     toast('额度查询失败：' + e.message, 'bad');
     if (btn){ btn.disabled = false; btn.textContent = '额度'; }
+    loadPool();
   }
 }
 
@@ -1728,6 +1780,7 @@ async function loadPool(){
     $('poolBody').innerHTML = accounts.map(a => {
       const ok = a.ok;
       const badge = !a.enabled ? '<span class="badge mute">已禁用</span>'
+                  : a.workspace_available === false ? '<span class="badge bad">● 工作区不可用</span>'
                   : ok === true  ? '<span class="badge ok">● 可用</span>'
                   : ok === false ? '<span class="badge bad">● 异常</span>'
                   : '<span class="badge warn">○ 未检测</span>';
@@ -1760,6 +1813,222 @@ async function loadPool(){
       : `<tr><td colspan="10" class="empty">加载失败：${esc(e.message)}</td></tr>`;
   }
 }
+
+/* ================= 验证码登录 ================= */
+// Login IDs and verification codes stay in this tab's memory; never persist them.
+let nativeLogin = {id:null, state:'idle', busy:false, resendAt:0, expiresAt:0, contactHint:'', timer:null};
+
+function nativeLoginMessage(message, kind=''){
+  const node = $('nativeLoginMessage');
+  node.textContent = message || '';
+  node.style.color = kind === 'bad' ? 'var(--bad)' : kind === 'ok' ? 'var(--ok)' : kind === 'warn' ? 'var(--warn)' : 'var(--muted)';
+}
+
+function nativeLoginExpiry(value){
+  if (value == null || value === '') return 0;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return numeric > 100000000000 ? numeric : numeric * 1000;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function nativeLoginRender(){
+  const now = Date.now();
+  if (nativeLogin.state === 'awaiting_code' && nativeLogin.expiresAt && now >= nativeLogin.expiresAt && !nativeLogin.busy){
+    nativeLogin.state = 'expired';
+    $('nativeLoginCode').value = '';
+    nativeLoginMessage('本次登录已过期，请重新获取验证码。', 'warn');
+  }
+  const pending = nativeLogin.state === 'awaiting_code';
+  const active = !!nativeLogin.id;
+  const seconds = Math.max(0, Math.ceil((nativeLogin.resendAt - now) / 1000));
+  $('nativeLoginIdentifier').disabled = nativeLogin.busy || pending;
+  $('nativeLoginLabel').disabled = nativeLogin.busy || pending;
+  $('nativeLoginCode').disabled = nativeLogin.busy || !pending;
+  $('nativeLoginCodeRow').hidden = !pending;
+  $('nativeLoginStartBtn').hidden = pending;
+  $('nativeLoginStartBtn').disabled = nativeLogin.busy;
+  $('nativeLoginStartBtn').textContent = nativeLogin.busy && !pending ? '正在处理…' : active ? '重新获取验证码' : '获取验证码';
+  $('nativeLoginRecoverBtn').hidden = active;
+  $('nativeLoginRecoverBtn').disabled = nativeLogin.busy;
+  $('nativeLoginVerifyBtn').hidden = !pending;
+  $('nativeLoginVerifyBtn').disabled = nativeLogin.busy;
+  $('nativeLoginResendBtn').hidden = !pending;
+  $('nativeLoginResendBtn').disabled = nativeLogin.busy || seconds > 0;
+  $('nativeLoginResendBtn').textContent = seconds > 0 ? `${seconds} 秒后可重发` : '重新发送';
+  $('nativeLoginRefreshBtn').hidden = !active;
+  $('nativeLoginRefreshBtn').disabled = nativeLogin.busy;
+  $('nativeLoginCancelBtn').hidden = !active;
+  $('nativeLoginCancelBtn').disabled = nativeLogin.busy;
+  $('nativeLoginWebsiteHelp').hidden = !['unsupported','failed','expired'].includes(nativeLogin.state);
+  $('nativeLoginContact').textContent = active && nativeLogin.contactHint ? '接收账号：' + nativeLogin.contactHint : '';
+  const remaining = Math.max(0, Math.ceil((nativeLogin.expiresAt - now) / 1000));
+  $('nativeLoginExpiry').textContent = pending && nativeLogin.expiresAt ? `本次登录剩余 ${Math.floor(remaining/60)} 分 ${remaining%60} 秒` : '';
+  if (pending && !nativeLogin.timer) nativeLogin.timer = setInterval(nativeLoginRender, 1000);
+  if (!pending && nativeLogin.timer){ clearInterval(nativeLogin.timer); nativeLogin.timer = null; }
+}
+
+function nativeLoginApply(result, resetResend=false){
+  if (!result || !['awaiting_code','authenticated','unsupported','failed','expired'].includes(result.state)){
+    throw new Error('服务端未返回可确认的登录状态，请刷新登录状态后再操作。');
+  }
+  if (typeof result.login_id === 'string' && result.login_id) nativeLogin.id = result.login_id;
+  if (result.state === 'awaiting_code' && !nativeLogin.id) throw new Error('未取得登录会话，请重新获取验证码。');
+  nativeLogin.state = result.state;
+  if (typeof result.contact_hint === 'string') nativeLogin.contactHint = result.contact_hint;
+  if (result.expires_at != null) nativeLogin.expiresAt = nativeLoginExpiry(result.expires_at);
+  if (resetResend || result.resend_after != null){
+    const delay = Number(result.resend_after ?? 60);
+    nativeLogin.resendAt = Date.now() + (Number.isFinite(delay) ? Math.max(0, delay) : 60) * 1000;
+  }
+  if (result.state === 'authenticated'){
+    const unavailable = result.workspace_available === false || result.account?.workspace_available === false;
+    $('nativeLoginCode').value = '';
+    $('nativeLoginIdentifier').value = '';
+    $('nativeLoginLabel').value = '';
+    nativeLogin.id = null;
+    nativeLoginMessage(unavailable
+      ? '登录并保存账号成功，但此会话的工作区当前不可用。请先到 Muse 官网确认工作区状态。'
+      : '登录并保存账号成功，可以在账号池查看。', unavailable ? 'warn' : 'ok');
+    loadPool();
+  } else {
+    if (result.state !== 'awaiting_code') $('nativeLoginCode').value = '';
+    const fallback = result.state === 'awaiting_code' ? '验证码已发送，请填写收到的 6 位验证码。'
+      : result.state === 'expired' ? '本次登录已过期，请重新获取验证码。'
+      : '本次未完成登录，请根据提示到 Muse 官网处理后重试。';
+    nativeLoginMessage(result.message || fallback, result.state === 'awaiting_code' ? '' : 'warn');
+  }
+  nativeLoginRender();
+}
+
+async function nativeLoginStart(){
+  if (nativeLogin.busy || nativeLogin.state === 'awaiting_code') return;
+  const identifier = $('nativeLoginIdentifier').value.trim();
+  const label = $('nativeLoginLabel').value.trim();
+  if (!identifier){ nativeLoginMessage('请填写 Muse 账号的手机号或邮箱。', 'warn'); return; }
+  nativeLogin.busy = true;
+  $('nativeLoginCode').value = '';
+  nativeLoginMessage('正在向 Muse 请求验证码，请稍候…');
+  nativeLoginRender();
+  try{
+    if (nativeLogin.id){
+      await api('/admin/login/' + encodeURIComponent(nativeLogin.id), {method:'DELETE'});
+      nativeLogin.id = null;
+    }
+    nativeLogin.contactHint = '';
+    nativeLogin.expiresAt = 0;
+    nativeLogin.resendAt = 0;
+    nativeLoginApply(await api('/admin/login/start', {method:'POST', body:JSON.stringify({identifier, label})}), true);
+  } catch(e){
+    nativeLoginMessage('获取验证码未完成：' + e.message, 'bad');
+  } finally {
+    nativeLogin.busy = false;
+    nativeLoginRender();
+  }
+}
+
+async function nativeLoginRecover(){
+  if (nativeLogin.busy) return;
+  nativeLogin.busy = true;
+  $('nativeLoginCode').value = '';
+  nativeLoginMessage('正在查找未完成的登录…');
+  nativeLoginRender();
+  try{
+    const result = await api('/admin/login/current');
+    if (result?.state === 'idle'){
+      nativeLogin.id = null;
+      nativeLogin.state = 'idle';
+      nativeLogin.resendAt = 0;
+      nativeLogin.expiresAt = 0;
+      nativeLogin.contactHint = '';
+      nativeLoginMessage('当前没有未完成的登录，可以重新获取验证码。');
+    } else {
+      nativeLoginApply(result);
+    }
+  } catch(e){
+    nativeLoginMessage('找回未完成登录失败：' + e.message, 'bad');
+  } finally {
+    nativeLogin.busy = false;
+    nativeLoginRender();
+  }
+}
+
+async function nativeLoginVerify(){
+  if (nativeLogin.busy || nativeLogin.state !== 'awaiting_code' || !nativeLogin.id) return;
+  nativeLoginRender();
+  if (nativeLogin.state !== 'awaiting_code') return;
+  const code = $('nativeLoginCode').value.trim();
+  if (!/^\d{6}$/.test(code)){ nativeLoginMessage('请输入收到的 6 位数字验证码。', 'warn'); return; }
+  $('nativeLoginCode').value = '';
+  nativeLogin.busy = true;
+  nativeLoginMessage('正在验证登录并保存账号，请稍候…');
+  nativeLoginRender();
+  try{
+    nativeLoginApply(await api('/admin/login/' + encodeURIComponent(nativeLogin.id) + '/verify', {method:'POST', body:JSON.stringify({code})}));
+  } catch(e){
+    nativeLoginMessage('验证结果未确认：' + e.message + '。可先刷新登录状态确认结果。', 'bad');
+  } finally {
+    nativeLogin.busy = false;
+    nativeLoginRender();
+  }
+}
+
+async function nativeLoginResend(){
+  if (nativeLogin.busy || nativeLogin.state !== 'awaiting_code' || !nativeLogin.id || Date.now() < nativeLogin.resendAt) return;
+  nativeLoginRender();
+  if (nativeLogin.state !== 'awaiting_code') return;
+  nativeLogin.busy = true;
+  $('nativeLoginCode').value = '';
+  nativeLoginMessage('正在重新发送验证码…');
+  nativeLoginRender();
+  try{
+    nativeLoginApply(await api('/admin/login/' + encodeURIComponent(nativeLogin.id) + '/resend', {method:'POST', body:'{}'}), true);
+  } catch(e){
+    nativeLoginMessage('重新发送未完成：' + e.message, 'bad');
+  } finally {
+    nativeLogin.busy = false;
+    nativeLoginRender();
+  }
+}
+
+async function nativeLoginRefresh(){
+  if (nativeLogin.busy || !nativeLogin.id) return;
+  nativeLogin.busy = true;
+  nativeLoginRender();
+  try{
+    nativeLoginApply(await api('/admin/login/' + encodeURIComponent(nativeLogin.id)));
+  } catch(e){
+    nativeLoginMessage('刷新登录状态失败：' + e.message, 'bad');
+  } finally {
+    nativeLogin.busy = false;
+    nativeLoginRender();
+  }
+}
+
+async function nativeLoginCancel(){
+  if (nativeLogin.busy) return;
+  $('nativeLoginCode').value = '';
+  nativeLogin.busy = true;
+  nativeLoginRender();
+  try{
+    if (nativeLogin.id) await api('/admin/login/' + encodeURIComponent(nativeLogin.id), {method:'DELETE'});
+    nativeLogin.id = null;
+    nativeLogin.state = 'idle';
+    nativeLogin.resendAt = 0;
+    nativeLogin.expiresAt = 0;
+    $('nativeLoginIdentifier').value = '';
+    $('nativeLoginLabel').value = '';
+    nativeLoginMessage('已取消本次登录。');
+  } catch(e){
+    nativeLoginMessage('取消未完成：' + e.message + '。可稍后再次取消。', 'bad');
+  } finally {
+    nativeLogin.busy = false;
+    nativeLoginRender();
+  }
+}
+
+nativeLoginRender();
+/* ================= 验证码登录结束 ================= */
 
 async function addAccount(fromManual){
   const labelEl = $(fromManual ? 'mLabel' : 'newLabel');
@@ -1910,7 +2179,9 @@ async function keepaliveAll(){
     if (r.status === 'busy') {
       toast('保活任务正在后台运行中，请稍候查看', 'warn');
     } else {
-      toast(`✓ 成功保活 ${r.refreshed_count || 0} 个账号，跳过 ${r.skipped_count || 0} 个`, 'ok');
+        const succeeded = r.succeeded_count ?? (r.refreshed || []).filter(a => a.ok).length;
+        const failed = r.failed_count ?? (r.refreshed || []).filter(a => !a.ok).length;
+        toast(`保活检查完成：可用 ${succeeded} 个，异常 ${failed} 个，跳过 ${r.skipped_count || 0} 个。详情见账号备注`, failed ? 'warn' : 'ok');
     }
     loadPool();
   }catch(e){ toast('保活执行失败：' + e.message, 'bad'); }
@@ -2316,7 +2587,7 @@ async function upgradeNow(){
     const waitReady = async () => {
       tries++;
       try{
-        const hr = await fetch('/healthz?t=' + Date.now(), {cache: 'no-store'});
+        const hr = await fetch(appUrl('/healthz?t=' + Date.now()), {cache: 'no-store'});
         if (hr.ok) { location.reload(); return; }
       }catch(_){}
       if (tries < 20) setTimeout(waitReady, 1000);

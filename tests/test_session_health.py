@@ -95,7 +95,8 @@ def check(root, home, observe):
     for error in (app.MuseAuthError('fixture auth'), app.MuseGenerationError('fixture loading')):
         for prior in (True, None, False):
             a = account(prior)
-            with patch.object(app.engine, 'start'), patch.object(app.engine, 'refresh', side_effect=error):
+            with patch.object(app.engine, 'start'), patch.object(app.engine, 'refresh', side_effect=error), \
+                 patch.object(app, '_renew_and_persist', return_value=a):
                 asyncio.run(app.test_account(a['id']))
             want = False if isinstance(error, app.MuseAuthError) else prior
             expect(a['ok'] is want, 'manual test misclassified account')

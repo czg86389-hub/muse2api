@@ -29,6 +29,7 @@ body = body.slice(0, lastBrace + 1);
 function makeApi({ status, text }) {
   const ctx = {
     KEY: "test-key",
+    appUrl: path => path, // This suite checks API errors at the root deployment.
     setAuth: () => {},
     fetch: async () => ({ status, ok: status >= 200 && status < 300, text: async () => text }),
   };
