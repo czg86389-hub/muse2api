@@ -233,7 +233,7 @@ class Store:
         return None
 
     def update_account(self, aid: str, **kw) -> dict | None:
-        """更新标签 / 启用状态 / cookies / 有效期等；值为 None 的字段跳过。
+        """更新账号字段；None 默认跳过，ok / workspace_available 可显式清空。
 
         传了 cookies_exp 会自动重算 expires_at，不用调用方自己算。
         估算锚点 expiry_anchor 的维护规则（避免有效期被反复虚推）：
@@ -245,7 +245,7 @@ class Store:
             for a in self.accounts:
                 if a["id"] == aid:
                     for k, v in kw.items():
-                        if v is not None or k == "ok":
+                        if v is not None or k in {"ok", "workspace_available"}:
                             a[k] = v
                     if "cookies_exp" in kw and kw["cookies_exp"] is not None:
                         ce = a["cookies_exp"]

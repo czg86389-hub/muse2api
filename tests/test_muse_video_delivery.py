@@ -25,7 +25,7 @@ for name, connecting, hydrated, disabled, expected in (
         ("connecting", True, True, False, "connecting"),
         ("hydrating", False, False, False, "hydrating"),
         ("disabled_input", False, True, True, "input-disabled")):
-    script = """const c=%s;const ta={disabled:c.disabled};const document={readyState:'complete',body:{innerText:c.connecting?'Connecting...':''},querySelector:s=>s==='textarea'?ta:s==='[data-hatch-shell-hydration-state]'?{getAttribute:()=>c.hydrated?'hydrated':'server'}:null};console.log(%s);""" % (
+    script = """const c=%s;const ta={disabled:c.disabled,getClientRects:()=>[{}]};const getComputedStyle=()=>({visibility:'visible'});const document={readyState:'complete',body:{innerText:c.connecting?'Connecting...':''},querySelector:s=>s==='textarea'?ta:s==='[data-hatch-shell-hydration-state]'?{getAttribute:()=>c.hydrated?'hydrated':'server'}:null};console.log(%s);""" % (
         json.dumps(dict(connecting=connecting, hydrated=hydrated, disabled=disabled)), expression)
     result = subprocess.check_output(["node", "-e", script], text=True).strip()
     assert result == expected, (name, result, expected)

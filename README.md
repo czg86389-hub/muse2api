@@ -119,12 +119,37 @@
        proxy_set_header Host $host;
        proxy_set_header X-Real-IP $remote_addr;
        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       proxy_set_header X-Forwarded-Proto $scheme;
    }
    ```
 
 ---
 
-## 🧩 账号导入（Chrome 扩展 / 油猴脚本）
+### 部署在域名子路径
+
+例如使用 `https://example.com/muse/` 时，将 `MUSE2API_PUBLIC_BASE` 设为 `https://example.com/muse`，让反向代理剥离 `/muse` 前缀，同时以 `--root-path /muse` 启动 Uvicorn：
+
+```bash
+python -m uvicorn app:app --host 127.0.0.1 --port 18610 --root-path /muse
+```
+
+Nginx 的 `location /muse/` 中使用带末尾 `/` 的 `proxy_pass http://127.0.0.1:18610/`，并保留上面的超时、流式配置及 `Host`、`X-Forwarded-Proto` 转发。Docker Compose 部署可通过 `command` 覆盖启动命令，容器内继续监听 `0.0.0.0`。管理 API、下载链接、扩展自动识别和接口错误响应均保留子路径；域名根路径部署继续可用。
+
+## 🧩 账号导入（验证码登录 / Chrome 扩展 / 油猴脚本）
+
+### 直接使用账号和验证码登录
+
+在管理后台的「导入账号」页填写已有 Muse 账号的邮箱或手机号，点击「获取验证码」，再输入收到的验证码并点击「验证并登录」。服务器按照 Muse 网页的原生登录流程取得会话，只有拿到 `hatch_sess` 且 `/api/session` 返回 `assigned` 后才保存账号；无需手动复制 Cookie。登录成功与工作区可用分开显示，`DISABLED` 只表示当前导入会话对应的工作区不可用，不能据此推断账号的其他会话状态。
+
+- 临时登录状态和 CSRF 只保存在服务进程内存中，10 分钟后自动清理；验证码不写入日志或浏览器存储。
+- 同时允许一个未完成登录，发码至少间隔 60 秒、全站每小时最多 6 次，同一次登录最多尝试 5 次验证码。
+- 刷新网页后可点击「找回未完成登录」继续或取消；服务重启后需要重新开始。
+- 此入口仅处理已有账号的普通验证码登录。遇到密码、额外验证、账号选择或注册/条款步骤，会明确提示前往 Muse 官网处理，不自动创建账号或接受条款。
+- 所有 `/admin/login/*` 接口沿用管理 API Key 鉴权。原有 Cookie 导入方式仍可使用。
+
+此适配依据 Muse 网页目前的登录流程实现，网页接口变化时可能需要更新。离线测试覆盖登录协议、失败分支和界面交互；真实账号登录及后续生成能力仍需使用自己的验证码验证。
+
+### 其他导入方式
 
 > **v1.6.6 用户请务必手动升级插件：Chrome/Edge 扩展最低 1.0.2，油猴脚本最低 1.1.2。**
 > 服务端更新不会自动替换已加载的扩展。下载本 Release 的 ZIP，覆盖原扩展目录文件，在 chrome://extensions / edge://extensions 点击“重新加载”；不同个人资料分别升级。弹窗标题旁应显示 **v1.0.2**。

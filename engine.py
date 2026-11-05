@@ -218,6 +218,19 @@ class MuseGenerationError(RuntimeError):
     pass
 
 
+WORKSPACE_UNAVAILABLE_MESSAGE = (
+    "当前导入会话对应的 Muse 工作区不可用（DISABLED / disconnected），无法查询额度或生成内容。"
+    "若官网可以正常使用，请核对并更新该账号当前会话的 Cookie；"
+    "若官网也显示断开，请按官网提示提交反馈。"
+)
+
+
+class MuseWorkspaceUnavailableError(MuseGenerationError):
+    """An authenticated account can have a disabled upstream workspace."""
+    def __init__(self, message: str = WORKSPACE_UNAVAILABLE_MESSAGE):
+        super().__init__(message)
+
+
 class MuseProxyError(MuseGenerationError):
     """The account's configured proxy failed; this is not Cookie invalidation."""
 
@@ -360,6 +373,7 @@ class MuseEngine:
             "--no-first-run", "--no-default-browser-check",
             "--autoplay-policy=no-user-gesture-required",
             "--window-size=1440,2400",
+            "--remote-debugging-address=127.0.0.1",
             f"--remote-debugging-port={self.cfg.cdp_port}",
             "--remote-allow-origins=*",
             f"--user-data-dir={self.cfg.profile_dir}",
@@ -678,26 +692,51 @@ class MuseEngine:
             out[name] = {"value": c.get("value", ""), "expires": exp}
         return out
 
+    _WORKSPACE_UNAVAILABLE_JS = """(() => {
+        const body = (document.body ? document.body.innerText : '').toLowerCase();
+        return body.includes('muse is disconnected')
+            && body.includes('we disconnected muse to protect your information');
+    })()"""
+
+    def _raise_if_workspace_unavailable(self, page: CDP | None = None,
+                                        session: dict | None = None):
+        if isinstance(session, dict) and str(session.get('vm_state', '')).upper() == 'DISABLED':
+            raise MuseWorkspaceUnavailableError()
+        page = page if page is not None else self.page
+        if page is not None and page.js(self._WORKSPACE_UNAVAILABLE_JS) is True:
+            raise MuseWorkspaceUnavailableError()
+
     def _wait_ws_ready(self, page: CDP, timeout: float = 15.0) -> bool:
         """等待 muse.ai 页面完成 React hydration 且不再处于 Connecting... 状态。"""
         deadline = time.time() + timeout
+        ready_since = None
         while time.time() < deadline:
             try:
+                self._raise_if_workspace_unavailable(page)
                 st = page.js("""(function(){
                     if (document.readyState !== 'complete') return 'loading';
-                    if (!document.querySelector('textarea')) return 'no-ta';
+                    var ta = document.querySelector('textarea');
+                    if (!ta) return 'no-ta';
+                    if (!ta.getClientRects().length || getComputedStyle(ta).visibility === 'hidden') return 'no-ta';
                     var h = document.querySelector('[data-hatch-shell-hydration-state]');
                     if (h && h.getAttribute('data-hatch-shell-hydration-state') !== 'hydrated') return 'hydrating';
                     var b = document.body ? (document.body.innerText || '') : '';
                     if (b.indexOf('Connecting...') !== -1) return 'connecting';
                     // Empty composers may not render Send until text has been entered.
-                    if (document.querySelector('textarea').disabled) return 'input-disabled';
+                    if (ta.disabled) return 'input-disabled';
                     return 'ready';
                 })()""")
                 if st == "ready":
-                    return True
+                    if ready_since is None:
+                        ready_since = time.time()
+                    elif time.time() - ready_since >= 0.5:
+                        return True
+                else:
+                    ready_since = None
+            except MuseWorkspaceUnavailableError:
+                raise
             except Exception:
-                pass
+                ready_since = None
             time.sleep(0.1)
         return False
 
@@ -705,12 +744,13 @@ class MuseEngine:
         """关闭残留弹窗并确保处于干净会话且 WebSocket 已就绪。
         对于纯文本对话（for_chat=True），若当前热页面无附件、无卡死且气泡数较少，直接复用现有热连接以实现 2s 级秒回。"""
         if not self.page:
-            return
+            raise MuseGenerationError("聊天页面尚未准备完成，已停止发送")
+        self._raise_if_workspace_unavailable()
         try:
             needs_nav = self.page.js("""(function(forChat){
                 var d = document.querySelector('[role="dialog"]');
                 if (d) {
-                    var b = d.querySelector('button[aria-label*="close" i], button');
+                    var b = d.querySelector('button[aria-label*="close" i],button[aria-label="关闭"],button[aria-label="關閉"]');
                     if (b) b.click();
                 }
                 var scope = document.querySelector('main,[class*="chat-scroll"],[class*="hatch-chat-scroll"]') || document.body;
@@ -729,19 +769,12 @@ class MuseEngine:
             })(%s)""" % ("true" if for_chat else "false"))
             if needs_nav:
                 self.page.send("Page.navigate", {"url": "https://muse.ai/thread/new"})
-                t_end = time.time() + 10.0
-                while time.time() < t_end:
-                    time.sleep(0.08)
-                    ready = self.page.js("""(function(){
-                        return document.readyState === 'complete'
-                            && !!document.querySelector('textarea')
-                            && document.querySelectorAll('div[class*="hatch-chat-groupable-bubble"]').length === 0;
-                    })()""")
-                    if ready:
-                        break
-                self._wait_ws_ready(self.page, timeout=12.0)
-        except Exception:
-            pass
+            if not self._wait_ws_ready(self.page, timeout=getattr(self.cfg, 'login_wait', 15)):
+                raise MuseGenerationError("聊天页面重新加载后未准备完成，已停止发送，请稍后重试")
+        except (MuseWorkspaceUnavailableError, MuseGenerationError):
+            raise
+        except Exception as exc:
+            raise MuseGenerationError("聊天页面准备失败，已停止发送，请稍后重试") from exc
 
     def ensure_page(self, cookies: dict, expires: dict | None = None, account_id: str | None = None):
         resolver = getattr(self, "proxy_resolver", None)
@@ -755,6 +788,8 @@ class MuseEngine:
             try:
                 if self.page.js("!!document.querySelector('textarea')") and self._wait_ws_ready(self.page, timeout=8.0):
                     return self.page
+            except MuseWorkspaceUnavailableError:
+                raise
             except Exception:
                 pass
         self._close_page()
@@ -768,13 +803,14 @@ class MuseEngine:
             try:
                 renewed = self.renew_session_http(cookies, expires, wake_vm=True,
                                                   **({"proxy": proxy} if proxy else {}))
+                self._raise_if_workspace_unavailable(session=renewed)
                 if renewed.get("cookies"):
                     cookies = renewed["cookies"]
                 if renewed.get("cookies_exp"):
                     expires = renewed["cookies_exp"]
                 if account_id:
                     last_map[account_id] = now_ts
-            except (MuseAuthError, MuseProxyError):
+            except (MuseAuthError, MuseProxyError, MuseWorkspaceUnavailableError):
                 raise
             except Exception as e:
                 log.warning("预续签 /api/session 失败（继续尝试浏览器加载）: %s", e)
@@ -784,9 +820,13 @@ class MuseEngine:
         self._ensure_local().proxy_config = proxy
         self._apply_cookies(page, cookies, expires)
         page.send("Page.navigate", {"url": "https://muse.ai/thread/new"})
-        if self._wait_ws_ready(page, timeout=self.cfg.login_wait):
-            self.current_acc_id = account_id
-            return page
+        try:
+            if self._wait_ws_ready(page, timeout=self.cfg.login_wait):
+                self.current_acc_id = account_id
+                return page
+        except MuseWorkspaceUnavailableError:
+            self._close_page()
+            raise
         try:
             body = (page.js("document.body ? document.body.innerText.slice(0,1200) : ''") or "").lower()
         except Exception:
@@ -867,6 +907,7 @@ class MuseEngine:
     def _quota_click(self, expr: str, error: str, timeout: float = 8.0):
         deadline = time.monotonic() + timeout
         while True:
+            self._raise_if_workspace_unavailable()
             raw = self.page.js(expr)
             if raw:
                 pt = json.loads(raw)
@@ -895,9 +936,23 @@ class MuseEngine:
         try:
             self.ensure_page(cookies, expires, account_id=account_id)
             self._quota_click(self._QUOTA_SETTINGS_JS, '找不到设置入口（Settings／設定／设置）')
-            self._quota_click(self._QUOTA_MENU_JS, '设置菜单未出现可识别的设置项')
+            # Some versions open Settings directly; others expose a menu first.
+            open_deadline = time.monotonic() + 8.0
+            while True:
+                self._raise_if_workspace_unavailable()
+                if self.page.js(self._QUOTA_DIALOG_JS):
+                    break
+                menu_item = self.page.js(self._QUOTA_MENU_JS)
+                if menu_item:
+                    pt = json.loads(menu_item)
+                    self._click_point(pt['x'], pt['y'])
+                    break
+                if time.monotonic() >= open_deadline:
+                    raise MuseGenerationError('设置面板或设置菜单未出现，请稍后重试')
+                time.sleep(0.15)
             deadline = time.monotonic() + 12.0
             while True:
+                self._raise_if_workspace_unavailable()
                 parsed = self._parse_quota(self.page.js(self._QUOTA_DIALOG_JS) or '')
                 if parsed['found']:
                     return parsed
@@ -1022,6 +1077,10 @@ class MuseEngine:
     )
 
     def _send(self, prompt: str):
+        # Check again after navigation/attachment work; never retry a submitted prompt.
+        self._raise_if_workspace_unavailable()
+        if not self.page or not self._wait_ws_ready(self.page, timeout=8.0):
+            raise MuseGenerationError("聊天输入框尚未准备完成，已停止发送，请稍后重试")
         # 1. 确保 textarea 滚动到视口中央并获得真实焦点
         try:
             self.page.js("""(function(){
@@ -1041,6 +1100,7 @@ class MuseEngine:
             "return JSON.stringify({x:Math.round(r.left+r.width/2),"
             "y:Math.round(r.top+r.height/2)});})()")
         if not rect:
+            self._raise_if_workspace_unavailable()
             raise MuseGenerationError("找不到聊天输入框")
         c = json.loads(rect)
         for t in ("mousePressed", "mouseReleased"):

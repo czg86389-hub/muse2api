@@ -53,9 +53,10 @@ from engine import (ESSENTIAL_COOKIES, MAX_REFERENCE_IMAGE_BYTES,
                     MAX_REFERENCE_IMAGES, MAX_REFERENCE_TOTAL_BYTES,
                     REFERENCE_MIME_EXT, MuseAuthError, MuseEngine, MuseGenerationError,
                     MuseModelRefusalError, RefImageSafetyError, reference_kind)
-from engine import MuseProxyError
+from engine import MuseProxyError, MuseWorkspaceUnavailableError
 from store import Store, account_expiry, min_expiry
 from proxy import normalize_server, request_proxy_context
+from native_login import NativeLoginError, NativeLoginService
 
 import sys
 log = logging.getLogger("muse2api")
@@ -244,9 +245,18 @@ def _err_type(status: int) -> str:
     return "invalid_request_error"
 
 
+def _api_request_path(request: Request) -> str:
+    """Keep API error envelopes when deployed behind a stripped URL prefix."""
+    path = request.url.path
+    root = request.scope.get("root_path", "").rstrip("/")
+    if root and (path == root or path.startswith(root + "/")):
+        return path[len(root):] or "/"
+    return path
+
+
 @app.exception_handler(HTTPException)
 async def _http_exc(request: Request, exc: HTTPException):
-    if request.url.path.startswith("/v1/"):
+    if _api_request_path(request).startswith("/v1/"):
         return JSONResponse(
             status_code=exc.status_code,
             content={"error": {"message": str(exc.detail),
@@ -263,7 +273,7 @@ async def _validation_exc(request: Request, exc: RequestValidationError):
     # Never echo user-supplied proxy credentials in validation errors.
     errors = [{k: v for k, v in error.items() if k not in ("input", "ctx")}
               for error in exc.errors()]
-    if request.url.path.startswith("/v1/"):
+    if _api_request_path(request).startswith("/v1/"):
         return JSONResponse(status_code=422, content={"error": {
             "message": "请求参数校验失败：" + str(errors)[:400],
             "type": "invalid_request_error", "param": None, "code": 422}})
@@ -331,6 +341,50 @@ def auth(authorization: str | None = Header(default=None)):
 
 # ------------------------- 请求模型 -------------------------
 
+def _mark_workspace_unavailable(acc_id: str, exc: Exception):
+    """A valid login does not imply that Muse permits this workspace to run."""
+    store.update_account(acc_id, session_ok=True, workspace_available=False)
+    store.mark(acc_id, False, str(exc))
+
+
+def _mark_session_invalid(acc_id: str, exc: Exception):
+    store.update_account(acc_id, session_ok=False)
+    store.mark(acc_id, False, str(exc))
+
+
+def _persist_session_result(acc_id: str, res: dict, now: float):
+    """Save rotated credentials before reporting a disabled upstream workspace."""
+    vm_state = str(res.get("vm_state") or "").upper()
+    store.update_account(acc_id, cookies=res.get("cookies"),
+                         cookies_exp=res.get("cookies_exp"), synced_at=int(now),
+                         session_ok=True, vm_state=res.get("vm_state"))
+    engine._last_http_renew[acc_id] = now
+    if vm_state == "DISABLED":
+        exc = MuseWorkspaceUnavailableError()
+        _mark_workspace_unavailable(acc_id, exc)
+        raise exc
+    store.update_account(acc_id, workspace_available=True if vm_state == "RUNNING" else None)
+    store.touch_keepalive(acc_id, True, f"登录有效 · 自动保活 (VM: {vm_state or '未知'})")
+
+
+def _save_native_login(cookies: dict, expires: dict, label: str, session_result: dict) -> dict:
+    """Save a verified official login without returning its credentials to the UI."""
+    existing = next((a for a in list(store.accounts)
+                     if a.get('cookies', {}).get('hatch_sess') == cookies.get('hatch_sess')), None)
+    account = existing or store.add_account(cookies, label=label or 'Muse 验证码账号', cookies_exp=expires)
+    result = {**session_result, 'cookies': cookies, 'cookies_exp': expires}
+    try:
+        _persist_session_result(account['id'], result, time.time())
+    except MuseWorkspaceUnavailableError:
+        pass  # Authentication succeeded; the UI separately reports workspace availability.
+    updated = store.get_account(account['id']) or account
+    return {k: updated.get(k) for k in ('id', 'label', 'enabled', 'ok', 'session_ok',
+                                      'workspace_available', 'vm_state', 'note')}
+
+
+native_logins = NativeLoginService(on_authenticated=_save_native_login)
+
+
 def _renew_and_persist(acc_id: str, wake_vm: bool = True, force: bool = False) -> dict | None:
     """调用 /api/session 续签账号 cookie 并写回 store，返回最新账号 dict。
     近期（10分钟内）已续签且状态正常的账号直接复用，避免每次请求阻塞 2~3 秒 HTTP 往返。"""
@@ -343,23 +397,18 @@ def _renew_and_persist(acc_id: str, wake_vm: bool = True, force: bool = False) -
         int(acc.get("last_keepalive") or 0),
         int(engine._last_http_renew.get(acc_id, 0)),
     )
-    if not force and acc.get("ok") is True and (now - last_sync) < 600:
+    if (not force and acc.get("ok") is True and acc.get("workspace_available") is not False
+            and str(acc.get("vm_state") or "").upper() != "DISABLED" and (now - last_sync) < 600):
         engine._last_http_renew[acc_id] = last_sync
         return acc
     try:
         res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"), wake_vm=wake_vm,
                                         **({"proxy": _account_proxy(acc)} if _account_proxy(acc) else {}))
-        engine._last_http_renew[acc_id] = now
-        if res.get("cookies"):
-            store.update_account(acc_id, cookies=res["cookies"],
-                                 cookies_exp=res.get("cookies_exp"),
-                                 ok=True if res.get("ok") else acc.get("ok"),
-                                 synced_at=int(now))
-            store.touch_keepalive(acc_id, True, f"会话正常 (VM: {res.get('vm_state') or 'RUNNING'})")
+        _persist_session_result(acc_id, res, now)
     except MuseAuthError as exc:
-        store.mark(acc_id, False, str(exc))
+        _mark_session_invalid(acc_id, exc)
         raise
-    except MuseProxyError:
+    except (MuseProxyError, MuseWorkspaceUnavailableError):
         raise
     except Exception as exc:
         log.warning("HTTP 预续签账号 %s 异常: %s", acc_id, exc)
@@ -433,7 +482,14 @@ def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
                 except MuseAuthError as exc:
                     last_exc = exc
                     if cur_id:
-                        store.mark(cur_id, False, str(exc))
+                        _mark_session_invalid(cur_id, exc)
+                    engine.close_current_page()
+                    if yielded:
+                        break
+                except MuseWorkspaceUnavailableError as exc:
+                    last_exc = exc
+                    if cur_id:
+                        _mark_workspace_unavailable(cur_id, exc)
                     engine.close_current_page()
                     if yielded:
                         break
@@ -1171,11 +1227,15 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
                 return res, cur_acc["id"]
             except MuseAuthError as exc:
                 last_exc = exc
-                store.mark(cur_acc["id"], False, str(exc))
+                _mark_session_invalid(cur_acc["id"], exc)
                 engine.close_current_page()
             except MuseProxyError as exc:
                 last_exc = exc
                 store.touch_keepalive(cur_acc["id"], None, f"代理异常: {str(exc)[:160]}")
+                engine.close_current_page()
+            except MuseWorkspaceUnavailableError as exc:
+                last_exc = exc
+                _mark_workspace_unavailable(cur_acc["id"], exc)
                 engine.close_current_page()
             except MuseGenerationError as exc:
                 last_exc = exc
@@ -1658,8 +1718,11 @@ async def chat_completions(req: ChatRequest, _=Depends(auth)):
                 yield "data: [DONE]\n\n"
                 store.mark(acc_id, True, "")
             except MuseAuthError as exc:
-                store.mark(acc_id, False, str(exc))
+                _mark_session_invalid(acc_id, exc)
                 yield _sse({"error": {"message": str(exc), "type": "auth_error", "code": 401}})
+            except MuseWorkspaceUnavailableError as exc:
+                _mark_workspace_unavailable(acc_id, exc)
+                yield _sse({"error": {"message": str(exc), "type": "server_error", "code": 502}})
             except MuseGenerationError as exc:
                 store.mark(acc_id, True, f"助手超时: {str(exc)[:60]}")
                 try:
@@ -1831,6 +1894,52 @@ def get_media(name: str):
 
 
 # ------------------------- 管理：总览 -------------------------
+class NativeLoginStartRequest(BaseModel):
+    identifier: str = Field(min_length=3, max_length=254)
+    label: str = Field(default='', max_length=80)
+
+
+class NativeLoginVerifyRequest(BaseModel):
+    code: SecretStr
+
+
+async def _native_login_call(method, *args):
+    try:
+        return await asyncio.to_thread(method, *args)
+    except NativeLoginError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from None
+
+
+@app.post('/admin/login/start')
+async def native_login_start(req: NativeLoginStartRequest, _=Depends(auth)):
+    return await _native_login_call(native_logins.start, req.identifier.strip(), req.label.strip())
+
+
+@app.post('/admin/login/{login_id}/verify')
+async def native_login_verify(login_id: str, req: NativeLoginVerifyRequest, _=Depends(auth)):
+    return await _native_login_call(native_logins.verify, login_id, req.code.get_secret_value())
+
+
+@app.post('/admin/login/{login_id}/resend')
+async def native_login_resend(login_id: str, _=Depends(auth)):
+    return await _native_login_call(native_logins.resend, login_id)
+
+
+@app.get('/admin/login/current')
+async def native_login_current(_=Depends(auth)):
+    return await _native_login_call(native_logins.current)
+
+
+@app.get('/admin/login/{login_id}')
+async def native_login_status(login_id: str, _=Depends(auth)):
+    return await _native_login_call(native_logins.status, login_id)
+
+
+@app.delete('/admin/login/{login_id}')
+async def native_login_cancel(login_id: str, _=Depends(auth)):
+    return await _native_login_call(native_logins.cancel, login_id)
+
+
 @app.get("/admin/status")
 def admin_status(_=Depends(auth)):
     base = _public_base()
@@ -1974,6 +2083,7 @@ async def test_account(aid: str, _=Depends(auth)):
     def _probe():
         with GEN_LOCK, _account_operation(aid) as acc:
             try:
+                acc = _renew_and_persist(aid, force=True) or acc
                 engine.start()
                 engine.refresh(acc["cookies"], acc.get("cookies_exp"), account_id=aid)
                 synced = _sync_cookies(aid)
@@ -1988,15 +2098,22 @@ async def test_account(aid: str, _=Depends(auth)):
                     else:
                         quota_error = "额度面板未读到有效数据；旧缓存未覆盖"
                         quota = None
+                except MuseWorkspaceUnavailableError:
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     quota_error = f"{type(exc).__name__}；额度缓存未更新"
                 store.mark(aid, True, "会话有效" + ("；额度读取失败" if quota_error else ""))
-                return {"ok": True, "message": "会话有效，可正常生成",
+                store.update_account(aid, session_ok=True, workspace_available=True)
+                return {"ok": True, "message": "登录有效，工作区页面已就绪",
                         "synced": synced, "quota": quota,
                         "quota_error": quota_error}
             except MuseAuthError as exc:
-                store.mark(aid, False, str(exc)[:200])
+                _mark_session_invalid(aid, exc)
                 return {"ok": False, "message": str(exc)[:200]}
+            except MuseWorkspaceUnavailableError as exc:
+                _mark_workspace_unavailable(aid, exc)
+                return {"ok": False, "session_ok": True, "workspace_available": False,
+                        "message": str(exc)}
             except Exception as exc:  # noqa: BLE001
                 store.touch_keepalive(aid, None, f"测试未确认（保留账号状态）: {str(exc)[:200]}")
                 return {"ok": False, "message": str(exc)[:200]}
@@ -2067,6 +2184,7 @@ async def query_quota(aid: str, _=Depends(auth)):
 
     def _probe():
         with GEN_LOCK, _account_operation(aid) as acc:
+            acc = _renew_and_persist(aid) or acc
             engine.start()
             q = engine.quota(acc["cookies"], acc.get("cookies_exp"), account_id=aid)
             if not q.get("found"):
@@ -2080,8 +2198,11 @@ async def query_quota(aid: str, _=Depends(auth)):
     except HTTPException:
         raise
     except MuseAuthError as exc:
-        store.mark(aid, False, str(exc)[:200])
+        _mark_session_invalid(aid, exc)
         raise HTTPException(401, str(exc)) from exc
+    except MuseWorkspaceUnavailableError as exc:
+        _mark_workspace_unavailable(aid, exc)
+        raise HTTPException(502, str(exc)) from exc
     except MuseGenerationError as exc:
         raise HTTPException(502, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -2315,15 +2436,8 @@ def _probe_account_sync(aid: str, check_quota: bool = False) -> dict:
                 return {"ok": False, "id": aid, "label": acc.get("label", aid), "error": "账号无有效 cookie"}
             res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"), wake_vm=True,
                                             **({"proxy": _account_proxy(acc)} if _account_proxy(acc) else {}))
-            store.update_account(
-                aid,
-                cookies=res["cookies"],
-                cookies_exp=res["cookies_exp"],
-                ok=True if res.get("ok") else False,
-                synced_at=int(time.time()),
-            )
-            vm_state = res.get("vm_state") or "RUNNING"
-            store.touch_keepalive(aid, True, f"会话有效 · 自动保活 (VM: {vm_state})")
+            _persist_session_result(aid, res, time.time())
+            vm_state = res.get("vm_state") or "未知"
             quota = acc.get("quota")
             if check_quota and GEN_LOCK.acquire(blocking=False):
                 try:
@@ -2334,6 +2448,8 @@ def _probe_account_sync(aid: str, check_quota: bool = False) -> dict:
                         raise MuseGenerationError("额度面板未读到有效数据；旧缓存未覆盖")
                     quota["checked_at"] = int(time.time())
                     store.update_account(aid, quota=quota)
+                except MuseWorkspaceUnavailableError:
+                    raise
                 except Exception as qe:  # noqa: BLE001
                     log.warning("读取账号 %s 额度失败: %s", aid, qe)
                 finally:
@@ -2352,8 +2468,13 @@ def _probe_account_sync(aid: str, check_quota: bool = False) -> dict:
     except HTTPException as exc:
         return {"ok": False, "id": aid, "busy": exc.status_code == 409, "error": str(exc.detail)}
     except MuseAuthError as exc:
+        store.update_account(aid, session_ok=False)
         store.touch_keepalive(aid, False, f"保活认证失败: {str(exc)[:200]}")
         return {"ok": False, "id": aid, "error": str(exc)}
+    except MuseWorkspaceUnavailableError as exc:
+        _mark_workspace_unavailable(aid, exc)
+        return {"ok": False, "id": aid, "session_ok": True,
+                "workspace_available": False, "error": str(exc)}
     except Exception as exc:
         store.touch_keepalive(aid, None, f"保活未确认（保留账号状态）: {str(exc)[:200]}")
         return {"ok": False, "id": aid, "error": str(exc)}
@@ -2396,7 +2517,10 @@ async def run_keepalive_all(force: bool = False) -> dict:
 
             summary = {
                 "checked_at": now,
+                # Keep the legacy count as attempted refreshes for old clients.
                 "refreshed_count": len(results),
+                "succeeded_count": sum(result.get("ok") is True for result in results),
+                "failed_count": sum(result.get("ok") is not True for result in results),
                 "refreshed": results,
                 "skipped_count": len(skipped),
                 "skipped": skipped,
@@ -2473,7 +2597,7 @@ def get_keepalive_status(_=Depends(auth)):
 # ------------------------- 仓库实时更新检测、通知与一键在线升级 -------------------------
 REPO_URL = "https://github.com/czg86389-hub/muse2api"
 TRACKED_REPO_PATHS = [
-    "app.py", "engine.py", "store.py", "cdp.py", "config.py", "proxy.py",
+    "app.py", "engine.py", "store.py", "cdp.py", "config.py", "proxy.py", "native_login.py",
     "admin.html", "README.md", "version.json", "requirements.txt",
     "Dockerfile", "docker-compose.yml", ".env.example", ".gitignore",
     "LICENSE", "extension", "deploy", "tools",
@@ -2812,4 +2936,5 @@ async def _startup():
 
 @app.on_event("shutdown")
 def _shutdown():
+    native_logins.shutdown()
     engine.stop()
