@@ -1906,6 +1906,17 @@ def add_account(req: AccountRequest, _=Depends(auth)):
                         if missing else "")}
 
 
+# One short-lived receipt per account; credentials are represented only by a hash.
+_PROXY_TEST_RECEIPTS: dict[str, dict] = {}
+_PROXY_TEST_RECEIPT_TTL = 300
+
+
+def _proxy_test_identity(proxy: dict, cookies: dict | None) -> str:
+    value = json.dumps({"proxy": proxy, "cookies": cookies or {}},
+                       sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
 @app.patch("/admin/accounts/{aid}")
 def patch_account(aid: str, req: AccountPatch, _=Depends(auth)):
     with ACCOUNT_POOL.cond:
@@ -1921,7 +1932,13 @@ def patch_account(aid: str, req: AccountPatch, _=Depends(auth)):
                 changes.update(proxy=proxy, synced_at=0, last_keepalive=0,
                                checked_at=0, proxy_status={}, ok=None,
                                note="代理已修改，请重新测试")
+                receipt = _PROXY_TEST_RECEIPTS.get(aid)
+                if (proxy and receipt and 0 <= time.monotonic() - receipt["at"] <= _PROXY_TEST_RECEIPT_TTL
+                        and receipt["identity"] == _proxy_test_identity(proxy, existing.get("cookies"))):
+                    changes["proxy_status"] = dict(receipt["result"])
+                    changes["note"] = "代理配置已保存，账号浏览器状态待测试"
                 engine._last_http_renew.pop(aid, None)
+            _PROXY_TEST_RECEIPTS.pop(aid, None)
         acc = store.update_account(aid, **changes)
         return store.public_account(acc)
 
@@ -1934,6 +1951,7 @@ def test_account_proxy(aid: str, req: ProxyTestRequest | None = None, _=Depends(
         proxy = req.proxy.configuration(acc.get("proxy")) if req is not None else _account_proxy(acc)
         if not proxy:
             raise HTTPException(400, "请输入代理链接或先保存该账号的代理")
+        identity = _proxy_test_identity(proxy, acc.get("cookies"))
         result = {"ok": False, "proxy_configured": True, "proxy_reachable": False,
                   "exit_ip": None, "session_ok": None, "workspace_status": None}
         try:
@@ -1959,10 +1977,18 @@ def test_account_proxy(aid: str, req: ProxyTestRequest | None = None, _=Depends(
             result.update(session_ok=False, message=str(exc))
         except (requests.RequestException, ValueError, KeyError, TypeError):
             result["message"] = "代理出口检测失败，请检查代理地址、认证和网络"
-        # A draft connectivity test must never change the account's saved route or status.
-        if req is None:
-            store.update_account(aid, proxy_status={**result, "checked_at": int(time.time())})
-        result["tested_saved_proxy"] = req is None
+        recorded = {**result, "checked_at": int(time.time())}
+        tested_saved = False
+        with ACCOUNT_POOL.cond:
+            current = store.get_account(aid)
+            if current and identity == _proxy_test_identity(proxy, current.get("cookies")):
+                # Unsaved routes stay only in memory; saving the exact configuration may adopt this proof.
+                _PROXY_TEST_RECEIPTS[aid] = {"identity": identity, "at": time.monotonic(),
+                                           "result": dict(recorded)}
+                tested_saved = proxy == _account_proxy(current)
+                if tested_saved:
+                    store.update_account(aid, proxy_status=dict(recorded))
+        result["tested_saved_proxy"] = tested_saved
         return result
 
 
@@ -1971,6 +1997,8 @@ def del_account(aid: str, _=Depends(auth)):
     ok = store.delete_account(aid)
     if not ok:
         raise HTTPException(404, "账号不存在")
+    with ACCOUNT_POOL.cond:
+        _PROXY_TEST_RECEIPTS.pop(aid, None)
     return {"deleted": True, "id": aid}
 
 

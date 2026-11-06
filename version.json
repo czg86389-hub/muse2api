@@ -1,19 +1,19 @@
 {
-  "version": "1.6.8",
+  "version": "1.6.9",
   "updated_at": "2026-11-05",
   "repo": "https://github.com/czg86389-hub/muse2api",
   "highlights": [
-    "管理台改为全宽布局，修复账号备注列错位和截断；桌面操作按钮完整显示，手机表格可局部横向滚动。",
-    "代理可直接粘贴包含用户名和密码的 HTTP、SOCKS5 或 SOCKS5h 完整链接，自动解析认证；手动认证收为可选项。",
-    "输入代理链接后即可测试连通性，无需先保存或重新打开；临时测试不会修改账号已保存的代理、健康状态或代理检测记录。",
-    "保留旧版分栏认证和已保存密码兼容，接口响应、验证错误和重新打开弹窗均不回显密码。",
-    "更新服务后请强制刷新管理页。浏览器插件仍为 1.0.2、油猴脚本仍为 1.1.2；已使用这两个版本无需重装，旧插件需在每个浏览器个人资料中手动升级。"
+    "修复 1.6.8 代理检测结果未回写的问题：测试当前已保存的代理后，账号列表会更新为已连通、未通过或未测试。 升级后，对之前显示未确认的账号重新点一次“测试连通性”，即可写入实际结果。",
+    "先测试新链接再保存时，仅复用 5 分钟内、同账号、同节点及认证、同登录会话的服务端实测结果，避免刚测通过又显示未确认。",
+    "更换节点、密码或 Cookie、结果过期时不会继承旧成功；失败结果仍显示未通过，代理连通不等于账号浏览器或生成能力正常。",
+    "不同配置的临时测试继续不改已保存路线或账号健康；无检测记录显示“代理未测试”，不再被空记录误标为“代理未确认”。",
+    "更新服务后请强制刷新管理页。插件仍为 1.0.2、油猴脚本仍为 1.1.2；当前版本无需重装，旧插件需在每个浏览器个人资料中手动升级。"
   ],
   "highlights_en": [
-    "Use the full viewport width in the dashboard. Fix account-note alignment and clipping, keep desktop actions visible, and contain table scrolling on phones.",
-    "Paste a full HTTP, SOCKS5 or SOCKS5h URL including credentials. Authentication is parsed automatically; manual credential fields are optional.",
-    "Test the entered proxy immediately without saving or reopening the dialog. Draft tests do not change the saved proxy, account health or saved proxy-test status.",
-    "Retain separate credential fields and saved-password compatibility. Responses, validation errors and reopened dialogs do not reveal passwords.",
-    "Hard-refresh the dashboard after updating. Extension remains 1.0.2 and userscript 1.1.2; current installations need no reinstall. Older extensions require manual updates in every browser profile."
+    "Fix the 1.6.8 proxy-status regression: testing the currently saved proxy now updates the account-list connectivity result. After upgrading, retest accounts with old unconfirmed records once to persist an actual result.",
+    "When saving a newly tested URL, adopt only a server-observed result from the last five minutes for the same account, route, credentials and login session.",
+    "Changed routes, passwords or cookies and expired receipts never inherit success. Failed checks stay failed; proxy reachability does not prove browser or generation readiness.",
+    "Testing a different unsaved configuration still leaves the saved route and account health unchanged. Empty records display Proxy untested instead of Proxy unconfirmed.",
+    "Hard-refresh after updating. Extension remains 1.0.2 and userscript 1.1.2; current versions need no reinstall. Update older extensions manually in every browser profile."
   ]
 }
