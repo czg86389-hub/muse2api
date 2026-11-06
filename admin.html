@@ -25,11 +25,11 @@
     position:sticky;top:0;z-index:20;backdrop-filter:blur(14px);
     background:rgba(10,14,23,.82);border-bottom:1px solid var(--line);
   }
-  .hwrap{max-width:1280px;margin:0 auto;padding:14px 22px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
-  .logo{display:flex;align-items:center;gap:10px;font-weight:650;font-size:17px;letter-spacing:.2px}
+  .hwrap{width:100%;max-width:none;margin:0;padding:14px clamp(12px,1.2vw,24px);display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+  .logo{min-width:0;max-width:100%;flex-wrap:wrap;display:flex;align-items:center;gap:10px;font-weight:650;font-size:17px;letter-spacing:.2px}
   .logo .dot{width:10px;height:10px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--purple));box-shadow:0 0 14px rgba(79,140,255,.8)}
   .logo small{color:var(--muted);font-weight:400;font-size:12px;margin-left:2px}
-  .pills{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto;align-items:center}
+  .pills{min-width:0;max-width:100%;display:flex;gap:8px;flex-wrap:wrap;margin-left:auto;align-items:center}
   .pill{
     display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:5px 11px;border-radius:999px;
     background:var(--panel);border:1px solid var(--line);color:var(--muted);white-space:nowrap
@@ -39,12 +39,12 @@
   .pill.on .led{background:var(--ok);box-shadow:0 0 8px var(--ok)}
   .pill.off .led{background:var(--bad);box-shadow:0 0 8px var(--bad)}
 
-  .keybox{display:flex;align-items:center;gap:6px;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:4px 6px 4px 11px}
-  .keybox input{background:transparent;border:0;color:var(--text);outline:none;width:210px;font-size:12.5px;font-family:ui-monospace,monospace}
+  .keybox{min-width:0;max-width:100%;display:flex;align-items:center;gap:6px;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:4px 6px 4px 11px}
+  .keybox input{min-width:0;flex:1 1 120px;background:transparent;border:0;color:var(--text);outline:none;width:210px;font-size:12.5px;font-family:ui-monospace,monospace}
   .keybox button{padding:5px 10px;font-size:12px}
 
   /* ---------- 布局 ---------- */
-  main{max-width:1280px;margin:0 auto;padding:22px}
+  main{width:100%;max-width:none;margin:0;padding:clamp(12px,1.2vw,24px)}
   nav.tabs{display:flex;gap:6px;margin-bottom:20px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:0}
   nav.tabs button{
     background:transparent;border:0;border-bottom:2px solid transparent;color:var(--muted);
@@ -139,6 +139,8 @@
   .badge.mute{color:var(--muted);border-color:var(--line);background:var(--bg2)}
   .badge.info{color:var(--accent);border-color:rgba(79,140,255,.35);background:rgba(79,140,255,.1)}
   .acts{display:flex;gap:6px;flex-wrap:wrap}
+  #poolBody td.ellip{display:table-cell;white-space:normal;overflow-wrap:anywhere}
+  #poolBody .proxy-summary{display:block;max-width:100%}
   .empty{text-align:center;color:var(--muted);padding:34px 10px;font-size:13px}
 
   /* ---------- 媒体库 ---------- */
@@ -287,7 +289,7 @@
     <button data-t="docs">接入文档</button>
   </nav>
 
-  <div class="card" id="extensionUpgradeNotice" style="border-color:var(--warn)" role="note" data-i18n="extension-upgrade-notice"><b>重要：请手动升级浏览器插件至 1.0.2</b><br>更新服务不会自动升级已加载的扩展。下载新包，替换原扩展目录文件，再到 <code>chrome://extensions</code> 或 <code>edge://extensions</code> 点击“重新加载”。不同浏览器个人资料需分别升级。<br><a href="https://github.com/czg86389-hub/muse2api/releases/download/v1.6.7/muse2api-chrome-extension-v1.6.7.zip">下载扩展 1.0.2</a>；油猴用户请升级脚本至 1.1.2。</div>
+  <div class="card" id="extensionUpgradeNotice" style="border-color:var(--warn)" role="note" data-i18n="extension-upgrade-notice"><b>重要：请手动升级浏览器插件至 1.0.2</b><br>更新服务不会自动升级已加载的扩展。下载新包，替换原扩展目录文件，再到 <code>chrome://extensions</code> 或 <code>edge://extensions</code> 点击“重新加载”。不同浏览器个人资料需分别升级。<br><a href="https://github.com/czg86389-hub/muse2api/releases/download/v1.6.8/muse2api-chrome-extension-v1.6.8.zip">下载扩展 1.0.2</a>；油猴用户请升级脚本至 1.1.2。</div>
 
   <!-- ==================== 账号池 ==================== -->
   <section class="tab active" id="tab-pool">
@@ -764,20 +766,22 @@ t = requests.post(<span class="s">"BASE/v1/videos"</span>, json={<span class="s"
       <option value="proxy">指定代理</option>
     </select>
     <div id="proxyFields">
-      <label for="proxyServer">代理地址</label>
-      <input id="proxyServer" type="text" placeholder="http://proxy.example.com:8080 或 socks5://proxy.example.com:1080" autocomplete="off" spellcheck="false">
-      <p class="hint">支持 HTTP 与 SOCKS5（socks5/socks5h）代理及用户名/密码认证。127.0.0.1 指部署服务器，不是你的电脑。</p>
+      <label for="proxyServer">代理地址或完整链接</label>
+      <input id="proxyServer" type="text" placeholder="socks5://user:password@proxy.example.com:1080" autocomplete="off" spellcheck="false">
+      <p class="hint">可直接粘贴包含用户名和密码的 HTTP、SOCKS5 或 SOCKS5h 链接，立即测试，无需先保存。</p>
+      <details class="proxy-auth"><summary>手动填写认证信息（可选）</summary>
       <label for="proxyUsername">代理用户名（可选）</label>
       <input id="proxyUsername" type="text" autocomplete="off" spellcheck="false">
       <label for="proxyPassword">代理密码</label>
       <input id="proxyPassword" type="password" autocomplete="new-password" aria-describedby="proxyPasswordHelp">
       <p class="hint" id="proxyPasswordHelp">密码不会回显。地址与用户名不变时，留空保留已保存密码；修改地址或用户名后请重新输入密码。</p>
+      </details>
     </div>
     <p class="hint">账号正在执行任务时，请稍后再修改代理。保存后，下次请求使用新设置。</p>
     <div id="proxyError" role="alert"></div>
     <div id="proxyResult" class="hint" role="status" aria-live="polite" style="white-space:pre-line;overflow-wrap:anywhere"></div>
     <div class="proxy-actions">
-      <button type="button" class="ghost" id="proxyTest">测试已保存代理</button>
+      <button type="button" class="ghost" id="proxyTest">测试连通性</button>
       <button type="button" class="danger" id="proxyRemove">移除代理</button>
       <button type="button" class="ghost" onclick="$('proxyDialog').close()">取消</button>
       <button type="submit" id="proxySave">保存</button>
@@ -800,6 +804,13 @@ function setLang(v){
 }
 /* 整句：中文 → 英文 */
 const I18N_EN = {
+  "代理地址或完整链接": "Proxy address or full URL",
+  "可直接粘贴包含用户名和密码的 HTTP、SOCKS5 或 SOCKS5h 链接，立即测试，无需先保存。": "Paste an HTTP, SOCKS5 or SOCKS5h URL including credentials and test it immediately, without saving.",
+  "手动填写认证信息（可选）": "Enter credentials manually (optional)",
+  "测试连通性": "Test connection",
+  "请输入代理链接": "Enter a proxy URL",
+  "请输入代理链接或先保存该账号的代理": "Enter a proxy URL or save a proxy for this account first",
+  "正在通过当前输入的代理检测出口与 Muse 会话…": "Checking egress and Muse session through the entered proxy…",
   "取消": "Cancel",
   "http://proxy.example.com:8080 或 socks5://proxy.example.com:1080": "http://proxy.example.com:8080 or socks5://proxy.example.com:1080",
   "请先保存该账号的代理": "Save a proxy for this account first",
@@ -836,7 +847,7 @@ const I18N_EN = {
   "代理已保存，下次请求生效": "Proxy saved; applies to the next request",
   "代理已移除，恢复默认网络": "Proxy removed; default network restored",
   "请先保存代理设置，再重新打开此窗口测试": "Save the proxy settings first, then reopen this dialog to test them",
-  "正在通过已保存代理检测出口与 Muse 会话…": "Checking the egress IP and Muse session through the saved proxy…",
+  "正在通过当前输入的代理检测出口与 Muse 会话…": "Checking egress and Muse session through the entered proxy…",
   "代理连通：已确认": "Proxy connectivity: confirmed",
   "代理连通：未通过": "Proxy connectivity: failed",
   "代理连通：未确认": "Proxy connectivity: unconfirmed",
@@ -1207,7 +1218,7 @@ const I18N_EN = {
 };
 /* 含富文本的块：data-i18n="key" → 英文 innerHTML（须保留原有子元素的 id/class/属性） */
 const I18N_EN_HTML = {
-  "extension-upgrade-notice": "<b>Important: manually upgrade the extension to 1.0.2</b><br>Updating the service does not update unpacked extensions. Replace files in the original folder and click Reload at <code>chrome://extensions</code> or <code>edge://extensions</code>, separately for each browser profile.<br><a href=\"https://github.com/czg86389-hub/muse2api/releases/download/v1.6.7/muse2api-chrome-extension-v1.6.7.zip\">Download extension 1.0.2</a>; upgrade the userscript to 1.1.2.",
+  "extension-upgrade-notice": "<b>Important: manually upgrade the extension to 1.0.2</b><br>Updating the service does not update unpacked extensions. Replace files in the original folder and click Reload at <code>chrome://extensions</code> or <code>edge://extensions</code>, separately for each browser profile.<br><a href=\"https://github.com/czg86389-hub/muse2api/releases/download/v1.6.8/muse2api-chrome-extension-v1.6.8.zip\">Download extension 1.0.2</a>; upgrade the userscript to 1.1.2.",
   "repo-status-desc": "Comparing your local version with the latest version in the official GitHub repository… (online upgrades keep your <code>.env</code> keys and the <code>data/</code> Account Pool and media data)",
   "auth-banner": "\n      <b>Enter your API Key first so the page can load data</b><br>\n      <span style=\"color:var(--muted)\">\n        The API Key is this service's own \"access password\". It stops other people from using your Muse account quota.\n        It is <b style=\"color:var(--text)\">not</b> your Muse password. It is a random string generated at deploy time (it starts with <code>m2a_</code>).<br>\n        Paste it into the box at the top right and click \"Save\". Your browser remembers it, so you won't need to enter it again.\n      </span>\n    ",
   "model-names-hint": "\n        Model names: <code>muse-spark</code> (chat/code), <code>muse-image</code> (images), <code>muse-video</code> (videos).\n        See the \"Integration Docs\" tab for full examples.\n      ",
@@ -1799,7 +1810,7 @@ function updateProxyMode(){
   $('proxySave').disabled = proxyBusy;
   const saved = accounts.find(a => a.id === proxyAccountId)?.proxy;
   $('proxyRemove').disabled = proxyBusy || !saved;
-  $('proxyTest').disabled = proxyBusy || !saved || !enabled;
+  $('proxyTest').disabled = proxyBusy || !enabled || !$('proxyServer').value.trim();
 }
 function proxyHasChanges(){
   const saved = accounts.find(a => a.id === proxyAccountId)?.proxy;
@@ -1831,6 +1842,7 @@ $('proxyMode').addEventListener('change', updateProxyMode);
 $('proxyForm').addEventListener('input', () => {
   $('proxyResult').textContent = '';
   $('proxyError').textContent = '';
+  updateProxyMode();
 });
 async function saveProxy(remove){
   const id = proxyAccountId;
@@ -1859,15 +1871,17 @@ async function testProxy(){
   const id = proxyAccountId;
   if (!id || proxyBusy) return;
   $('proxyError').textContent = '';
-  if (proxyHasChanges()) {
-    $('proxyError').textContent = '请先保存代理设置，再重新打开此窗口测试';
+  if (!$('proxyServer').value.trim()) {
+    $('proxyError').textContent = '请输入代理链接';
     return;
   }
+  const proxy = {server: $('proxyServer').value.trim(), username: $('proxyUsername').value};
+  if ($('proxyPassword').value) proxy.password = $('proxyPassword').value;
   proxyBusy = true;
   updateProxyMode();
-  $('proxyResult').textContent = '正在通过已保存代理检测出口与 Muse 会话…';
+  $('proxyResult').textContent = '正在通过当前输入的代理检测出口与 Muse 会话…';
   try{
-    const r = await api('/admin/accounts/' + encodeURIComponent(id) + '/proxy/test', {method:'POST'});
+    const r = await api('/admin/accounts/' + encodeURIComponent(id) + '/proxy/test', {method:'POST', body:JSON.stringify({proxy})});
     const label = value => value === true ? '已确认' : value === false ? '未通过' : '未确认';
     const lines = ['代理连通：' + label(r.proxy_reachable)];
     if (r.exit_ip) lines.push('出口 IP：' + r.exit_ip);

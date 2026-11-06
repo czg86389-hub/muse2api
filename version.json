@@ -1,19 +1,19 @@
 {
-  "version": "1.6.7",
-  "updated_at": "2026-11-03",
+  "version": "1.6.8",
+  "updated_at": "2026-11-05",
   "repo": "https://github.com/czg86389-hub/muse2api",
   "highlights": [
-    "修复 Muse 新版无 overlay/form 输入区的附件定位和确认，兼容旧版并排除历史聊天附件。",
-    "新增视频、音频、PDF/Word 参考素材：最多 10 个，单个 40 MiB、合计 100 MiB；MP4/MOV/3GP/WebM 必须含有效时长且不超过 120 秒。",
-    "混合素材提示词支持 [图N]/[视频N]/[音频N]/[文档N] 对照，避免强制第一张图片为起始帧而忽略视频参考。",
-    "修复原始参考素材误当成品、3 次过滤后提前失败、CDP 异常临时文件残留，以及 Snap Chromium 无法读取系统 /tmp 素材的问题。",
-    "浏览器插件继续使用 1.0.2、油猴脚本 1.1.2；仍使用旧插件的用户必须手动升级并重新加载，每个浏览器个人资料分别操作。"
+    "管理台改为全宽布局，修复账号备注列错位和截断；桌面操作按钮完整显示，手机表格可局部横向滚动。",
+    "代理可直接粘贴包含用户名和密码的 HTTP、SOCKS5 或 SOCKS5h 完整链接，自动解析认证；手动认证收为可选项。",
+    "输入代理链接后即可测试连通性，无需先保存或重新打开；临时测试不会修改账号已保存的代理、健康状态或代理检测记录。",
+    "保留旧版分栏认证和已保存密码兼容，接口响应、验证错误和重新打开弹窗均不回显密码。",
+    "更新服务后请强制刷新管理页。浏览器插件仍为 1.0.2、油猴脚本仍为 1.1.2；已使用这两个版本无需重装，旧插件需在每个浏览器个人资料中手动升级。"
   ],
   "highlights_en": [
-    "Fix attachment selection and confirmation for the new Muse composer without an overlay/form, retaining old-layout support and excluding chat history.",
-    "Add video, audio and PDF/Word references: up to 10 files, 40 MiB each, 100 MiB total. MP4/MOV/3GP/WebM require readable positive duration metadata of no more than 120 seconds.",
-    "Map mixed-reference markers to attachment order without forcing the first image to be the opening frame when video/audio references are present.",
-    "Fix uploaded references being returned as results, premature failure after three skipped references, temporary-file leaks after CDP errors, and Snap Chromium file access.",
-    "Extension remains 1.0.2 and userscript 1.1.2. Users on older extensions must replace files and reload manually in every browser profile."
+    "Use the full viewport width in the dashboard. Fix account-note alignment and clipping, keep desktop actions visible, and contain table scrolling on phones.",
+    "Paste a full HTTP, SOCKS5 or SOCKS5h URL including credentials. Authentication is parsed automatically; manual credential fields are optional.",
+    "Test the entered proxy immediately without saving or reopening the dialog. Draft tests do not change the saved proxy, account health or saved proxy-test status.",
+    "Retain separate credential fields and saved-password compatibility. Responses, validation errors and reopened dialogs do not reveal passwords.",
+    "Hard-refresh the dashboard after updating. Extension remains 1.0.2 and userscript 1.1.2; current installations need no reinstall. Older extensions require manual updates in every browser profile."
   ]
 }

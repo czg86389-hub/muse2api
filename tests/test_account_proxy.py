@@ -158,7 +158,7 @@ class AccountProxyTests(unittest.TestCase):
         self.assertEqual(reloaded.get_account(aid)["proxy"]["password"], "secret-marker")
         status, result = asyncio.run(request("PATCH", path, {"proxy": {"server": "http://other:80", "username": "user"}}))
         self.assertEqual(status, 400)
-        status, result = asyncio.run(request("PATCH", path, {"proxy": {"server": "http://u:secret-marker@host"}}))
+        status, result = asyncio.run(request("PATCH", path, {"proxy": {"server": "https://u:secret-marker@host"}}))
         self.assertEqual(status, 422)
         self.assertNotIn("secret-marker", json.dumps(result))
         self.assertTrue(app.store.get_account(aid)["proxy"])

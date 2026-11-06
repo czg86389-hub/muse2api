@@ -46,7 +46,7 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                Response, StreamingResponse)
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import model_validator, BaseModel, Field, SecretStr, field_validator
 
 from config import CFG
 from engine import (ESSENTIAL_COOKIES, MAX_REFERENCE_IMAGE_BYTES,
@@ -55,7 +55,7 @@ from engine import (ESSENTIAL_COOKIES, MAX_REFERENCE_IMAGE_BYTES,
                     MuseModelRefusalError, RefImageSafetyError, reference_kind)
 from engine import MuseProxyError
 from store import Store, account_expiry, min_expiry
-from proxy import normalize_server, request_proxy_context
+from proxy import normalize_server, request_proxy_context, split_proxy_url
 
 import sys
 log = logging.getLogger("muse2api")
@@ -550,6 +550,11 @@ class AccountProxy(BaseModel):
     username: str = ""
     password: SecretStr | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def parse_proxy_url(cls, value):
+        return split_proxy_url(value) if isinstance(value, dict) else value
+
     @field_validator("server")
     @classmethod
     def validate_server(cls, value):
@@ -602,6 +607,10 @@ class AccountPatch(BaseModel):
     label: str | None = None
     enabled: bool | None = None
     proxy: AccountProxy | None = None
+
+
+class ProxyTestRequest(BaseModel):
+    proxy: AccountProxy
 
 
 # ------------------------- 提示词构造 -------------------------
@@ -1918,13 +1927,13 @@ def patch_account(aid: str, req: AccountPatch, _=Depends(auth)):
 
 
 @app.post("/admin/accounts/{aid}/proxy/test")
-def test_account_proxy(aid: str, _=Depends(auth)):
+def test_account_proxy(aid: str, req: ProxyTestRequest | None = None, _=Depends(auth)):
     import ipaddress
     import requests
     with _account_operation(aid) as acc:
-        proxy = _account_proxy(acc)
+        proxy = req.proxy.configuration(acc.get("proxy")) if req is not None else _account_proxy(acc)
         if not proxy:
-            raise HTTPException(400, "请先保存该账号的代理")
+            raise HTTPException(400, "请输入代理链接或先保存该账号的代理")
         result = {"ok": False, "proxy_configured": True, "proxy_reachable": False,
                   "exit_ip": None, "session_ok": None, "workspace_status": None}
         try:
@@ -1950,7 +1959,10 @@ def test_account_proxy(aid: str, _=Depends(auth)):
             result.update(session_ok=False, message=str(exc))
         except (requests.RequestException, ValueError, KeyError, TypeError):
             result["message"] = "代理出口检测失败，请检查代理地址、认证和网络"
-        store.update_account(aid, proxy_status={**result, "checked_at": int(time.time())})
+        # A draft connectivity test must never change the account's saved route or status.
+        if req is None:
+            store.update_account(aid, proxy_status={**result, "checked_at": int(time.time())})
+        result["tested_saved_proxy"] = req is None
         return result
 
 

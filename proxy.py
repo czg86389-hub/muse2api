@@ -8,7 +8,7 @@ import select
 import socket
 import socketserver
 import threading
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 
 def normalize_server(value: str) -> str:
@@ -26,7 +26,24 @@ def normalize_server(value: str) -> str:
         host = f"[{host}]" if ":" in host else host.encode("idna").decode("ascii")
         return f"{parsed.scheme}://{host}:{port}"
     except (ValueError, UnicodeError):
-        raise ValueError("Use http://host:port or socks5://host:port; enter username and password separately") from None
+        raise ValueError("Use http://host:port, socks5://host:port or socks5h://host:port") from None
+
+
+def split_proxy_url(value: dict) -> dict:
+    """Normalize a pasted proxy URL before field validation; URL credentials take precedence."""
+    raw = value.get("server")
+    if not isinstance(raw, str):
+        return value
+    try:
+        parsed = urlsplit(raw.strip())
+        if parsed.username is None and parsed.password is None:
+            return value
+        origin = parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[-1]).geturl()
+        return {**value, "server": normalize_server(origin),
+                "username": unquote(parsed.username or "", errors="strict"),
+                "password": unquote(parsed.password or "", errors="strict")}
+    except (ValueError, UnicodeError):
+        raise ValueError("Invalid proxy URL; use http://user:password@host:port or socks5://user:password@host:port") from None
 
 
 def public_proxy(proxy: dict | None) -> dict | None:
