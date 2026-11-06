@@ -289,6 +289,34 @@ class Store:
             _write(self.cfg.tasks_file, self.tasks)
             return t
 
+    def create_video_extension(self, source_id: str, instruction: str) -> dict:
+        """Atomically reserve a single continuation of an existing video thread."""
+        from video_extend import MAX_EXTEND_STEPS, valid_thread
+        with _LOCK:
+            source = self.tasks.get(source_id)
+            if not source or source.get("kind") != "video" or source.get("status") != "completed":
+                raise ValueError("请先选择已完成的视频任务")
+            thread = source.get("provider_thread")
+            if not valid_thread(thread) or not source.get("account"):
+                raise ValueError("原任务缺少可用的 Muse 会话或账号，无法安全续写")
+            depth = int(source.get("extend_depth") or 0)
+            if depth >= MAX_EXTEND_STEPS:
+                raise ValueError("单条视频最多续写 6 次")
+            for task in self.tasks.values():
+                if task.get("source_task_id") == source_id and task.get("status") == "completed":
+                    raise ValueError("这个视频已有续写结果，请续写最新的视频")
+                if task.get("source_thread") == thread and task.get("status") in ("queued", "processing", "needs_review"):
+                    raise ValueError("该会话已有续写任务进行中或待核查，请勿重复提交")
+            tid = "task_" + uuid.uuid4().hex[:20]
+            t = {"id": tid, "object": "task", "kind": "video", "operation": "extend",
+                 "prompt": instruction, "source_task_id": source_id, "source_thread": thread,
+                 "account": source["account"], "extend_depth": depth + 1, "submission_started": False,
+                 "status": "queued", "progress": 10, "created_at": int(time.time()),
+                 "updated_at": int(time.time()), "result": None, "error": None}
+            self.tasks[tid] = t
+            _write(self.cfg.tasks_file, self.tasks)
+            return t.copy()
+
     def update_task(self, tid: str, **kw):
         with _LOCK:
             t = self.tasks.get(tid)
@@ -310,6 +338,9 @@ class Store:
     def delete_task(self, tid: str) -> bool:
         with _LOCK:
             if tid in self.tasks:
+                task = self.tasks[tid]
+                if task.get("operation") == "extend" and task.get("status") in ("queued", "processing", "needs_review"):
+                    raise ValueError("续写进行中或待核查，不能删除")
                 del self.tasks[tid]
                 _write(self.cfg.tasks_file, self.tasks)
                 return True
@@ -319,7 +350,8 @@ class Store:
         with _LOCK:
             items = sorted(self.tasks.values(),
                            key=lambda t: t.get("created_at") or 0, reverse=True)
-            keep_ids = {t["id"] for t in items[:keep]}
+            keep_ids = {t["id"] for t in items[:max(0, keep)]}
+            keep_ids.update(t["id"] for t in items if t.get("operation") == "extend" and t.get("status") in ("queued", "processing", "needs_review"))
             removed = len(self.tasks) - len(keep_ids)
             self.tasks = {k: v for k, v in self.tasks.items() if k in keep_ids}
             _write(self.cfg.tasks_file, self.tasks)

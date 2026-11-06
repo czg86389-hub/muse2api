@@ -35,6 +35,7 @@ import unicodedata
 
 from cdp import CDP, http_json
 from proxy import HTTPProxyRelay, request_proxy_context
+from video_extend import VIDEO_SNAPSHOT_JS, valid_thread, valid_locator, extend_prompt, MAX_VIDEO_BYTES
 
 log = logging.getLogger("muse2api")
 
@@ -216,6 +217,10 @@ class MuseAuthError(RuntimeError):
 
 class MuseGenerationError(RuntimeError):
     pass
+
+
+class MuseSubmissionUncertainError(MuseGenerationError):
+    """A video request may have been sent; do not automatically retry."""
 
 
 class MuseProxyError(MuseGenerationError):
@@ -1104,6 +1109,95 @@ class MuseEngine:
         time.sleep(0.3)
         return clicked
 
+    # ancestor role=button whose text happens to contain "send".
+    _COMPOSER_JS = r"""
+    (function(){
+        var ts=[...document.querySelectorAll('textarea')].filter(t=>
+            t.offsetParent!==null && !t.disabled && !t.readOnly);
+        if(ts.length!==1) return JSON.stringify({error:'ambiguous-composer'});
+        var ta=ts[0], scope=ta.closest('form,[role="button"]') || ta.parentElement;
+        var bs=[...scope.querySelectorAll('button')].filter(b=>b.offsetParent!==null &&
+            (b.getAttribute('data-pel-click')==='chat_send_message' ||
+             /^(send|发送)$/i.test((b.getAttribute('aria-label')||'').trim()) ||
+             b.getAttribute('data-testid')==='hatch-composer-send-button'));
+        var b=bs.length===1?bs[0]:null;
+        var r=ta.getBoundingClientRect();
+        return JSON.stringify({v:ta.value||'',x:r.left+r.width/2,y:r.top+r.height/2,
+            button:b?{disabled:!!b.disabled,x:b.getBoundingClientRect().x+b.getBoundingClientRect().width/2,
+                y:b.getBoundingClientRect().y+b.getBoundingClientRect().height/2}:null});
+    })()
+    """
+
+    def _composer_state(self):
+        raw=self.page.js(self._COMPOSER_JS)
+        return json.loads(raw) if raw else {}
+
+    def _send_confirmable(self, prompt: str):
+        state=self._composer_state()
+        if state.get('error') or 'x' not in state:
+            raise MuseGenerationError('找不到唯一可见的聊天输入框；未发送')
+        self._click_point(state['x'],state['y'])
+        # Native input events also update the current Muse composer state.
+        # Select all only inside the already focused, unique textarea.
+        for t in ('keyDown','keyUp'):
+            self.page.send('Input.dispatchKeyEvent',{'type':t,'key':'a','code':'KeyA',
+                'windowsVirtualKeyCode':65,'modifiers':2})
+        self.page.send('Input.insertText',{'text':prompt})
+        deadline=time.monotonic()+8
+        while time.monotonic()<deadline:
+            state=self._composer_state()
+            button=state.get('button')
+            if state.get('v')==prompt and button and not button['disabled']:
+                try:
+                    self._click_point(button['x'],button['y'])
+                except Exception as exc:
+                    raise MuseSubmissionUncertainError('点击发送时连接中断；不自动重发') from exc
+                return 'clicked'
+            time.sleep(.1)
+        self._debug_dump('composer-not-ready')
+        raise MuseGenerationError('输入框或发送按钮未就绪；未点击发送')
+
+    _SUBMISSION_STATE_JS = r"""
+    (function(prompt){
+        var norm = function(s){return (s||'').replace(/\s+/g,' ').trim();};
+        var expected = norm(prompt);
+        var bubbles = [...document.querySelectorAll('div[class*="hatch-chat-groupable-bubble"]')]
+            .filter(function(b){return /chat-user-bubble/.test(b.className||'');});
+        var matches = bubbles.filter(function(b){
+            var text = norm(b.innerText);
+            return expected && text.includes(expected.slice(0,120))
+                && text.includes(expected.slice(-120));
+        }).length;
+        var ta = [...document.querySelectorAll('textarea')]
+            .find(function(t){return t.offsetParent!==null;});
+        return JSON.stringify({path:location.pathname, matches:matches,
+            inputEmpty:!!ta && !norm(ta.value)});
+    })(%s)
+    """
+
+    def _submission_state(self, prompt: str) -> dict:
+        try:
+            raw = self.page.js(self._SUBMISSION_STATE_JS % json.dumps(prompt))
+            return json.loads(raw) if raw else {}
+        except Exception:
+            return {}
+
+    def _confirm_submission(self, prompt: str, before: dict, timeout: float = 20.0):
+        """Require a new matching user message, not a click or an empty composer."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            current = self._submission_state(prompt)
+            path = current.get('path') or ''
+            on_thread = path.startswith('/thread/') and path != '/thread/new'
+            new_echo = (current.get('matches', 0) > before.get('matches', 0)
+                        or (path != before.get('path') and current.get('matches', 0) > 0))
+            if on_thread and new_echo and current.get('inputEmpty'):
+                return current
+            time.sleep(0.25)
+        self._debug_dump('submission-unconfirmed')
+        raise MuseSubmissionUncertainError(
+            '提示词送达未确认：未观察到新会话中的对应用户消息；已停止且不自动重发，请核对原任务')
+
     # ---------------- 等待生成 ----------------
     def _last_attachment(self) -> dict | None:
         atts = self.attachments()
@@ -1783,8 +1877,8 @@ class MuseEngine:
     def generate(self, cookies: dict, prompt: str, expect: str = "image",
                  timeout: int = 240, expires: dict | None = None, account_id: str | None = None,
                  on_progress=None, reference_image: str | None = None,
-                 reference_images: list[str] | None = None,
-                 stop_event=None) -> dict:
+                 reference_images: list[str] | None = None, stop_event=None, on_submission=None) -> dict:
+
         deadline = time.monotonic() + timeout
         self.ensure_page(cookies, expires, account_id=account_id)
         self.reset_thread(for_chat=False)
@@ -1795,13 +1889,13 @@ class MuseEngine:
             self._clear_attachments()
         try:
             return self._generate_attached(prompt, expect, deadline, on_progress,
-                                           stop_event, (upload or {}).get("hashes") or set())
+                                           stop_event, (upload or {}).get("hashes") or set(), on_submission)
         finally:
             if upload:
                 shutil.rmtree(upload["dir"], ignore_errors=True)
 
     def _generate_attached(self, prompt: str, expect: str, deadline: float,
-                           on_progress, stop_event, upload_hashes: set) -> dict:
+                           on_progress, stop_event, upload_hashes: set, on_submission=None, on_before_submission=None) -> dict:
         atts_before = self.attachments()
         baseline_sources = {a.get(k) for a in atts_before for k in ("src", "vSrc", "iSrc") if a.get(k)}
         base = atts_before[-1] if atts_before else {}
@@ -1809,72 +1903,176 @@ class MuseEngine:
         base_agent_cnt = self._agent_count()
         if time.monotonic() >= deadline:
             raise MuseGenerationError("任务准备超时，已停止发送")
-        if self._send(prompt) not in ("clicked", "enter-sent"):
+        safe_mode = on_submission is not None or on_before_submission is not None
+        submitted = None
+        if safe_mode:
+            before_submission = self._submission_state(prompt)
+            if on_before_submission:
+                on_before_submission()
+            if self._send_confirmable(prompt) not in ("clicked", "enter-sent"):
+                raise MuseSubmissionUncertainError("提示词发送未确认，已停止且不自动重发，请核对原任务")
+            submitted = self._confirm_submission(prompt, before_submission,
+                                     timeout=min(20.0, max(0.0, deadline - time.monotonic())))
+        elif self._send(prompt) not in ("clicked", "enter-sent"):
             raise MuseGenerationError("提示词发送未确认，已停止生成")
-        os.makedirs(self.cfg.media_dir, exist_ok=True)
-        # 页面若把刚上传的素材渲染成"结果"，按哈希识别出来并继续等待真正的成品
-        while time.monotonic() < deadline:
-            if stop_event is not None and stop_event.is_set():
-                raise MuseGenerationError("任务已取消")
-            att = self._wait_attachment(
-                baseline_src, max(0, deadline - time.monotonic()), expect, on_progress=on_progress,
-                base_agent_cnt=base_agent_cnt, base_att_cnt=len(atts_before),
-                stop_event=stop_event, baseline_sources=baseline_sources
-            )
-            if not att:
-                self._debug_dump("no-attachment")
-                raise MuseGenerationError("等待生成超时，未出现新的生成结果")
-
-            data = mime = url = None
-            selected_src = (att.get("vSrc") if expect == "video" else None) or att.get("src") or ""
+        if on_submission:
             try:
-                data, mime, url = self.extract_bytes(selected_src, expect=expect)
-            except Exception:  # noqa: BLE001
-                self._debug_dump("extract-fail")
+                on_submission({'provider_thread': submitted['path'], 'submitted_at': int(time.time()),
+                               'prompt_sha256': hashlib.sha256(prompt.encode()).hexdigest()})
+            except Exception as exc:
+                raise MuseSubmissionUncertainError('请求已送达，记录任务状态失败，不自动重发') from exc
+        try:
+            os.makedirs(self.cfg.media_dir, exist_ok=True)
+            # 页面若把刚上传的素材渲染成"结果"，按哈希识别出来并继续等待真正的成品
+            while time.monotonic() < deadline:
+                if stop_event is not None and stop_event.is_set():
+                    raise MuseGenerationError("任务已取消")
+                att = self._wait_attachment(
+                    baseline_src, max(0, deadline - time.monotonic()), expect, on_progress=on_progress,
+                    base_agent_cnt=base_agent_cnt, base_att_cnt=len(atts_before),
+                    stop_event=stop_event, baseline_sources=baseline_sources
+                )
+                if not att:
+                    self._debug_dump("no-attachment")
+                    raise MuseGenerationError("等待生成超时，未出现新的生成结果")
 
-            if data and hashlib.sha256(data).hexdigest() in upload_hashes:
-                log.warning("命中的附件是本次上传的参考素材，忽略并继续等待: %s", selected_src[:80])
-                baseline_sources |= {att.get(k) for k in ("src", "vSrc", "iSrc") if att.get(k)}
-                time.sleep(0.1)
-                continue
+                data = mime = url = None
+                selected_src = (att.get("vSrc") if expect == "video" else None) or att.get("src") or ""
+                try:
+                    data, mime, url = self.extract_bytes(selected_src, expect=expect)
+                except Exception:  # noqa: BLE001
+                    self._debug_dump("extract-fail")
 
-            if data:
-                ext = self._pick_ext(mime, url, expect)
+                if data and hashlib.sha256(data).hexdigest() in upload_hashes:
+                    log.warning("命中的附件是本次上传的参考素材，忽略并继续等待: %s", selected_src[:80])
+                    baseline_sources |= {att.get(k) for k in ("src", "vSrc", "iSrc") if att.get(k)}
+                    time.sleep(0.1)
+                    continue
+
+                if data:
+                    ext = self._pick_ext(mime, url, expect)
+                    name = f"{uuid.uuid4().hex}{ext}"
+                    dst = os.path.join(self.cfg.media_dir, name)
+                    with open(dst, "wb") as f:
+                        f.write(data)
+                    kind = "video" if ext in (".mp4", ".webm", ".mov") else "image"
+                    if expect == "video" and kind != "video":
+                        raise MuseGenerationError(f"期望生成视频，但提取成品类型为图片 ({ext})，拒绝以图片冒充视频交付")
+                    return {"path": dst, "filename": name, "size": len(data), "ext": ext, "mime": mime,
+                            "kind": kind,
+                            "via": "blob", "attachment": att.get("tid"),
+                            "w": att.get("w"), "h": att.get("h")}
+
+                path = self._download_fallback(selected_src)
+                if not path:
+                    raise MuseGenerationError("已生成但未能取回文件")
+                with open(path, "rb") as f:
+                    digest = hashlib.sha256(f.read()).hexdigest()
+                if digest in upload_hashes:
+                    os.remove(path)
+                    log.warning("下载到的文件是本次上传的参考素材，忽略并继续等待")
+                    baseline_sources |= {att.get(k) for k in ("src", "vSrc", "iSrc") if att.get(k)}
+                    time.sleep(0.1)
+                    continue
+                ext = os.path.splitext(path)[1].lower() or ".bin"
                 name = f"{uuid.uuid4().hex}{ext}"
                 dst = os.path.join(self.cfg.media_dir, name)
-                with open(dst, "wb") as f:
-                    f.write(data)
+                shutil.move(path, dst)
                 kind = "video" if ext in (".mp4", ".webm", ".mov") else "image"
                 if expect == "video" and kind != "video":
-                    raise MuseGenerationError(f"期望生成视频，但提取成品类型为图片 ({ext})，拒绝以图片冒充视频交付")
-                return {"path": dst, "filename": name, "size": len(data), "ext": ext, "mime": mime,
+                    raise MuseGenerationError(f"期望生成视频，但下载成品类型为图片 ({ext})，拒绝以图片冒充视频交付")
+                return {"path": dst, "filename": name, "size": os.path.getsize(dst), "ext": ext, "mime": "",
                         "kind": kind,
-                        "via": "blob", "attachment": att.get("tid"),
+                        "via": "download", "attachment": att.get("tid"),
                         "w": att.get("w"), "h": att.get("h")}
+            raise MuseSubmissionUncertainError("页面只返回了本次上传的参考素材，未出现新的生成结果；不自动重发")
 
-            path = self._download_fallback(selected_src)
-            if not path:
-                raise MuseGenerationError("已生成但未能取回文件")
-            with open(path, "rb") as f:
-                digest = hashlib.sha256(f.read()).hexdigest()
-            if digest in upload_hashes:
-                os.remove(path)
-                log.warning("下载到的文件是本次上传的参考素材，忽略并继续等待")
-                baseline_sources |= {att.get(k) for k in ("src", "vSrc", "iSrc") if att.get(k)}
-                time.sleep(0.1)
-                continue
-            ext = os.path.splitext(path)[1].lower() or ".bin"
-            name = f"{uuid.uuid4().hex}{ext}"
-            dst = os.path.join(self.cfg.media_dir, name)
-            shutil.move(path, dst)
-            kind = "video" if ext in (".mp4", ".webm", ".mov") else "image"
-            if expect == "video" and kind != "video":
-                raise MuseGenerationError(f"期望生成视频，但下载成品类型为图片 ({ext})，拒绝以图片冒充视频交付")
-            return {"path": dst, "filename": name, "size": os.path.getsize(dst), "ext": ext, "mime": "",
-                    "kind": kind,
-                    "via": "download", "attachment": att.get("tid"),
-                    "w": att.get("w"), "h": att.get("h")}
-        raise MuseGenerationError("页面只返回了本次上传的参考素材，未出现新的生成结果")
+        except (MuseSubmissionUncertainError, MuseModelRefusalError):
+            raise
+        except Exception as exc:
+            if not safe_mode:
+                raise
+            raise MuseSubmissionUncertainError(
+                "请求已送达 " + submitted["path"] + "，取回结果未确认；不自动重发: " + str(exc)) from exc
+
+    def extend_video(self, cookies: dict, thread: str, source_path: str, instruction: str = "",
+                     timeout: int = 600, expires: dict | None = None, account_id: str | None = None,
+                     on_progress=None, on_submission=None, on_before_submission=None) -> dict:
+        """Continue a verified original video in its own Muse thread and account."""
+        if not valid_thread(thread):
+            raise MuseGenerationError("原视频没有可验证的 Muse 会话")
+        if not account_id:
+            raise MuseGenerationError("原视频没有所属账号")
+        if not os.path.isfile(source_path) or os.path.getsize(source_path) > MAX_VIDEO_BYTES:
+            raise MuseGenerationError("原视频不存在或超出续写大小限制")
+        with open(source_path, "rb") as source:
+            original = source.read(MAX_VIDEO_BYTES + 1)
+        if len(original) > MAX_VIDEO_BYTES:
+            raise MuseGenerationError("原视频超出续写大小限制")
+        source_duration = _mp4_duration(original)
+        if not source_duration or source_duration <= 0:
+            raise MuseGenerationError("无法确认原视频时长，仅支持可读取的 MP4")
+        source_sha = hashlib.sha256(original).hexdigest()
+        deadline = time.monotonic() + timeout
+        self.ensure_page(cookies, expires, account_id=account_id)
+        self.page.send("Page.navigate", {"url": "https://muse.ai" + thread})
+        if not self._wait_ws_ready(self.page, timeout=min(45, max(1, deadline-time.monotonic()))):
+            raise MuseGenerationError("原会话未能打开或登录已失效；尚未发送续写")
+        # History can arrive after the composer. Wait for stable, bound, playable video metadata.
+        settled_until = min(deadline, time.monotonic() + 150)
+        stable_key, stable = None, 0
+        video = None
+        while time.monotonic() < settled_until:
+            self._scroll_bottom()
+            try:
+                snapshot = self.page.js(VIDEO_SNAPSHOT_JS)
+            except Exception:
+                snapshot = None
+            if not isinstance(snapshot, dict) or snapshot.get("host") != "muse.ai" or snapshot.get("path") != thread:
+                time.sleep(1); continue
+            if snapshot.get("busy"):
+                raise MuseGenerationError("原会话仍在生成，请等待完成后再续写")
+            messages = snapshot.get("messages") or []
+            last = messages[-1] if messages else None
+            videos = last.get("videos") if isinstance(last, dict) else None
+            if not isinstance(videos, list) or len(videos) != 1:
+                stable_key, stable = None, 0
+                time.sleep(1); continue
+            v = videos[0]
+            if not isinstance(v, dict) or not valid_locator(v.get("output")) or not v.get("src") or not v.get("message"):
+                stable_key, stable = None, 0
+                time.sleep(1); continue
+            key = (v["message"], v["output"], v.get("size"))
+            stable = stable + 1 if key == stable_key else 1
+            stable_key = key
+            if stable >= 2:
+                video = v; break
+            time.sleep(1)
+        if not video:
+            raise MuseGenerationError("无法唯一确认原会话的最新视频；尚未发送续写")
+        if video.get("size") != len(original):
+            raise MuseGenerationError("原会话最新视频与任务文件不匹配；尚未发送续写")
+        remote, mime, _ = self.extract_bytes(video["src"], expect="video")
+        if not remote or len(remote) > MAX_VIDEO_BYTES or hashlib.sha256(remote).hexdigest() != source_sha:
+            raise MuseGenerationError("原会话视频与任务文件校验不一致；尚未发送续写")
+        del original, remote
+        try:
+            prompt = extend_prompt(video["output"], instruction)
+        except ValueError as exc:
+            raise MuseGenerationError(str(exc)) from exc
+        def confirmed(evidence):
+            if evidence.get("provider_thread") != thread:
+                raise MuseSubmissionUncertainError("请求已发出，但会话已变化；请检查，勿重复提交")
+            if on_submission:
+                on_submission(evidence)
+        result = self._generate_attached(prompt, "video", deadline, on_progress, None,
+                                         {source_sha}, confirmed, on_before_submission)
+        with open(result["path"], "rb") as output:
+            data = output.read(MAX_VIDEO_BYTES + 1)
+        result["source_duration"] = source_duration
+        result["duration"] = _mp4_duration(data) if len(data) <= MAX_VIDEO_BYTES else None
+        result["duration_verified"] = bool(result["duration"] and result["duration"] >= source_duration + 1.0)
+        return result
 
     @staticmethod
     def _pick_ext(mime: str, url: str, expect: str) -> str:
