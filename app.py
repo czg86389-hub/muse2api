@@ -19,6 +19,7 @@ OpenAI 兼容:
   GET    /admin/tasks               （任务记录）
   DELETE /admin/tasks/{id}  |  POST /admin/tasks/clear
   GET    /admin/media  |  POST /admin/media/delete  |  DELETE /admin/media/{name}
+  GET    /admin/cleanup  |  POST /admin/cleanup/run （媒体保留/容量清理）
   GET    /admin/extension           （浏览器扩展 zip，用来取 cookie）
   GET    /admin/cookie-helper       （命令行取 cookie 脚本，进阶）
 """
@@ -54,6 +55,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 from pydantic import model_validator, BaseModel, Field, SecretStr, field_validator
 
 from config import CFG, DEFAULT_SYSTEM_PROMPT
+import cleanup as media_cleanup
 from engine import (ESSENTIAL_COOKIES, MAX_REFERENCE_IMAGE_BYTES,
                     MAX_REFERENCE_IMAGES, MAX_REFERENCE_TOTAL_BYTES,
                     REFERENCE_MIME_EXT, MuseAuthError, MuseEngine, MuseGenerationError,
@@ -620,6 +622,11 @@ class AccountProxy(BaseModel):
 class SettingsRequest(BaseModel):
     system_prompt_enabled: bool | None = None
     system_prompt: str | None = None
+    media_cleanup_enabled: bool | None = None
+    media_retention_days: int | None = None
+    media_max_gb: float | None = None
+    cleanup_interval_minutes: int | None = None
+    debug_retention_days: int | None = None
 
 
 class AccountRequest(BaseModel):
@@ -2037,9 +2044,73 @@ def admin_save_settings(req: SettingsRequest, _=Depends(auth)):
         raise HTTPException(400, "System prompt 不能超过 20000 个字符")
     if enabled and not text:
         raise HTTPException(400, "启用 System Prompt 时内容不能为空")
-    data = store.save_settings(system_prompt_enabled=enabled, system_prompt=text)
+    ranges = (
+        ("media_retention_days", req.media_retention_days, 0, 3650),
+        ("media_max_gb", req.media_max_gb, 0, 10000),
+        ("cleanup_interval_minutes", req.cleanup_interval_minutes, 5, 10080),
+        ("debug_retention_days", req.debug_retention_days, 1, 365),
+    )
+    for name, value, lo, hi in ranges:
+        if value is not None and not (lo <= value <= hi):
+            raise HTTPException(400, f"{name} 必须在 {lo} 到 {hi} 之间")
+    data = store.save_settings(
+        system_prompt_enabled=enabled, system_prompt=text,
+        media_cleanup_enabled=req.media_cleanup_enabled,
+        media_retention_days=req.media_retention_days,
+        media_max_gb=req.media_max_gb,
+        cleanup_interval_minutes=req.cleanup_interval_minutes,
+        debug_retention_days=req.debug_retention_days)
     data["default_system_prompt"] = DEFAULT_SYSTEM_PROMPT
     return data
+
+
+# ------------------------- 管理：媒体清理 -------------------------
+def _protected_media_names() -> set[str]:
+    """Files named by unfinished tasks must survive age/size cleanup."""
+    names: set[str] = set()
+    for task in store.tasks.values():
+        if task.get("status") not in ("queued", "processing"):
+            continue
+        result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        video = task.get("video") if isinstance(task.get("video"), dict) else {}
+        values = [result.get("filename"), result.get("url"),
+                  task.get("url"), video.get("url")]
+        for value in values:
+            if isinstance(value, str) and value:
+                names.add(value.rsplit("/", 1)[-1])
+    return names
+
+
+def _cleanup_payload() -> dict:
+    settings = store.get_settings()
+    return {
+        "enabled": bool(settings.get("media_cleanup_enabled")),
+        "retention_days": int(settings.get("media_retention_days") or 0),
+        "max_gb": float(settings.get("media_max_gb") or 0),
+        "max_bytes": int(round(float(settings.get("media_max_gb") or 0) * 1024 ** 3)),
+        "interval_minutes": int(settings.get("cleanup_interval_minutes") or 60),
+        "debug_retention_days": int(settings.get("debug_retention_days") or 7),
+        "media": media_cleanup.scan_media(CFG.media_dir),
+        **media_cleanup.state_snapshot(),
+    }
+
+
+@app.get("/admin/cleanup")
+def admin_cleanup(_=Depends(auth)):
+    return _cleanup_payload()
+
+
+@app.post("/admin/cleanup/run")
+async def admin_cleanup_run(_=Depends(auth)):
+    if media_cleanup.state_snapshot()["running"]:
+        raise HTTPException(409, "清理任务正在执行")
+    settings = store.get_settings()
+    result = await asyncio.to_thread(
+        media_cleanup.run_media_cleanup, CFG, settings,
+        _protected_media_names(), "manual", None, media_cleanup.GRACE_SECONDS, True)
+    if result.get("status") == "busy":
+        raise HTTPException(409, "清理任务正在执行")
+    return result
 
 
 @app.get("/admin/dashboard")
@@ -2781,6 +2852,29 @@ def _warmup_browser_sync():
         GEN_LOCK.release()
 
 
+async def _cleanup_loop():
+    """Background media retention; reads runtime settings on every pass."""
+    await asyncio.sleep(2)
+    first = True
+    while True:
+        try:
+            settings = store.get_settings()
+            result = await asyncio.to_thread(
+                media_cleanup.run_media_cleanup, CFG, settings,
+                _protected_media_names(), "startup" if first else "schedule")
+            if result.get("deleted"):
+                log.info("【媒体清理】%s: 删除 %s 个文件，释放 %s 字节",
+                         result.get("reason"), result["deleted"], result["freed"])
+        except Exception as e:  # noqa: BLE001
+            log.warning("【媒体清理】执行失败: %s", e)
+        first = False
+        try:
+            interval = max(5, int(store.get_settings().get("cleanup_interval_minutes") or 60))
+        except (TypeError, ValueError):
+            interval = 60
+        await asyncio.sleep(interval * 60)
+
+
 async def _keepalive_loop():
     """后台常驻守护任务：每 15 分钟轮询一次账号健康状态并保持 VM 热备。"""
     log.info("【自动保活守护进程】已启动，检测周期: 15 分钟")
@@ -3148,6 +3242,14 @@ async def _startup():
     for task in list(store.tasks.values()):
         if task.get("kind") in ("image", "video") and task.get("status") in ("queued", "processing"):
             store.update_task(task["id"], status="failed", error="服务重启中断了任务，请重新提交")
+    # No browser context exists yet, so orphan temp directories can be removed safely.
+    try:
+        swept = media_cleanup.sweep_orphans(CFG, store.get_settings()["debug_retention_days"])
+        if swept.get("dirs_removed") or swept.get("debug_removed"):
+            log.info("【启动清理】移除 %s 个临时目录、%s 个调试文件，释放 %s 字节",
+                     swept["dirs_removed"], swept["debug_removed"], swept["freed"])
+    except Exception as e:  # noqa: BLE001
+        log.warning("【启动清理】失败: %s", e)
     if not CFG.api_key:
         import secrets
         new_key = "m2a_" + secrets.token_hex(24)
@@ -3155,6 +3257,7 @@ async def _startup():
         _persist_env("MUSE2API_KEY", new_key)
         log.info("🔑 未检测到 MUSE2API_KEY，已自动生成初始密钥: %s", new_key)
     asyncio.create_task(_keepalive_loop())
+    asyncio.create_task(_cleanup_loop())
 
 
 @app.on_event("shutdown")

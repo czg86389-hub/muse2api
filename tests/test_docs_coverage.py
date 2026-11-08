@@ -16,6 +16,7 @@ PUBLIC_ENDPOINTS = [
 ]
 ADMIN_ENDPOINTS = [
     "/admin/status", "/admin/dashboard", "/admin/settings",
+    "/admin/cleanup", "/admin/cleanup/run",
     "/admin/accounts", "/admin/accounts/{id}/test",
     "/admin/accounts/{id}/quota", "/admin/accounts/{id}/cookies",
     "/admin/accounts/{id}/proxy/test", "/admin/accounts/{id}/relogin",

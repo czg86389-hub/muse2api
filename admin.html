@@ -769,6 +769,32 @@
     </div>
 
     <div class="card">
+      <div class="card-head">
+        <h3>媒体清理 <span class="tag" id="cleanupState">已关闭</span></h3>
+        <span class="hint" id="cleanupMeta" style="margin:0">—</span>
+      </div>
+      <div class="hint">自动删除过期或超出容量上限的媒体文件；<code>0</code> 表示关闭对应限制。启动时会清理临时目录和旧调试文件。</div>
+      <label class="switch-row" for="cleanupEnabled">
+        <input type="checkbox" id="cleanupEnabled">
+        <span>启用自动清理</span>
+      </label>
+      <div class="row">
+        <div style="max-width:180px"><label>保留天数</label>
+          <input type="number" id="cleanupDays" min="0" max="3650" step="1"></div>
+        <div style="max-width:180px"><label>最大容量（GB）</label>
+          <input type="number" id="cleanupMaxGb" min="0" max="10000" step="0.1"></div>
+        <div style="max-width:180px"><label>清理间隔（分钟）</label>
+          <input type="number" id="cleanupInterval" min="5" max="10080" step="1"></div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+        <button id="cleanupSave" onclick="saveCleanupSettings()">保存清理设置</button>
+        <button class="ghost" id="cleanupRun" onclick="runCleanupNow()">立即清理</button>
+      </div>
+      <div class="hint" id="cleanupStats" style="margin-top:10px">—</div>
+      <div class="result" id="cleanupResult"></div>
+    </div>
+
+    <div class="card">
       <h3>说明</h3>
       <div class="hint" data-i18n="sysprompt-help">
         <b>关闭时</b>：请求内容与原来完全一致。<br>
@@ -815,6 +841,7 @@
           <tr><td>异步任务</td><td>视频和异步图片接口先返回 id，再轮询 GET；重复轮询不会重复生成。</td></tr>
           <tr><td>媒体</td><td>生成结果写入媒体库，可通过 /v1/media/{name} 下载，无需鉴权。</td></tr>
           <tr><td>参考素材</td><td>最多 10 个；单个不超过 40 MiB；合计不超过 100 MiB；支持 URL、Data URL、Base64 和对象形式。</td></tr>
+          <tr><td>媒体保留</td><td>默认保留 1 天、总量最多 1 GB；服务自动清理，旧媒体 URL 会失效。</td></tr>
           <tr><td>System Prompt</td><td>管理页开启全局 System Prompt 后，会用 system 标签包裹并附加到对话、Responses、生图、视频和语音请求的提示词。</td></tr>
         </tbody>
       </table></div>
@@ -1191,8 +1218,10 @@ speech.write_to_file(<span class="s">"speech.mp3"</span>)</pre>
         <tbody>
           <tr><td class="mono">GET</td><td class="mono">/admin/status</td><td>服务总览、账号池与最近任务。</td></tr>
           <tr><td class="mono">GET</td><td class="mono">/admin/dashboard</td><td>仪表盘数据：KPI、额度、告警、7 天趋势、最近任务与媒体。</td></tr>
-          <tr><td class="mono">GET</td><td class="mono">/admin/settings</td><td>读取全局 System Prompt 设置与默认内容。</td></tr>
-          <tr><td class="mono">POST</td><td class="mono">/admin/settings</td><td>保存 System Prompt 开关与内容。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/admin/settings</td><td>读取全局 System Prompt 与媒体清理设置。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/settings</td><td>保存 System Prompt 与媒体清理设置。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/admin/cleanup</td><td>媒体清理配置、媒体总量与上次清理结果。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/cleanup/run</td><td>立即执行一次媒体清理，忽略启用开关。</td></tr>
           <tr><td class="mono">GET</td><td class="mono">/admin/accounts</td><td>账号列表。</td></tr>
           <tr><td class="mono">POST</td><td class="mono">/admin/accounts</td><td>添加账号，支持单条 cookie、cookie_header 与 batch 批量文本。</td></tr>
           <tr><td class="mono">PATCH</td><td class="mono">/admin/accounts/{id}</td><td>修改标签、启用状态或代理。</td></tr>
@@ -1414,6 +1443,20 @@ const I18N_EN = {
   "设置已保存": "Settings saved",
   "加载失败": "Failed to load",
   "保存失败": "Failed to save",
+  "媒体清理": "Media cleanup",
+  "自动删除过期或超出容量上限的媒体文件；0 表示关闭对应限制。启动时会清理临时目录和旧调试文件。":
+    "Deletes media older than the retention window or over the size cap; 0 disables that limit. Orphan temp directories and stale debug files are removed at startup.",
+  "启用自动清理": "Enable automatic cleanup",
+  "保留天数": "Retention days",
+  "最大容量（GB）": "Max size (GB)",
+  "清理间隔（分钟）": "Cleanup interval (minutes)",
+  "保存清理设置": "Save cleanup settings",
+  "立即清理": "Run cleanup now",
+  "清理中…": "Cleaning…",
+  "✓ 清理设置已保存": "✓ Cleanup settings saved",
+  "清理设置已保存": "Cleanup settings saved",
+  "清理完成": "Cleanup finished",
+  "清理失败": "Cleanup failed",
   "检测到 muse2api 官方仓库发布了新版本更新！": "A new muse2api version has been released in the official repository!",
   "新版本": "New version",
   "官方仓库已有新功能或性能优化提交，点击右侧按钮即可一键在线升级（自动保留本地 .env 密钥与账号池数据）。": "The official repository has new features or performance improvements. Click the button on the right to upgrade online in one step (your local .env keys and Account Pool data are kept).",
@@ -1872,6 +1915,8 @@ const I18N_EN = {
   "生成结果写入媒体库，可通过 /v1/media/{name} 下载，无需鉴权。": "Results are saved to the media library and can be downloaded from /v1/media/{name} without auth.",
   "最多 10 个；单个不超过 40 MiB；合计不超过 100 MiB；支持 URL、Data URL、Base64 和对象形式。": "Up to 10 items; each at most 40 MiB; 100 MiB in total; URLs, Data URLs, Base64 and object forms are accepted.",
   "管理页开启全局 System Prompt 后，会用 system 标签包裹并附加到对话、Responses、生图、视频和语音请求的提示词。": "When the global System Prompt is enabled in the console, it is wrapped in system tags and prepended to chat, Responses, image, video and speech prompts.",
+  "媒体保留": "Media retention",
+  "默认保留 1 天、总量最多 1 GB；服务自动清理，旧媒体 URL 会失效。": "Media is kept for 1 day and up to 1 GB by default; cleanup runs automatically and old media URLs stop working.",
   "存活检查，无需鉴权。": "Liveness check; no auth.",
   "就绪检查，返回可用账号数与浏览器状态。": "Readiness check; returns the enabled account count and browser state.",
   "可用模型列表。": "List of available models.",
@@ -1961,8 +2006,10 @@ const I18N_EN = {
   "Muse 上游生成失败或超时。": "Muse upstream generation failed or timed out.",
   "管理接口全部需要鉴权，返回 JSON；控制台页面使用同一套接口。下面只列路径与用途，字段细节以控制台行为为准。": "All admin endpoints require auth and return JSON; the console uses the same endpoints. Only paths and purposes are listed here; see the console for field details.",
   "仪表盘数据：KPI、额度、告警、7 天趋势、最近任务与媒体。": "Dashboard data: KPIs, quota, alerts, 7-day trend, recent tasks and media.",
-  "读取全局 System Prompt 设置与默认内容。": "Read the global System Prompt settings and default text.",
-  "保存 System Prompt 开关与内容。": "Save the System Prompt flag and text.",
+  "读取全局 System Prompt 与媒体清理设置。": "Read the global System Prompt and media cleanup settings.",
+  "保存 System Prompt 与媒体清理设置。": "Save the global System Prompt and media cleanup settings.",
+  "媒体清理配置、媒体总量与上次清理结果。": "Media cleanup settings, media totals and the last cleanup result.",
+  "立即执行一次媒体清理，忽略启用开关。": "Run media cleanup immediately, ignoring the enabled flag.",
   "添加账号，支持单条 cookie、cookie_header 与 batch 批量文本。": "Add accounts from cookies, cookie_header or batch text.",
   "修改标签、启用状态或代理。": "Change the label, enabled state or proxy.",
   "服务总览、账号池与最近任务。": "Service overview, Account Pool and recent tasks.",
@@ -2294,7 +2341,8 @@ function fmtBytes(n){
   if (!n && n !== 0) return '—';
   if (n < 1024) return n + ' B';
   if (n < 1048576) return (n/1024).toFixed(1) + ' KB';
-  return (n/1048576).toFixed(2) + ' MB';
+  if (n < 1073741824) return (n/1048576).toFixed(2) + ' MB';
+  return (n/1073741824).toFixed(2) + ' GB';
 }
 function fmtTime(ts){
   if (!ts) return '—';
@@ -3202,6 +3250,7 @@ function updateSysPromptState(){
 }
 
 async function loadSettings(){
+  loadCleanup();
   try{
     const d = await api('/admin/settings');
     _defaultSystemPrompt = d.default_system_prompt || '';
@@ -3240,6 +3289,95 @@ async function saveSettings(){
     box.innerHTML = `<b style="color:var(--bad)">保存失败</b><pre class="out">${esc(e.message)}</pre>`;
   }finally{
     btn.disabled = false; btn.textContent = '保存';
+  }
+}
+
+/* ================= 媒体清理 ================= */
+function cleanupLabels(){
+  return LANG === 'en'
+    ? {media:'Media library', files:'files', last:'Last cleanup', deleted:'deleted',
+       freed:'freed', never:'not run yet', errors:'errors', sep:': ', comma:', '}
+    : {media:'媒体库', files:'个文件', last:'上次清理', deleted:'删除',
+       freed:'释放', never:'尚未执行清理', errors:'个错误', sep:'：', comma:'，'};
+}
+
+function cleanupFileLabel(count){
+  const l = cleanupLabels();
+  return (LANG === 'en' && count === 1) ? 'file' : l.files;
+}
+
+function cleanupTotals(d){
+  const l = cleanupLabels(), m = d.media || {count:0, bytes:0};
+  return `${l.media}${l.sep}${m.count} ${cleanupFileLabel(m.count)} · ${fmtBytes(m.bytes)}`;
+}
+
+function cleanupLastRun(d){
+  const l = cleanupLabels(), r = d.last_run;
+  if (!r) return l.never;
+  let s = `${l.last} ${fmtTime(r.at)}${l.sep}${l.deleted} ${r.deleted || 0} ${cleanupFileLabel(r.deleted || 0)}${l.comma}${l.freed} ${fmtBytes(r.freed || 0)}`;
+  if (r.errors && r.errors.length) s += `${l.comma}${r.errors.length} ${l.errors}`;
+  return s;
+}
+
+function updateCleanupState(){
+  const on = $('cleanupEnabled').checked;
+  $('cleanupState').textContent = on ? '已开启' : '已关闭';
+  $('cleanupState').style.color = on ? 'var(--ok)' : '';
+}
+
+async function loadCleanup(){
+  try{
+    const d = await api('/admin/cleanup');
+    $('cleanupEnabled').checked = !!d.enabled;
+    $('cleanupDays').value = d.retention_days;
+    $('cleanupMaxGb').value = d.max_gb;
+    $('cleanupInterval').value = d.interval_minutes;
+    updateCleanupState();
+    $('cleanupMeta').textContent = cleanupTotals(d);
+    $('cleanupStats').textContent = cleanupLastRun(d);
+  }catch(e){
+    $('cleanupStats').textContent = e.message;
+  }
+}
+
+async function saveCleanupSettings(){
+  const btn = $('cleanupSave'), box = $('cleanupResult');
+  btn.disabled = true; btn.textContent = '保存中…';
+  try{
+    await api('/admin/settings', {method:'POST', body: JSON.stringify({
+      media_cleanup_enabled: $('cleanupEnabled').checked,
+      media_retention_days: Number($('cleanupDays').value || 0),
+      media_max_gb: Number($('cleanupMaxGb').value || 0),
+      cleanup_interval_minutes: Number($('cleanupInterval').value || 60),
+    })});
+    await loadCleanup();
+    box.className = 'result show';
+    box.innerHTML = '<b style="color:var(--ok)">✓ 清理设置已保存</b>';
+    toast(t('清理设置已保存'), 'ok');
+  }catch(e){
+    box.className = 'result show';
+    box.innerHTML = `<b style="color:var(--bad)">保存失败</b><pre class="out">${esc(e.message)}</pre>`;
+  }finally{
+    btn.disabled = false; btn.textContent = '保存清理设置';
+  }
+}
+
+async function runCleanupNow(){
+  const btn = $('cleanupRun'), box = $('cleanupResult');
+  btn.disabled = true; btn.textContent = '清理中…';
+  try{
+    const r = await api('/admin/cleanup/run', {method:'POST', body: '{}'});
+    const l = cleanupLabels();
+    const verb = LANG === 'en' ? 'Deleted' : '已清理';
+    box.className = 'result show';
+    box.innerHTML = `<b style="color:var(--ok)">✓ ${verb} ${r.deleted || 0} ${cleanupFileLabel(r.deleted || 0)}${l.comma}${l.freed} ${fmtBytes(r.freed || 0)}</b>`;
+    toast(t('清理完成'), 'ok');
+    await loadCleanup();
+  }catch(e){
+    box.className = 'result show';
+    box.innerHTML = `<b style="color:var(--bad)">清理失败</b><pre class="out">${esc(e.message)}</pre>`;
+  }finally{
+    btn.disabled = false; btn.textContent = '立即清理';
   }
 }
 
@@ -3447,6 +3585,7 @@ function refreshAll(){ loadStatus(); loadPool(); loadDashboard(); loadApikey(); 
 
 $('sysPromptEnabled').addEventListener('change', updateSysPromptState);
 $('sysPromptText').addEventListener('input', updateSysPromptState);
+$('cleanupEnabled').addEventListener('change', updateCleanupState);
 refreshAll();
 setInterval(() => {
   loadStatus(); loadPool();

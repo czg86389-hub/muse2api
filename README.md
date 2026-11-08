@@ -67,6 +67,9 @@ Upload one product photo and get talking-head sales videos, story-style ad short
   - 兼容 `/v1/audio/speech`，直接返回二进制音频（默认 MP3），可直接接入 OpenAI SDK 的 `client.audio.speech.create`。
   - `voice` 接受自由文本音色描述（如「自然清晰的女声」「南方口音的男声」），`speed` 控制语速。
   - 生成结果同时写入媒体库，可通过 `/v1/media/{filename}` 复用；请求 wav / m4a 等格式时，服务器装有 `ffmpeg` 会自动转码，否则返回 Muse 原生格式并在 `X-Muse-Audio-Format` 中标明。
+- 🧹 **媒体自动清理与启动清扫**
+  - 默认保留 1 天、总量最多 1 GB，每 60 分钟清理一次；可在管理页「设置」调整或关闭。
+  - 启动时清理 `data/downloads/context-*`、`muse2api-refs-*` 临时目录与过期 `debug-*.json`。
 - ⚡ **真多账号并行并发（Multi-Account Parallel Execution）**
   - 基于 Chromium 原生 `Target.createBrowserContext` 隐身隔离容器，多任务在独立沙箱中并发执行。
   - 多账号同时生图、生视频、流式对话零互相阻塞，Cookie 与 Session 100% 隔离绝不串扰。
@@ -416,6 +419,26 @@ MUSE2API_SYSTEM_PROMPT=Session isolation\nEverything in this chat session is ind
 
 ---
 
+## 🧹 媒体清理与启动清扫
+
+默认开启。服务在启动后执行一次清理，之后按设定周期清理 `data/media`：
+
+- **按天保留**：删除 `mtime` 早于保留天数的文件；`0` 表示不按年龄删除。
+- **容量上限**：总大小超过上限时，从最旧的文件开始删除，直到不超过上限；`0` 表示不限制。
+- **保护规则**：隐藏文件（含 `.gitkeep`）、最近 5 分钟内写入的文件，以及仍属于 `queued`/`processing` 任务的文件不会被删除。
+- **启动清扫**：只删除 `data/downloads/context-*`、`<profile_dir>/muse2api-refs-*` 和超过保留期的 `data/debug-*.json`；不会删除浏览器 profile、账号、任务记录或设置。
+
+默认值为保留 1 天、最多 1 GB、每 60 分钟扫描。**首次启动会立即删除超过 24 小时或使总量超过 1 GB 的现有媒体**；不想这样时，先把保留天数设为 `0` 或调大上限。
+
+管理页「设置 → 媒体清理」可以修改并手动运行；对应接口：
+
+- `GET /admin/cleanup` — 当前配置、媒体总量、上次清理结果。
+- `POST /admin/cleanup/run` — 立即清理；手动运行会忽略“启用”开关，使用当前天数和容量限制。
+
+媒体被删除后，旧任务记录里的 `/v1/media/...` URL 会返回 404，任务记录本身保留。
+
+---
+
 ## 🎞️ 参考素材：图片 / 视频 / 音频 / 文档
 
 生图、图像编辑、图片任务与视频接口都可以附带参考素材，限制与 muse.ai 网页端一致：
@@ -465,6 +488,11 @@ Nginx 反代需把 `client_max_body_size` 调到 200M 左右，否则大素材�
 | `MUSE2API_AUDIO_VOICE` | `自然清晰的女声` | `/v1/audio/speech` 未指定 `voice` 时的默认音色描述 |
 | `MUSE2API_SYSTEM_PROMPT_ENABLED` | `0` | 是否把全局 System Prompt 附加到发往 Muse 的所有请求 |
 | `MUSE2API_SYSTEM_PROMPT` | `Session isolation…` | 全局 System Prompt 的默认内容；多行用 `\n` |
+| `MUSE2API_MEDIA_CLEANUP_ENABLED` | `1` | 是否自动清理媒体 |
+| `MUSE2API_MEDIA_RETENTION_DAYS` | `1` | 媒体保留天数；`0` = 不按年龄删除 |
+| `MUSE2API_MEDIA_MAX_GB` | `1` | 媒体总容量上限（GB）；`0` = 不限制 |
+| `MUSE2API_CLEANUP_INTERVAL_MINUTES` | `60` | 清理周期（分钟），最小 5 |
+| `MUSE2API_DEBUG_RETENTION_DAYS` | `7` | 启动时清理 `debug-*.json` 的保留天数 |
 | `MUSE2API_CHAT_TIMEOUT` | `300` | 对话生成超时上限（秒） |
 | `MUSE2API_REF_IMAGE_LOCAL_FILES` | `0` | 默认禁止读取服务器本地路径；仅可信单用户部署可显式设为 `1` 恢复 |
 | `MUSE2API_REF_IMAGE_PRIVATE_FETCH` | `0` | 默认仅允许公网 URL，并逐跳检查 DNS/重定向、固定已检查 IP、不使用环境代理；显式设为 `1` 才允许私网/本机 URL |

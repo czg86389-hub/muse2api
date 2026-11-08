@@ -24,6 +24,22 @@ def _is_pos(v) -> bool:
         return False
 
 
+def _clamp_int(v, default: int, lo: int, hi: int) -> int:
+    try:
+        value = int(float(v))
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, value))
+
+
+def _clamp_float(v, default: float, lo: float, hi: float) -> float:
+    try:
+        value = float(v)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, value))
+
+
 # hatch_vml 固定约 2 天，且不因使用而延长 —— 它就是决定账号寿命的那条 cookie。
 # 实测对照：生成前后 synced_at 变了、也捞到新 cookie，但 4 条核心 cookie 的
 # expires 一动不动。所以拿不到 hatch_vml 的 expires 时，按「导入时间 + 2 天」估算，
@@ -112,12 +128,31 @@ class Store:
         base = {
             "system_prompt_enabled": bool(self.cfg.system_prompt_enabled),
             "system_prompt": str(self.cfg.system_prompt or ""),
+            "media_cleanup_enabled": bool(self.cfg.media_cleanup_enabled),
+            "media_retention_days": int(self.cfg.media_retention_days),
+            "media_max_gb": float(self.cfg.media_max_gb),
+            "cleanup_interval_minutes": int(self.cfg.cleanup_interval_minutes),
+            "debug_retention_days": int(self.cfg.debug_retention_days),
         }
         stored = self.settings if isinstance(self.settings, dict) else {}
         if isinstance(stored.get("system_prompt_enabled"), bool):
             base["system_prompt_enabled"] = stored["system_prompt_enabled"]
         if isinstance(stored.get("system_prompt"), str):
             base["system_prompt"] = stored["system_prompt"]
+        if isinstance(stored.get("media_cleanup_enabled"), bool):
+            base["media_cleanup_enabled"] = stored["media_cleanup_enabled"]
+        if "media_retention_days" in stored:
+            base["media_retention_days"] = _clamp_int(
+                stored["media_retention_days"], base["media_retention_days"], 0, 3650)
+        if "media_max_gb" in stored:
+            base["media_max_gb"] = _clamp_float(
+                stored["media_max_gb"], base["media_max_gb"], 0.0, 10000.0)
+        if "cleanup_interval_minutes" in stored:
+            base["cleanup_interval_minutes"] = _clamp_int(
+                stored["cleanup_interval_minutes"], base["cleanup_interval_minutes"], 5, 10080)
+        if "debug_retention_days" in stored:
+            base["debug_retention_days"] = _clamp_int(
+                stored["debug_retention_days"], base["debug_retention_days"], 1, 365)
         if isinstance(stored.get("updated_at"), int):
             base["updated_at"] = stored["updated_at"]
         return base
@@ -129,6 +164,21 @@ class Store:
                 current["system_prompt_enabled"] = bool(patch["system_prompt_enabled"])
             if patch.get("system_prompt") is not None:
                 current["system_prompt"] = str(patch["system_prompt"])
+            if patch.get("media_cleanup_enabled") is not None:
+                current["media_cleanup_enabled"] = bool(patch["media_cleanup_enabled"])
+            if patch.get("media_retention_days") is not None:
+                current["media_retention_days"] = _clamp_int(
+                    patch["media_retention_days"], current["media_retention_days"], 0, 3650)
+            if patch.get("media_max_gb") is not None:
+                current["media_max_gb"] = _clamp_float(
+                    patch["media_max_gb"], current["media_max_gb"], 0.0, 10000.0)
+            if patch.get("cleanup_interval_minutes") is not None:
+                current["cleanup_interval_minutes"] = _clamp_int(
+                    patch["cleanup_interval_minutes"],
+                    current["cleanup_interval_minutes"], 5, 10080)
+            if patch.get("debug_retention_days") is not None:
+                current["debug_retention_days"] = _clamp_int(
+                    patch["debug_retention_days"], current["debug_retention_days"], 1, 365)
             current["updated_at"] = int(time.time())
             self.settings = current
             _write(self.cfg.settings_file, current)

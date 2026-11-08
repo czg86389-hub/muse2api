@@ -42,6 +42,32 @@ def _env(key: str, default: str) -> str:
     return os.environ.get(key, default)
 
 
+def _env_int(key: str, default: int, lo: int | None = None,
+             hi: int | None = None) -> int:
+    try:
+        value = int(float(_env(key, str(default))))
+    except (TypeError, ValueError):
+        value = default
+    if lo is not None:
+        value = max(lo, value)
+    if hi is not None:
+        value = min(hi, value)
+    return value
+
+
+def _env_float(key: str, default: float, lo: float | None = None,
+               hi: float | None = None) -> float:
+    try:
+        value = float(_env(key, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    if lo is not None:
+        value = max(lo, value)
+    if hi is not None:
+        value = min(hi, value)
+    return value
+
+
 def _detect_chromium() -> str:
     """优先使用 MUSE2API_CHROMIUM；若未设置或路径不存在，则自动探测系统已安装的 Chromium/Chrome。"""
     configured = os.environ.get("MUSE2API_CHROMIUM", "").strip()
@@ -141,6 +167,20 @@ class Config:
     # 保持会话活性不失效，但依然不会参与正常业务生图、生视频与对话轮转调度。
     keepalive_disabled_accounts: bool = field(
         default_factory=lambda: _env("MUSE2API_KEEPALIVE_DISABLED_ACCOUNTS", "0").strip() != "0")
+
+    # 媒体清理：默认为开启，保留 1 天、总量 1 GB。管理页保存后以
+    # data/settings.json 为准；0 表示关闭对应限制（天数 0 = 不限年龄，GB 0 = 不限容量）。
+    media_cleanup_enabled: bool = field(
+        default_factory=lambda: _env("MUSE2API_MEDIA_CLEANUP_ENABLED", "1").strip().lower()
+        in ("1", "true", "yes", "on"))
+    media_retention_days: int = field(
+        default_factory=lambda: _env_int("MUSE2API_MEDIA_RETENTION_DAYS", 1, 0, 3650))
+    media_max_gb: float = field(
+        default_factory=lambda: _env_float("MUSE2API_MEDIA_MAX_GB", 1.0, 0.0, 10000.0))
+    cleanup_interval_minutes: int = field(
+        default_factory=lambda: _env_int("MUSE2API_CLEANUP_INTERVAL_MINUTES", 60, 5, 10080))
+    debug_retention_days: int = field(
+        default_factory=lambda: _env_int("MUSE2API_DEBUG_RETENTION_DAYS", 7, 1, 365))
 
     @property
     def data_dir(self) -> str:
