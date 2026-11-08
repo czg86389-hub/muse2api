@@ -17,6 +17,31 @@
 
 ---
 
+## 🎬 推荐：COOL AI — 电商 AI 视频与图片一站式创作
+
+上传一张商品图，就能做出口播带货视频、剧情带货短剧和整套电商详情页。
+
+- **口播带货视频**：自动写脚本、分镜和台词，一键生成真人口播带货视频
+- **剧情带货视频**：反转短剧、对话短剧、剧情植入，自动编剧、分镜、出片
+- **电商详情图**：一张白底图，一键生成首图、场景图、卖点图、细节图、对比图整套
+- **AI 图片与工具**：商品精修、GIF 动图、数字人、字幕擦除、画质增强
+
+👉 立即体验：[www.coolai.mov](https://www.coolai.mov/?utm_source=github&utm_medium=readme&utm_campaign=muse2api)
+
+### 🎬 Recommended: COOL AI — AI video & image studio for e-commerce
+
+Upload one product photo and get talking-head sales videos, story-style ad shorts and a complete product detail-page image set.
+
+- **Talking-head sales videos**: script, shots and lines written for you, generated in one click
+- **Story ads**: twist, dialogue and product-placement shorts, scripted and storyboarded automatically
+- **Product detail images**: hero, lifestyle, selling-point, detail and comparison images from one white-background photo
+- **More tools**: product retouching, GIF animations, digital humans, subtitle removal, upscaling
+
+👉 Try it: [www.coolai.mov](https://www.coolai.mov/?utm_source=github&utm_medium=readme&utm_campaign=muse2api)
+
+
+---
+
 ## 🌟 核心特性
 
 - 💬 **标准对话接口（Chat Completions & Responses API）**
