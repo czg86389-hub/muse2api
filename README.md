@@ -333,7 +333,7 @@ curl -X POST "http://localhost:18610/v1/images/edits" \
   ```
   返回任务 ID：`{"id": "task_xyz789", "status": "queued"}`
 
-  多图参考视频在同一个请求中使用有序的 `images` 数组；这里支持的是多张图片作为视频参考，不支持上传视频文件作为参考：
+  多图参考视频在同一个请求中使用有序的 `images` 数组；视频、音频和文档参考分别用 `videos`、`audios`、`files` 传入：
   ```bash
   curl -X POST "http://localhost:18610/v1/videos" \
     -H "Authorization: Bearer m2a_your_secret_key" \

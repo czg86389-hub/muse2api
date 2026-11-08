@@ -149,6 +149,7 @@
   .dm .dm-name{font-family:ui-monospace,monospace;font-size:10.5px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .dm .dm-meta{color:var(--muted);font-size:10.5px;margin-top:2px}
   @media (max-width:960px){.dash-2col{grid-template-columns:minmax(0,1fr)}}
+  @media (max-width:640px){#tab-docs table{min-width:560px}}
 
   /* ---------- 表单 ---------- */
   label{display:block;font-size:12.5px;color:var(--muted);margin-bottom:5px}
@@ -803,7 +804,42 @@
         <code>claude-sonnet-4</code>、<code>dall-e-3</code> 等常见名字会自动映射到对应能力。
       </div>
 
-      <h4>2. 对话 / 写代码</h4>
+      <h4>2. 通用约定</h4>
+      <div class="tblwrap"><table>
+        <thead><tr><th>项目</th><th>约定</th></tr></thead>
+        <tbody>
+          <tr><td>鉴权</td><td>请求头 Authorization: Bearer &lt;API Key&gt;；/healthz、/readyz、/v1/media/* 不需要鉴权。</td></tr>
+          <tr><td>请求体</td><td>UTF-8 JSON；只有 /v1/images/edits 额外支持 multipart/form-data。</td></tr>
+          <tr><td>模型</td><td>model 可选。对话默认 muse-spark，生图默认 muse-image，视频默认 muse-video，语音默认 muse-voice。</td></tr>
+          <tr><td>错误</td><td>/v1/* 返回 {"error":{"message","type","param","code"}}；字段校验失败返回 422。</td></tr>
+          <tr><td>异步任务</td><td>视频和异步图片接口先返回 id，再轮询 GET；重复轮询不会重复生成。</td></tr>
+          <tr><td>媒体</td><td>生成结果写入媒体库，可通过 /v1/media/{name} 下载，无需鉴权。</td></tr>
+          <tr><td>参考素材</td><td>最多 10 个；单个不超过 40 MiB；合计不超过 100 MiB；支持 URL、Data URL、Base64 和对象形式。</td></tr>
+          <tr><td>System Prompt</td><td>管理页开启全局 System Prompt 后，会附加到对话、Responses、生图、视频和语音请求的提示词。</td></tr>
+        </tbody>
+      </table></div>
+
+      <h4>3. 接口总览</h4>
+      <div class="tblwrap"><table>
+        <thead><tr><th>方法</th><th>路径</th><th>用途</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">GET</td><td class="mono">/healthz</td><td>存活检查，无需鉴权。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/readyz</td><td>就绪检查，返回可用账号数与浏览器状态。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/v1/models</td><td>可用模型列表。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/v1/chat/completions</td><td>对话与代码，支持 SSE 流式输出。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/v1/responses</td><td>Responses API，支持 SSE 流式输出。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/v1/images/generations</td><td>文生图或参考图生图，可同步或异步。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/v1/images/edits</td><td>图像编辑，支持 multipart 文件上传。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/v1/images/tasks</td><td>创建异步生图任务。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/v1/images/tasks/{task_id}</td><td>查询生图任务状态与结果。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/v1/videos</td><td>创建视频任务，别名 /v1/videos/generations。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/v1/videos/{task_id}</td><td>查询视频任务状态与结果。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/v1/audio/speech</td><td>语音合成，返回音频二进制。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/v1/media/{name}</td><td>下载生成的媒体文件，无需鉴权。</td></tr>
+        </tbody>
+      </table></div>
+
+      <h4>4. 对话与代码（Chat Completions）</h4>
       <pre class="code"><span class="cp" onclick="cp(this)">复制</span><span class="c"># 非流式</span>
 curl -X POST <span class="s">"BASE/v1/chat/completions"</span> \
   -H <span class="s">"Authorization: Bearer $MUSE2API_KEY"</span> \
@@ -812,7 +848,96 @@ curl -X POST <span class="s">"BASE/v1/chat/completions"</span> \
 
 <span class="c"># 流式：加 "stream":true，返回标准 SSE（data: {...} / data: [DONE]）</span></pre>
 
-      <h4>3. 生图（curl）</h4>
+      <h4>4.1 请求字段</h4>
+      <div class="tblwrap"><table>
+        <thead><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">model</td><td>string</td><td>否</td><td>默认 muse-spark；常见模型名会自动映射到真实能力。</td></tr>
+          <tr><td class="mono">messages</td><td>array</td><td>是</td><td>消息数组；为空时可以改用顶层 prompt。</td></tr>
+          <tr><td class="mono">messages[].role</td><td>string</td><td>是</td><td>user、assistant、system、developer 或 tool。</td></tr>
+          <tr><td class="mono">messages[].content</td><td>string / array</td><td>是</td><td>文本或分段内容；image_url 段只保留 [图片] 占位文字。</td></tr>
+          <tr><td class="mono">messages[].tool_calls</td><td>array</td><td>否</td><td>assistant 请求调用工具时原样带入。</td></tr>
+          <tr><td class="mono">messages[].tool_call_id</td><td>string</td><td>否</td><td>tool 消息对应的调用 ID。</td></tr>
+          <tr><td class="mono">stream</td><td>boolean</td><td>否</td><td>设为 true 返回 SSE 流；默认 false。</td></tr>
+          <tr><td class="mono">timeout</td><td>integer</td><td>否</td><td>等待上限（秒），默认 300。</td></tr>
+          <tr><td class="mono">prompt</td><td>string</td><td>否</td><td>顶层提示词；messages 为空时作为用户消息。</td></tr>
+          <tr><td class="mono">temperature</td><td>number</td><td>否</td><td>接收但 muse 不区分，不影响结果。</td></tr>
+          <tr><td class="mono">max_tokens</td><td>integer</td><td>否</td><td>接收但 muse 不区分，不影响结果。</td></tr>
+          <tr><td class="mono">tools</td><td>array</td><td>否</td><td>接收；只有 MUSE2API_TOOL_PROTOCOL=1 时才注入工具协议。</td></tr>
+          <tr><td class="mono">tool_choice</td><td>object</td><td>否</td><td>接收但忽略。</td></tr>
+          <tr><td class="mono">response_format</td><td>object</td><td>否</td><td>接收但忽略，返回始终是文本。</td></tr>
+          <tr><td class="mono">stream_options</td><td>object</td><td>否</td><td>include_usage=true 时在 [DONE] 之前补一个 usage 分片。</td></tr>
+        </tbody>
+      </table></div>
+
+      <h4>4.2 返回</h4>
+      <pre class="code"><span class="cp" onclick="cp(this)">复制</span># Non-stream response
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion",
+  "created": 1790148495,
+  "model": "muse-spark",
+  "choices": [{
+    "index": 0,
+    "finish_reason": "stop",
+    "message": {"role": "assistant", "content": "..."}
+  }],
+  "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+}
+# Muse does not expose token counts, so usage values are always 0.
+# When tools are enabled and the model calls one:
+# finish_reason = "tool_calls"; message.tool_calls = [{id, type, function:{name, arguments}}]
+
+# Stream response (stream=true), one SSE event per line:
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello"}}]}
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}
+data: [DONE]
+# The usage chunk only appears with stream_options.include_usage=true.
+# Upstream failures inside a stream are emitted as:
+data: {"error":{"message":"...","type":"server_error","code":502}}</pre>
+
+      <h4>4.3 Responses API</h4>
+      <div class="hint">
+        兼容新版 Codex 默认使用的 Responses API。文本进、文本出，支持 SSE 事件流。
+      </div>
+      <div class="tblwrap"><table>
+        <thead><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">model</td><td>string</td><td>否</td><td>默认 muse-spark。</td></tr>
+          <tr><td class="mono">input</td><td>string / array</td><td>是</td><td>字符串，或 item 数组；支持 message、input_text、function_call 和 function_call_output。</td></tr>
+          <tr><td class="mono">instructions</td><td>string</td><td>否</td><td>作为 system 指令并入提示词。</td></tr>
+          <tr><td class="mono">stream</td><td>boolean</td><td>否</td><td>设为 true 返回 SSE 事件流。</td></tr>
+          <tr><td class="mono">timeout</td><td>integer</td><td>否</td><td>等待上限（秒），默认 300。</td></tr>
+          <tr><td class="mono">max_output_tokens</td><td>integer</td><td>否</td><td>接收但忽略。</td></tr>
+          <tr><td class="mono">tools</td><td>array</td><td>否</td><td>接收但忽略。</td></tr>
+          <tr><td class="mono">store</td><td>boolean</td><td>否</td><td>接收但忽略；服务端不保存对话。</td></tr>
+        </tbody>
+      </table></div>
+      <pre class="code"><span class="cp" onclick="cp(this)">复制</span># Non-stream response
+{
+  "id": "resp_...", "object": "response", "created_at": 1790148495,
+  "status": "completed", "model": "muse-spark",
+  "output": [{
+    "type": "message", "id": "msg_...", "role": "assistant", "status": "completed",
+    "content": [{"type": "output_text", "text": "...", "annotations": []}]
+  }],
+  "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+}
+
+# Stream events (stream=true), in order:
+event: response.created
+event: response.output_item.added
+event: response.content_part.added
+event: response.output_text.delta        # repeated, one delta per chunk
+event: response.output_text.done
+event: response.output_item.done
+event: response.completed
+# Failures end with: event: response.failed
+# Each event also carries a JSON "type" field and its payload.</pre>
+
+      <h4>5. 生图（Images Generations）</h4>
       <pre class="code"><span class="cp" onclick="cp(this)">复制</span>curl -X POST <span class="s">"BASE/v1/images/generations"</span> \
   -H <span class="s">"Authorization: Bearer $MUSE2API_KEY"</span> \
   -H <span class="s">"Content-Type: application/json"</span> \
@@ -827,7 +952,84 @@ curl -X POST <span class="s">"BASE/v1/chat/completions"</span> \
 <span class="c"># url 是完整绝对地址，可直接给下游渲染 / 下载；/v1/media/* 无需鉴权。</span>
 <span class="c"># 想要 base64 就传 "response_format":"b64_json"。</span></pre>
 
-      <h4>4. 生视频（curl，异步）</h4>
+      <h4>5.1 请求字段</h4>
+      <div class="tblwrap"><table>
+        <thead><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">prompt</td><td>string</td><td>是</td><td>生成或编辑指令。</td></tr>
+          <tr><td class="mono">model</td><td>string</td><td>否</td><td>默认 muse-image。</td></tr>
+          <tr><td class="mono">images</td><td>array</td><td>否</td><td>有序参考素材，可混放图片、视频、音频和文档。</td></tr>
+          <tr><td class="mono">videos</td><td>array</td><td>否</td><td>视频参考素材。</td></tr>
+          <tr><td class="mono">audios</td><td>array</td><td>否</td><td>音频参考素材。</td></tr>
+          <tr><td class="mono">files</td><td>array</td><td>否</td><td>文档参考素材，支持 pdf、doc、docx。</td></tr>
+          <tr><td class="mono">image</td><td>string / object</td><td>否</td><td>旧版单图字段；不能与 images 同时使用。</td></tr>
+          <tr><td class="mono">reference_image</td><td>string</td><td>否</td><td>旧版单图字段；不能与 images 同时使用。</td></tr>
+          <tr><td class="mono">size</td><td>string</td><td>否</td><td>画面比例或尺寸，例如 1:1、16:9、9:16、4:3。</td></tr>
+          <tr><td class="mono">aspect_ratio</td><td>string</td><td>否</td><td>与 size 等价的画面比例字段。</td></tr>
+          <tr><td class="mono">response_format</td><td>string</td><td>否</td><td>url 或 b64_json；默认 url。</td></tr>
+          <tr><td class="mono">timeout</td><td>integer</td><td>否</td><td>等待上限（秒），1 到 600，默认 240。</td></tr>
+          <tr><td class="mono">extra</td><td>string</td><td>否</td><td>追加到提示词末尾的补充要求。</td></tr>
+          <tr><td class="mono">async</td><td>boolean</td><td>否</td><td>设为 true 时改为异步任务并返回 id。</td></tr>
+        </tbody>
+      </table></div>
+      <div class="hint" style="margin-top:6px">
+        返回沿用 OpenAI 图片格式：data[0] 含 revised_prompt、url、size、kind、bytes；response_format=b64_json 时用 b64_json 代替 url。
+      </div>
+
+      <h4>6. 图像编辑（Images Edits）</h4>
+      <div class="hint">
+        同时支持 multipart/form-data 和 application/json。multipart 适合直接上传本地文件，同名文件字段可以重复提交。
+      </div>
+      <div class="tblwrap"><table>
+        <thead><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">prompt</td><td>string</td><td>否</td><td>编辑指令；留空时使用默认指令。</td></tr>
+          <tr><td class="mono">model</td><td>string</td><td>否</td><td>默认 muse-image。</td></tr>
+          <tr><td class="mono">image</td><td>file</td><td>否</td><td>可重复提交，每个字段一个文件。</td></tr>
+          <tr><td class="mono">video</td><td>file</td><td>否</td><td>可重复提交的视频参考。</td></tr>
+          <tr><td class="mono">audio</td><td>file</td><td>否</td><td>可重复提交的音频参考。</td></tr>
+          <tr><td class="mono">file</td><td>file</td><td>否</td><td>可重复提交的文档参考。</td></tr>
+          <tr><td class="mono">size</td><td>string</td><td>否</td><td>画面比例或尺寸。</td></tr>
+          <tr><td class="mono">aspect_ratio</td><td>string</td><td>否</td><td>画面比例。</td></tr>
+          <tr><td class="mono">response_format</td><td>string</td><td>否</td><td>url 或 b64_json。</td></tr>
+          <tr><td class="mono">timeout</td><td>integer</td><td>否</td><td>等待上限（秒）。</td></tr>
+          <tr><td class="mono">async</td><td>boolean</td><td>否</td><td>改为异步任务并返回 id。</td></tr>
+        </tbody>
+      </table></div>
+      <div class="hint" style="margin-top:6px">
+        JSON 方式与生图接口相同，使用 images、videos、audios、files、image、image_url、reference_image、size、aspect_ratio、response_format、timeout、async。返回格式也与生图相同。
+      </div>
+
+      <h4>7. 生图异步任务（Images Tasks）</h4>
+      <div class="hint">
+        适合反向代理或 CDN 会截断长请求的场景。POST 返回 202 和任务 id，之后只轮询 GET，不会重复生成。
+      </div>
+      <div class="tblwrap"><table>
+        <thead><tr><th>项目</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>请求体</td><td>与 /v1/images/generations 完全相同。</td></tr>
+          <tr><td>Idempotency-Key</td><td>可选请求头；相同输入返回原任务，同一键配不同输入返回 409。</td></tr>
+        </tbody>
+      </table></div>
+      <pre class="code"><span class="cp" onclick="cp(this)">复制</span># POST /v1/images/tasks → 202
+{"id":"task_...","task_id":"task_...","object":"image.task","status":"queued","progress":0,"created_at":1790148495}
+
+# GET /v1/images/tasks/task_... (completed)
+{
+  "id": "task_...", "object": "task", "kind": "image",
+  "prompt": "...", "api_prompt": "...", "status": "completed", "progress": 100,
+  "created_at": 1790148495, "updated_at": 1790148520,
+  "result": {"filename": "img_....webp", "size": 23860, "kind": "image",
+             "url": "BASE/v1/media/img_....webp"},
+  "data": [{"revised_prompt": "...", "url": "BASE/v1/media/img_....webp",
+            "size": "1:1", "kind": "image", "bytes": 23860}],
+  "error": null, "account": "acc_...", "elapsed": 24.3
+}
+# status: queued | processing | completed | failed
+# When failed: error holds the reason and data is absent.
+# Queue full returns 429; at most 8 image tasks can be unfinished.</pre>
+
+      <h4>8. 生视频（Videos）</h4>
       <pre class="code"><span class="cp" onclick="cp(this)">复制</span><span class="c"># ① 创建任务</span>
 curl -X POST <span class="s">"BASE/v1/videos"</span> \
   -H <span class="s">"Authorization: Bearer $MUSE2API_KEY"</span> \
@@ -839,17 +1041,122 @@ curl -X POST <span class="s">"BASE/v1/videos"</span> \
 curl <span class="s">"BASE/v1/videos/task_xxx"</span> -H <span class="s">"Authorization: Bearer $MUSE2API_KEY"</span>
 <span class="c"># → {"status":"succeeded","result":{"url":"/v1/media/xxx.mp4"}}</span></pre>
 
-      <h4>5. 语音合成（curl，二进制）</h4>
+      <h4>8.1 请求字段</h4>
+      <div class="tblwrap"><table>
+        <thead><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">prompt</td><td>string</td><td>是</td><td>视频内容描述。</td></tr>
+          <tr><td class="mono">model</td><td>string</td><td>否</td><td>默认 muse-video。</td></tr>
+          <tr><td class="mono">duration</td><td>integer</td><td>否</td><td>目标时长（秒），常用 5、6、8、10；默认 6。</td></tr>
+          <tr><td class="mono">size</td><td>string</td><td>否</td><td>16:9 横屏或 9:16 竖屏。</td></tr>
+          <tr><td class="mono">aspect_ratio</td><td>string</td><td>否</td><td>与 size 等价的画面比例字段。</td></tr>
+          <tr><td class="mono">resolution</td><td>string</td><td>否</td><td>画质描述，例如 720p。</td></tr>
+          <tr><td class="mono">image</td><td>string / object</td><td>否</td><td>单张参考图，作为视频首帧。</td></tr>
+          <tr><td class="mono">image_url</td><td>string / object</td><td>否</td><td>旧版单图字段，作为首帧。</td></tr>
+          <tr><td class="mono">reference_image</td><td>string</td><td>否</td><td>旧版单图字段，作为首帧。</td></tr>
+          <tr><td class="mono">images</td><td>array</td><td>否</td><td>多张参考图；第一张作为主要起始画面。</td></tr>
+          <tr><td class="mono">videos</td><td>array</td><td>否</td><td>视频参考素材。</td></tr>
+          <tr><td class="mono">audios</td><td>array</td><td>否</td><td>音频参考素材。</td></tr>
+          <tr><td class="mono">files</td><td>array</td><td>否</td><td>文档参考素材。</td></tr>
+          <tr><td class="mono">timeout</td><td>integer</td><td>否</td><td>等待上限（秒），默认 600。</td></tr>
+          <tr><td class="mono">extra</td><td>string</td><td>否</td><td>追加到提示词末尾的补充要求。</td></tr>
+        </tbody>
+      </table></div>
+
+      <h4>8.2 返回</h4>
+      <pre class="code"><span class="cp" onclick="cp(this)">复制</span># POST /v1/videos → 200
+{"id":"task_...","task_id":"task_...","object":"video.task","status":"queued","progress":10,"created_at":1790148495}
+
+# GET /v1/videos/task_... (completed)
+{
+  "id": "task_...", "object": "task", "kind": "video",
+  "prompt": "...", "api_prompt": "...", "status": "completed", "progress": 100,
+  "created_at": 1790148495, "updated_at": 1790148615,
+  "url": "BASE/v1/media/vid_....mp4",
+  "video": {"url": "BASE/v1/media/vid_....mp4"},
+  "result": {"url": "BASE/v1/media/vid_....mp4", "filename": "vid_....mp4",
+             "bytes": 1843200, "kind": "video"},
+  "error": null, "account": "acc_...", "elapsed": 96.4
+}
+# status: queued | processing | completed | failed
+# progress is a milestone estimate; Muse does not expose a real percentage.
+# failed responses carry error and no url.</pre>
+
+      <h4>9. 语音合成（Audio Speech）</h4>
       <pre class="code"><span class="cp" onclick="cp(this)">复制</span>curl -X POST <span class="s">"BASE/v1/audio/speech"</span> \
   -H <span class="s">"Authorization: Bearer $MUSE2API_KEY"</span> \
   -H <span class="s">"Content-Type: application/json"</span> \
-  -d <span class="s">'{"model":"muse-voice","input":"Xin chào, đây là bản thử.","voice":"自然清晰的女声","response_format":"mp3"}'</span> \
+  -d <span class="s">'{"model":"muse-voice","input":"Xin chào, đây là bản thử.","voice":"natural clear female voice","response_format":"mp3"}'</span> \
   --output speech.mp3
 
 <span class="c"># 直接返回音频字节：Content-Type: audio/mpeg，文件同时存入媒体库。</span>
 <span class="c"># X-Muse-Audio-Format 是实际格式；请求 wav/m4a 等格式时，服务端装了 ffmpeg 会自动转码。</span></pre>
 
-      <h4>6. Python（openai SDK 兼容）</h4>
+      <h4>9.1 请求字段</h4>
+      <div class="tblwrap"><table>
+        <thead><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">model</td><td>string</td><td>否</td><td>默认 muse-voice。</td></tr>
+          <tr><td class="mono">input</td><td>string</td><td>是</td><td>要朗读的文本；只逐字朗读这段内容。</td></tr>
+          <tr><td class="mono">voice</td><td>string</td><td>否</td><td>音色描述，自由文本；默认取服务端配置。</td></tr>
+          <tr><td class="mono">response_format</td><td>string</td><td>否</td><td>mp3、wav、m4a、ogg、flac、aac、opus 或 pcm；默认 mp3。</td></tr>
+          <tr><td class="mono">speed</td><td>number</td><td>否</td><td>语速，0.25 到 4.0；默认 1。</td></tr>
+          <tr><td class="mono">instructions</td><td>string</td><td>否</td><td>额外要求，例如语气、停顿、背景音。</td></tr>
+          <tr><td class="mono">timeout</td><td>integer</td><td>否</td><td>等待上限（秒），1 到 1200，默认 180。</td></tr>
+        </tbody>
+      </table></div>
+
+      <h4>9.2 返回</h4>
+      <div class="hint">
+        响应体就是音频二进制，同时文件会写入媒体库。服务端装有 ffmpeg 时按请求格式转码，否则返回 Muse 原生格式。
+      </div>
+      <div class="tblwrap"><table>
+        <thead><tr><th>响应头</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">Content-Type</td><td>音频 MIME，例如 audio/mpeg。</td></tr>
+          <tr><td class="mono">Content-Disposition</td><td>inline 加文件名，形如 speech-xxxx.mp3。</td></tr>
+          <tr><td class="mono">X-Muse-Media-Name</td><td>媒体库中的原始文件名。</td></tr>
+          <tr><td class="mono">X-Muse-Audio-Format</td><td>实际返回格式；转码失败时可能与请求格式不同。</td></tr>
+          <tr><td class="mono">Cache-Control</td><td>固定为 no-store。</td></tr>
+        </tbody>
+      </table></div>
+
+      <h4>10. 其他接口</h4>
+      <pre class="code"><span class="cp" onclick="cp(this)">复制</span># GET /v1/models
+{"object":"list","data":[
+  {"id":"muse-spark","object":"model","owned_by":"muse","description":"..."},
+  {"id":"muse-image","object":"model","owned_by":"muse","description":"..."},
+  {"id":"muse-video","object":"model","owned_by":"muse","description":"..."},
+  {"id":"muse-voice","object":"model","owned_by":"muse","description":"..."}
+]}
+
+# GET /healthz (no auth)
+{"status":"ok","time":1790148495}
+
+# GET /readyz (no auth)
+{"status":"ready","accounts":2,"browser_running":true}
+# status is "no_account" when the pool has no enabled account.
+
+# GET /v1/media/{name} (no auth)
+# Returns the file bytes with its media type.
+# 404 when missing; 400 for names containing /, \ or ..</pre>
+
+      <h4>11. 错误与状态码</h4>
+      <div class="tblwrap"><table>
+        <thead><tr><th>状态码</th><th>含义</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">400</td><td>参数、参考素材或输入内容不合法。</td></tr>
+          <tr><td class="mono">401</td><td>API Key 缺失或无效，或上游会话认证失败。</td></tr>
+          <tr><td class="mono">404</td><td>任务或媒体文件不存在。</td></tr>
+          <tr><td class="mono">409</td><td>幂等键复用，但请求内容与原任务不同。</td></tr>
+          <tr><td class="mono">422</td><td>字段类型校验失败，响应里带字段位置。</td></tr>
+          <tr><td class="mono">429</td><td>生图队列已满，稍后重试。</td></tr>
+          <tr><td class="mono">500</td><td>服务内部错误。</td></tr>
+          <tr><td class="mono">502</td><td>Muse 上游生成失败或超时。</td></tr>
+        </tbody>
+      </table></div>
+
+      <h4>12. Python（openai SDK 兼容）</h4>
       <pre class="code"><span class="cp" onclick="cp(this)">复制</span><span class="k">from</span> openai <span class="k">import</span> OpenAI
 <span class="k">import</span> time
 
@@ -872,35 +1179,59 @@ t = requests.post(<span class="s">"BASE/v1/videos"</span>, json={<span class="s"
 
 <span class="c"># 语音合成（直接写文件）</span>
 speech = client.audio.speech.create(
-    model=<span class="s">"muse-voice"</span>, voice=<span class="s">"自然清晰的女声"</span>, input=<span class="s">"Xin chào"</span>)
+    model=<span class="s">"muse-voice"</span>, voice=<span class="s">"natural clear female voice"</span>, input=<span class="s">"Xin chào"</span>)
 speech.write_to_file(<span class="s">"speech.mp3"</span>)</pre>
 
-      <h4>7. 管理接口</h4>
+      <h4>13. 管理接口</h4>
+      <div class="hint">
+        管理接口全部需要鉴权，返回 JSON；控制台页面使用同一套接口。下面只列路径与用途，字段细节以控制台行为为准。
+      </div>
       <div class="tblwrap"><table>
         <thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead>
         <tbody>
-          <tr><td class="mono">GET</td><td class="mono">/admin/status</td><td>服务总览 + 账号池 + 最近任务</td></tr>
-          <tr><td class="mono">GET</td><td class="mono">/admin/accounts</td><td>账号列表</td></tr>
-          <tr><td class="mono">POST</td><td class="mono">/admin/accounts</td><td>添加账号（单条 / batch 批量文本）</td></tr>
-          <tr><td class="mono">PATCH</td><td class="mono">/admin/accounts/{id}</td><td>改标签 / 启用禁用</td></tr>
-          <tr><td class="mono">DELETE</td><td class="mono">/admin/accounts/{id}</td><td>删除账号</td></tr>
-          <tr><td class="mono">POST</td><td class="mono">/admin/accounts/{id}/test</td><td>真实校验会话有效性（顺带刷新额度）</td></tr>
-          <tr><td class="mono">POST</td><td class="mono">/admin/accounts/{id}/quota</td><td>实时读取该账号剩余额度</td></tr>
-          <tr><td class="mono">POST</td><td class="mono">/admin/accounts/{id}/cookies</td><td>更新该账号 cookie</td></tr>
-          <tr><td class="mono">GET</td><td class="mono">/admin/tasks</td><td>任务记录</td></tr>
-          <tr><td class="mono">GET</td><td class="mono">/admin/media</td><td>媒体库列表</td></tr>
-          <tr><td class="mono">POST</td><td class="mono">/admin/media/delete</td><td>批量删除媒体文件</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/admin/status</td><td>服务总览、账号池与最近任务。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/admin/dashboard</td><td>仪表盘数据：KPI、额度、告警、7 天趋势、最近任务与媒体。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/admin/settings</td><td>读取全局 System Prompt 设置与默认内容。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/settings</td><td>保存 System Prompt 开关与内容。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/admin/accounts</td><td>账号列表。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/accounts</td><td>添加账号，支持单条 cookie、cookie_header 与 batch 批量文本。</td></tr>
+          <tr><td class="mono">PATCH</td><td class="mono">/admin/accounts/{id}</td><td>修改标签、启用状态或代理。</td></tr>
+          <tr><td class="mono">DELETE</td><td class="mono">/admin/accounts/{id}</td><td>删除账号。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/accounts/{id}/test</td><td>真实校验会话有效性，顺带刷新额度。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/accounts/{id}/proxy/test</td><td>测试该账号代理的连通性与出口。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/accounts/{id}/relogin</td><td>用新 cookie 重新登录该账号。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/relogin</td><td>批量重新登录。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/accounts/{id}/quota</td><td>实时读取该账号剩余额度。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/quota</td><td>刷新全部账号额度。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/accounts/{id}/cookies</td><td>更新该账号 cookie。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/accounts/keepalive</td><td>对所有账号执行一次保活。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/accounts/{id}/keepalive</td><td>对单个账号执行保活。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/admin/keepalive/status</td><td>后台保活状态与上次结果。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/admin/apikey</td><td>读取当前 API Key。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/apikey/rotate</td><td>重新生成 API Key，旧 Key 立即失效。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/admin/tasks</td><td>任务记录。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/tasks/clear</td><td>清空任务记录，可保留最近若干条。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/admin/media</td><td>媒体库列表。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/media/delete</td><td>批量删除媒体文件。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/admin/cookie-helper</td><td>输出 cookie 助手脚本。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/admin/extension</td><td>下载浏览器扩展 ZIP。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/admin/extension/files</td><td>扩展文件清单。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/admin/update/check</td><td>检查新版本。</td></tr>
+          <tr><td class="mono">GET</td><td class="mono">/admin/repo/status</td><td>本地仓库与远程仓库状态。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/update/upgrade</td><td>在线升级到最新版本。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/repo/pull</td><td>从 Git 远程拉取更新。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/admin/repo/push</td><td>提交并推送本地改动。</td></tr>
         </tbody>
       </table></div>
 
-      <h4>8. 鉴权</h4>
+      <h4>14. 鉴权</h4>
       <div class="hint" style="margin:0" data-i18n="auth-hint">
         除 <code>/healthz</code>、<code>/readyz</code>、<code>/v1/media/*</code> 外，其余接口均需
         <code>Authorization: Bearer &lt;API Key&gt;</code>。API Key 在服务器
         <code>/opt/muse2api/.env</code> 的 <code>MUSE2API_KEY</code> 中配置。
       </div>
 
-      <h4>9. 接入各类客户端 / 智能体</h4>
+      <h4>15. 接入各类客户端 / 智能体</h4>
       <div class="hint">
         凡是支持「自定义 OpenAI 兼容端点」的客户端，都只填三个值就能用：
       </div>
@@ -1209,31 +1540,32 @@ const I18N_EN = {
   "文本 / 代码对话（支持流式）": "Text / code chat (streaming supported)",
   "文生图 / 图像编辑": "Text-to-image / image editing",
   "文生视频 / 图生视频": "Text-to-video / image-to-video",
-  "2. 对话 / 写代码": "2. Chat / coding",
+  "4. 对话与代码（Chat Completions）": "4. Chat and code (Chat Completions)",
   "# 非流式": "# Non-streaming",
   "'{\"model\":\"muse-spark\",\"messages\":[{\"role\":\"user\",\"content\":\"写一个 Python 快排\"}]}'": "'{\"model\":\"muse-spark\",\"messages\":[{\"role\":\"user\",\"content\":\"Write a quicksort in Python\"}]}'",
   "# 流式：加 \"stream\":true，返回标准 SSE（data: {...} / data: [DONE]）": "# Streaming: add \"stream\":true to get standard SSE (data: {...} / data: [DONE])",
-  "3. 生图（curl）": "3. Image generation (curl)",
+  "5. 生图（Images Generations）": "5. Image generation (Images Generations)",
   "'{\"prompt\":\"一只戴宇航头盔的柴犬\",\"size\":\"1:1\",\"response_format\":\"url\"}'": "'{\"prompt\":\"A Shiba Inu wearing a space helmet\",\"size\":\"1:1\",\"response_format\":\"url\"}'",
   "# 返回": "# Response",
   "\"一只戴宇航头盔的柴犬\"": "\"A Shiba Inu wearing a space helmet\"",
   "# url 是完整绝对地址，可直接给下游渲染 / 下载；/v1/media/* 无需鉴权。": "# url is a full absolute address that downstream apps can render / download directly; /v1/media/* needs no auth.",
   "# 想要 base64 就传 \"response_format\":\"b64_json\"。": "# For base64, pass \"response_format\":\"b64_json\".",
-  "4. 生视频（curl，异步）": "4. Video generation (curl, async)",
+  "8. 生视频（Videos）": "8. Video generation (Videos)",
   "# ① 创建任务": "# ① Create the task",
   "'{\"prompt\":\"一只小猫在草地上走动\",\"duration\":5,\"size\":\"16:9\"}'": "'{\"prompt\":\"A kitten walking on the grass\",\"duration\":5,\"size\":\"16:9\"}'",
   "# ② 轮询结果": "# ② Poll for the result",
-  "5. 语音合成（curl，二进制）": "5. Speech synthesis (curl, binary)",
+  "9. 语音合成（Audio Speech）": "9. Speech synthesis (Audio Speech)",
   "# 直接返回音频字节：Content-Type: audio/mpeg，文件同时存入媒体库。": "# Returns audio bytes directly with Content-Type: audio/mpeg; the file is also saved to the media library.",
   "# X-Muse-Audio-Format 是实际格式；请求 wav/m4a 等格式时，服务端装了 ffmpeg 会自动转码。": "# X-Muse-Audio-Format is the actual format. If ffmpeg is installed, requests for wav/m4a and similar are transcoded automatically.",
-  "6. Python（openai SDK 兼容）": "6. Python (openai SDK compatible)",
+  "12. Python（openai SDK 兼容）": "12. Python (openai SDK compatible)",
   "# 生图": "# Image generation",
   "# 生视频（走原生接口，因为是异步任务）": "# Video generation (uses the native endpoint because it is asynchronous)",
   "\"小猫走动\"": "\"A kitten walking\"",
   "# 语音合成（直接写文件）": "# Speech synthesis (writes straight to a file)",
   "文本转语音（TTS）": "Text to speech (TTS)",
+  "POST /v1/audio/speech（二进制）": "POST /v1/audio/speech (binary)",
   "语音合成 / TTS 客户端": "Speech synthesis / TTS clients",
-  "7. 管理接口": "7. Admin API",
+  "13. 管理接口": "13. Admin API",
   "方法": "Method",
   "路径": "Path",
   "说明": "Description",
@@ -1246,8 +1578,8 @@ const I18N_EN = {
   "更新该账号 cookie": "Update this account's cookies",
   "媒体库列表": "Media library list",
   "批量删除媒体文件": "Delete media files in batch",
-  "8. 鉴权": "8. Authentication",
-  "9. 接入各类客户端 / 智能体": "9. Connecting clients / agents",
+  "14. 鉴权": "14. Authentication",
+  "15. 接入各类客户端 / 智能体": "15. Connecting clients / agents",
   "凡是支持「自定义 OpenAI 兼容端点」的客户端，都只填三个值就能用：": "Any client that supports a \"custom OpenAI-compatible endpoint\" works with just three values:",
   "配置项": "Setting",
   "填什么": "Value",
@@ -1497,6 +1829,169 @@ const I18N_EN = {
   "额外": "Extra",
   "✓ 会话有效，可正常生成": "✓ Session valid; generation should work",
   "✗ 保活失败: 未知错误": "✗ Keep-alive failed: unknown error",
+  /* ---------- Integration Docs: full API reference ---------- */
+  "2. 通用约定": "2. Conventions",
+  "3. 接口总览": "3. Endpoint overview",
+  "6. 图像编辑（Images Edits）": "6. Image editing (Images Edits)",
+  "7. 生图异步任务（Images Tasks）": "7. Async image tasks (Images Tasks)",
+  "10. 其他接口": "10. Other endpoints",
+  "11. 错误与状态码": "11. Errors and status codes",
+  "4.1 请求字段": "4.1 Request fields",
+  "4.2 返回": "4.2 Response",
+  "兼容新版 Codex 默认使用的 Responses API。文本进、文本出，支持 SSE 事件流。": "Compatible with the Responses API used by default in newer Codex builds. Text in, text out, with SSE event streams.",
+  "默认 muse-spark。": "Defaults to muse-spark.",
+  "字符串，或 item 数组；支持 message、input_text、function_call 和 function_call_output。": "A string, or an item array; message, input_text, function_call and function_call_output are supported.",
+  "作为 system 指令并入提示词。": "Merged into the prompt as a system instruction.",
+  "设为 true 返回 SSE 事件流。": "Set true to receive an SSE event stream.",
+  "接收但忽略；服务端不保存对话。": "Accepted and ignored; the server keeps no conversation state.",
+  "5.1 请求字段": "5.1 Request fields",
+  "8.1 请求字段": "8.1 Request fields",
+  "8.2 返回": "8.2 Response",
+  "9.1 请求字段": "9.1 Request fields",
+  "9.2 返回": "9.2 Response",
+  "项目": "Item",
+  "约定": "Rule",
+  "鉴权": "Authentication",
+  "请求体": "Request body",
+  "模型": "Model",
+  "错误": "Errors",
+  "异步任务": "Async tasks",
+  "媒体": "Media",
+  "参考素材": "Reference media",
+  "字段": "Field",
+  "必填": "Required",
+  "否": "No",
+  "响应头": "Header",
+  "状态码": "Status",
+  "含义": "Meaning",
+  "请求头 Authorization: Bearer <API Key>；/healthz、/readyz、/v1/media/* 不需要鉴权。": "Header Authorization: Bearer <API Key>; /healthz, /readyz and /v1/media/* need no auth.",
+  "UTF-8 JSON；只有 /v1/images/edits 额外支持 multipart/form-data。": "UTF-8 JSON; only /v1/images/edits also accepts multipart/form-data.",
+  "model 可选。对话默认 muse-spark，生图默认 muse-image，视频默认 muse-video，语音默认 muse-voice。": "model is optional. Defaults: muse-spark for chat, muse-image for images, muse-video for videos, muse-voice for speech.",
+  "/v1/* 返回 {\"error\":{\"message\",\"type\",\"param\",\"code\"}}；字段校验失败返回 422。": "/v1/* returns {\"error\":{\"message\",\"type\",\"param\",\"code\"}}; validation failures return 422.",
+  "视频和异步图片接口先返回 id，再轮询 GET；重复轮询不会重复生成。": "Video and async image endpoints return an id first, then you poll with GET; polling never triggers another generation.",
+  "生成结果写入媒体库，可通过 /v1/media/{name} 下载，无需鉴权。": "Results are saved to the media library and can be downloaded from /v1/media/{name} without auth.",
+  "最多 10 个；单个不超过 40 MiB；合计不超过 100 MiB；支持 URL、Data URL、Base64 和对象形式。": "Up to 10 items; each at most 40 MiB; 100 MiB in total; URLs, Data URLs, Base64 and object forms are accepted.",
+  "管理页开启全局 System Prompt 后，会附加到对话、Responses、生图、视频和语音请求的提示词。": "When the global System Prompt is enabled in the console, it is prepended to chat, Responses, image, video and speech prompts.",
+  "存活检查，无需鉴权。": "Liveness check; no auth.",
+  "就绪检查，返回可用账号数与浏览器状态。": "Readiness check; returns the enabled account count and browser state.",
+  "可用模型列表。": "List of available models.",
+  "对话与代码，支持 SSE 流式输出。": "Chat and code with SSE streaming.",
+  "Responses API，支持 SSE 流式输出。": "Responses API with SSE streaming.",
+  "文生图或参考图生图，可同步或异步。": "Text-to-image or reference-to-image; sync or async.",
+  "图像编辑，支持 multipart 文件上传。": "Image editing with multipart file upload.",
+  "创建异步生图任务。": "Create an async image task.",
+  "查询生图任务状态与结果。": "Get an image task's status and result.",
+  "创建视频任务，别名 /v1/videos/generations。": "Create a video task; alias /v1/videos/generations.",
+  "查询视频任务状态与结果。": "Get a video task's status and result.",
+  "语音合成，返回音频二进制。": "Speech synthesis; returns audio bytes.",
+  "下载生成的媒体文件，无需鉴权。": "Download generated media; no auth.",
+  "默认 muse-spark；常见模型名会自动映射到真实能力。": "Defaults to muse-spark; common model names are mapped to the matching capability.",
+  "消息数组；为空时可以改用顶层 prompt。": "Message array; when empty, use the top-level prompt instead.",
+  "user、assistant、system、developer 或 tool。": "user, assistant, system, developer or tool.",
+  "文本或分段内容；image_url 段只保留 [图片] 占位文字。": "Text or content parts; image_url parts keep only the [image] placeholder text.",
+  "assistant 请求调用工具时原样带入。": "Passed through unchanged when the assistant requests a tool call.",
+  "tool 消息对应的调用 ID。": "Call ID that a tool message refers to.",
+  "设为 true 返回 SSE 流；默认 false。": "Set true to receive an SSE stream; default false.",
+  "等待上限（秒），默认 300。": "Wait limit in seconds; default 300.",
+  "顶层提示词；messages 为空时作为用户消息。": "Top-level prompt; used as a user message when messages is empty.",
+  "接收但 muse 不区分，不影响结果。": "Accepted, but muse does not distinguish it; it does not change the result.",
+  "接收；只有 MUSE2API_TOOL_PROTOCOL=1 时才注入工具协议。": "Accepted; the tool protocol is injected only when MUSE2API_TOOL_PROTOCOL=1.",
+  "接收但忽略。": "Accepted and ignored.",
+  "接收但忽略，返回始终是文本。": "Accepted and ignored; the response is always text.",
+  "include_usage=true 时在 [DONE] 之前补一个 usage 分片。": "With include_usage=true, a usage chunk is sent before [DONE].",
+  "生成或编辑指令。": "Generation or editing instruction.",
+  "默认 muse-image。": "Defaults to muse-image.",
+  "有序参考素材，可混放图片、视频、音频和文档。": "Ordered reference media; images, videos, audio and documents can be mixed.",
+  "视频参考素材。": "Video reference media.",
+  "音频参考素材。": "Audio reference media.",
+  "文档参考素材，支持 pdf、doc、docx。": "Document reference media; pdf, doc and docx are supported.",
+  "文档参考素材。": "Document reference media.",
+  "旧版单图字段；不能与 images 同时使用。": "Legacy single-image field; cannot be combined with images.",
+  "画面比例或尺寸，例如 1:1、16:9、9:16、4:3。": "Aspect ratio or size, for example 1:1, 16:9, 9:16 or 4:3.",
+  "与 size 等价的画面比例字段。": "Aspect ratio field equivalent to size.",
+  "url 或 b64_json；默认 url。": "url or b64_json; defaults to url.",
+  "等待上限（秒），1 到 600，默认 240。": "Wait limit in seconds, 1 to 600; default 240.",
+  "追加到提示词末尾的补充要求。": "Extra requirements appended to the prompt.",
+  "设为 true 时改为异步任务并返回 id。": "Set true to switch to an async task and return an id.",
+  "返回沿用 OpenAI 图片格式：data[0] 含 revised_prompt、url、size、kind、bytes；response_format=b64_json 时用 b64_json 代替 url。": "The response follows the OpenAI image format: data[0] has revised_prompt, url, size, kind and bytes; with response_format=b64_json, b64_json replaces url.",
+  "同时支持 multipart/form-data 和 application/json。multipart 适合直接上传本地文件，同名文件字段可以重复提交。": "Accepts multipart/form-data and application/json. multipart is convenient for local files, and the same file field can be repeated.",
+  "编辑指令；留空时使用默认指令。": "Editing instruction; a default instruction is used when empty.",
+  "可重复提交，每个字段一个文件。": "Can be repeated, one file per field.",
+  "可重复提交的视频参考。": "Repeatable video reference.",
+  "可重复提交的音频参考。": "Repeatable audio reference.",
+  "可重复提交的文档参考。": "Repeatable document reference.",
+  "画面比例或尺寸。": "Aspect ratio or size.",
+  "画面比例。": "Aspect ratio.",
+  "url 或 b64_json。": "url or b64_json.",
+  "等待上限（秒）。": "Wait limit in seconds.",
+  "改为异步任务并返回 id。": "Switch to an async task and return an id.",
+  "JSON 方式与生图接口相同，使用 images、videos、audios、files、image、image_url、reference_image、size、aspect_ratio、response_format、timeout、async。返回格式也与生图相同。": "The JSON form matches the image endpoint and uses images, videos, audios, files, image, image_url, reference_image, size, aspect_ratio, response_format, timeout and async. The response format also matches image generation.",
+  "适合反向代理或 CDN 会截断长请求的场景。POST 返回 202 和任务 id，之后只轮询 GET，不会重复生成。": "For reverse proxies or CDNs that cut off long requests. POST returns 202 and a task id; afterwards poll GET only, which never repeats generation.",
+  "与 /v1/images/generations 完全相同。": "Identical to /v1/images/generations.",
+  "可选请求头；相同输入返回原任务，同一键配不同输入返回 409。": "Optional header; identical input returns the original task, and the same key with different input returns 409.",
+  "视频内容描述。": "Video description.",
+  "默认 muse-video。": "Defaults to muse-video.",
+  "目标时长（秒），常用 5、6、8、10；默认 6。": "Target duration in seconds; 5, 6, 8 and 10 are common; default 6.",
+  "16:9 横屏或 9:16 竖屏。": "16:9 landscape or 9:16 portrait.",
+  "画质描述，例如 720p。": "Quality description, for example 720p.",
+  "单张参考图，作为视频首帧。": "Single reference image used as the first frame.",
+  "旧版单图字段，作为首帧。": "Legacy single-image field used as the first frame.",
+  "多张参考图；第一张作为主要起始画面。": "Multiple reference images; the first one is the main starting frame.",
+  "等待上限（秒），默认 600。": "Wait limit in seconds; default 600.",
+  "默认 muse-voice。": "Defaults to muse-voice.",
+  "要朗读的文本；只逐字朗读这段内容。": "Text to read; only this content is read verbatim.",
+  "音色描述，自由文本；默认取服务端配置。": "Free-text voice description; defaults to the server setting.",
+  "mp3、wav、m4a、ogg、flac、aac、opus 或 pcm；默认 mp3。": "mp3, wav, m4a, ogg, flac, aac, opus or pcm; defaults to mp3.",
+  "语速，0.25 到 4.0；默认 1。": "Speed from 0.25 to 4.0; default 1.",
+  "额外要求，例如语气、停顿、背景音。": "Extra requirements such as tone, pauses or background sound.",
+  "等待上限（秒），1 到 1200，默认 180。": "Wait limit in seconds, 1 to 1200; default 180.",
+  "响应体就是音频二进制，同时文件会写入媒体库。服务端装有 ffmpeg 时按请求格式转码，否则返回 Muse 原生格式。": "The body is raw audio and the file is also saved to the media library. With ffmpeg installed the server transcodes to the requested format; otherwise it returns Muse's native format.",
+  "音频 MIME，例如 audio/mpeg。": "Audio MIME type, for example audio/mpeg.",
+  "inline 加文件名，形如 speech-xxxx.mp3。": "inline plus a file name such as speech-xxxx.mp3.",
+  "媒体库中的原始文件名。": "Original file name in the media library.",
+  "实际返回格式；转码失败时可能与请求格式不同。": "Actual returned format; it can differ from the requested one when transcoding fails.",
+  "固定为 no-store。": "Always no-store.",
+  "参数、参考素材或输入内容不合法。": "Invalid parameters, reference media or input.",
+  "API Key 缺失或无效，或上游会话认证失败。": "Missing or invalid API Key, or upstream session authentication failed.",
+  "任务或媒体文件不存在。": "Task or media file not found.",
+  "幂等键复用，但请求内容与原任务不同。": "Idempotency key reused with different request content.",
+  "字段类型校验失败，响应里带字段位置。": "Field type validation failed; the response includes the field location.",
+  "生图队列已满，稍后重试。": "Image queue is full; retry later.",
+  "服务内部错误。": "Internal server error.",
+  "Muse 上游生成失败或超时。": "Muse upstream generation failed or timed out.",
+  "管理接口全部需要鉴权，返回 JSON；控制台页面使用同一套接口。下面只列路径与用途，字段细节以控制台行为为准。": "All admin endpoints require auth and return JSON; the console uses the same endpoints. Only paths and purposes are listed here; see the console for field details.",
+  "仪表盘数据：KPI、额度、告警、7 天趋势、最近任务与媒体。": "Dashboard data: KPIs, quota, alerts, 7-day trend, recent tasks and media.",
+  "读取全局 System Prompt 设置与默认内容。": "Read the global System Prompt settings and default text.",
+  "保存 System Prompt 开关与内容。": "Save the System Prompt flag and text.",
+  "添加账号，支持单条 cookie、cookie_header 与 batch 批量文本。": "Add accounts from cookies, cookie_header or batch text.",
+  "修改标签、启用状态或代理。": "Change the label, enabled state or proxy.",
+  "服务总览、账号池与最近任务。": "Service overview, Account Pool and recent tasks.",
+  "账号列表。": "Account list.",
+  "任务记录。": "Task records.",
+  "媒体库列表。": "Media library list.",
+  "删除账号。": "Delete the account.",
+  "真实校验会话有效性，顺带刷新额度。": "Verify the session for real and refresh quota.",
+  "测试该账号代理的连通性与出口。": "Test this account's proxy connectivity and egress.",
+  "用新 cookie 重新登录该账号。": "Log this account in again with new cookies.",
+  "批量重新登录。": "Log in accounts again in batch.",
+  "实时读取该账号剩余额度。": "Read this account's remaining quota live.",
+  "刷新全部账号额度。": "Refresh quota for every account.",
+  "更新该账号 cookie。": "Update this account's cookies.",
+  "对所有账号执行一次保活。": "Run keep-alive for every account.",
+  "对单个账号执行保活。": "Run keep-alive for one account.",
+  "后台保活状态与上次结果。": "Background keep-alive state and last result.",
+  "读取当前 API Key。": "Read the current API Key.",
+  "重新生成 API Key，旧 Key 立即失效。": "Regenerate the API Key; the old key stops working immediately.",
+  "清空任务记录，可保留最近若干条。": "Clear task records, optionally keeping the most recent ones.",
+  "批量删除媒体文件。": "Delete media files in batch.",
+  "输出 cookie 助手脚本。": "Serve the cookie helper script.",
+  "下载浏览器扩展 ZIP。": "Download the browser extension ZIP.",
+  "扩展文件清单。": "Extension file list.",
+  "检查新版本。": "Check for a new version.",
+  "本地仓库与远程仓库状态。": "Local and remote repository status.",
+  "在线升级到最新版本。": "Upgrade online to the latest version.",
+  "从 Git 远程拉取更新。": "Pull updates from the Git remote.",
+  "提交并推送本地改动。": "Commit and push local changes.",
 };
 /* 含富文本的块：data-i18n="key" → 英文 innerHTML（须保留原有子元素的 id/class/属性） */
 const I18N_EN_HTML = {
