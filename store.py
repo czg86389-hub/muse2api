@@ -175,18 +175,16 @@ class Store:
                     return None
                 elif len(live) > 1:
                     live = [a for a in live if a["id"] != exclude_id] or live
-            if preferred_id and not force_rotate:
+            if preferred_id and not rotate and not force_rotate:
                 for a in live:
                     if a["id"] == preferred_id and a.get("ok") is not False:
-                        sticky_n = getattr(self, "_sticky_count", 0) if getattr(self, "_sticky_id", None) == preferred_id else 0
-                        if not rotate or sticky_n < 15:
-                            self._sticky_id = preferred_id
-                            self._sticky_count = sticky_n + 1
-                            if record_use:
-                                a["last_used"] = time.time()
-                                a["use_count"] = a.get("use_count", 0) + 1
-                                _write(self.cfg.accounts_file, self.accounts)
-                            return a
+                        self._sticky_id = preferred_id
+                        self._sticky_count = 1
+                        if record_use:
+                            a["last_used"] = time.time()
+                            a["use_count"] = a.get("use_count", 0) + 1
+                            _write(self.cfg.accounts_file, self.accounts)
+                        return a
             healthy = [a for a in live if a.get("ok") is not False]
             candidates = healthy if healthy else live
             candidates.sort(key=lambda a: (a.get("last_used") or 0.0, a.get("use_count") or 0))

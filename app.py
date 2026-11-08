@@ -1119,19 +1119,9 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
                     reference_images: list[str] | None = None,
                     deadline=None) -> tuple[dict, str | None]:
     remaining_wait = int(deadline - time.monotonic()) if deadline is not None else timeout
-    preferred_id = getattr(engine, "current_acc_id", None)
-    if kind == "video" and not account_id:
-        # Prefer the last account that completed a video; session health alone is insufficient.
-        recent = sorted(list(store.tasks.values()), key=lambda task: task.get("created_at", 0), reverse=True)
-        for task in recent:
-            if task.get("kind") != "video" or task.get("status") != "completed" or not task.get("account"):
-                continue
-            candidate = store.get_account(task["account"])
-            if candidate and candidate.get("enabled", True) and candidate.get("ok") is not False:
-                preferred_id = candidate["id"]
-                break
     acc = ACCOUNT_POOL.acquire(account_id=account_id,
-                               preferred_id=preferred_id,
+                               preferred_id=None,
+                               rotate=True,
                                timeout=max(1, remaining_wait))
     cur_acc = acc
     last_exc = None
@@ -1594,7 +1584,7 @@ async def chat_completions(req: ChatRequest, _=Depends(auth)):
 
     model = resolve_model(req.model, default="muse-spark")
     timeout = int(req.timeout or CFG.chat_timeout)
-    acc = store.pick_account(rotate=True, preferred_id=getattr(engine, "current_acc_id", None))
+    acc = store.pick_account(rotate=True)
     if not acc:
         raise HTTPException(400, "没有可用账号，请先在管理页面导入 cookie")
 
@@ -1756,7 +1746,7 @@ async def responses_api(req: ResponsesRequest, _=Depends(auth)):
 
     model = resolve_model(req.model, default="muse-spark")
     timeout = int(req.timeout or CFG.chat_timeout)
-    acc = store.pick_account(rotate=True, preferred_id=getattr(engine, "current_acc_id", None))
+    acc = store.pick_account(rotate=True)
     if not acc:
         raise HTTPException(400, "没有可用账号，请先在管理页面导入 cookie")
 

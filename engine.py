@@ -350,55 +350,55 @@ class MuseEngine:
         with self._start_lock:
             if self.proc and self.proc.poll() is None and self.browser:
                 return
-        env = dict(os.environ)
-        env.setdefault("HOME", self.cfg.home_dir)
-        env["PATH"] = (self.cfg.extra_path + os.pathsep + env.get("PATH", "")) if self.cfg.extra_path else env.get("PATH", "")
-        args = [
-            self.cfg.chromium,
-            "--headless=new", "--no-sandbox", "--disable-gpu",
-            "--disable-dev-shm-usage", "--disable-background-networking",
-            "--no-first-run", "--no-default-browser-check",
-            "--autoplay-policy=no-user-gesture-required",
-            "--window-size=1440,2400",
-            f"--remote-debugging-port={self.cfg.cdp_port}",
-            "--remote-allow-origins=*",
-            f"--user-data-dir={self.cfg.profile_dir}",
-            "about:blank",
-        ]
-        # 尝试复用已有健康 CDP
-        if not self.proc:
-            try:
-                v = http_json(self._debug_url(), timeout=1)
-                if v and "webSocketDebuggerUrl" in v:
-                    self.browser = CDP(v["webSocketDebuggerUrl"], timeout=180)
-                    return
-            except Exception:
-                pass
-
-        # 清理残留锁
-        for lock_name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
-            lp = os.path.join(self.cfg.profile_dir, lock_name)
-            if os.path.exists(lp) or os.path.islink(lp):
+            env = dict(os.environ)
+            env.setdefault("HOME", self.cfg.home_dir)
+            env["PATH"] = (self.cfg.extra_path + os.pathsep + env.get("PATH", "")) if self.cfg.extra_path else env.get("PATH", "")
+            args = [
+                self.cfg.chromium,
+                "--headless=new", "--no-sandbox", "--disable-gpu",
+                "--disable-dev-shm-usage", "--disable-background-networking",
+                "--no-first-run", "--no-default-browser-check",
+                "--autoplay-policy=no-user-gesture-required",
+                "--window-size=1440,2400",
+                f"--remote-debugging-port={self.cfg.cdp_port}",
+                "--remote-allow-origins=*",
+                f"--user-data-dir={self.cfg.profile_dir}",
+                "about:blank",
+            ]
+            # 尝试复用已有健康 CDP
+            if not self.proc:
                 try:
-                    os.unlink(lp)
+                    v = http_json(self._debug_url(), timeout=1)
+                    if v and "webSocketDebuggerUrl" in v:
+                        self.browser = CDP(v["webSocketDebuggerUrl"], timeout=180)
+                        return
                 except Exception:
                     pass
 
-        os.makedirs(self.cfg.data_dir, exist_ok=True)
-        self._log = open(os.path.join(self.cfg.data_dir, "chromium.log"), "ab", buffering=0)
-        cwd_dir = self.cfg.home_dir if (self.cfg.home_dir and os.path.isdir(self.cfg.home_dir)) else None
-        self.proc = subprocess.Popen(args, stdout=self._log, stderr=subprocess.STDOUT,
-                                     env=env, cwd=cwd_dir)
-        last = None
-        for _ in range(90):
-            try:
-                v = http_json(self._debug_url(), timeout=2)
-                self.browser = CDP(v["webSocketDebuggerUrl"], timeout=180)
-                return
-            except Exception as exc:  # noqa: BLE001
-                last = exc
-                time.sleep(1)
-        raise MuseGenerationError(f"Chromium 启动失败: {last}")
+            # 清理残留锁
+            for lock_name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+                lp = os.path.join(self.cfg.profile_dir, lock_name)
+                if os.path.exists(lp) or os.path.islink(lp):
+                    try:
+                        os.unlink(lp)
+                    except Exception:
+                        pass
+
+            os.makedirs(self.cfg.data_dir, exist_ok=True)
+            self._log = open(os.path.join(self.cfg.data_dir, "chromium.log"), "ab", buffering=0)
+            cwd_dir = self.cfg.home_dir if (self.cfg.home_dir and os.path.isdir(self.cfg.home_dir)) else None
+            self.proc = subprocess.Popen(args, stdout=self._log, stderr=subprocess.STDOUT,
+                                         env=env, cwd=cwd_dir)
+            last = None
+            for _ in range(90):
+                try:
+                    v = http_json(self._debug_url(), timeout=2)
+                    self.browser = CDP(v["webSocketDebuggerUrl"], timeout=180)
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    last = exc
+                    time.sleep(1)
+            raise MuseGenerationError(f"Chromium 启动失败: {last}")
 
     def stop(self):
         with self._start_lock:
@@ -1104,6 +1104,35 @@ class MuseEngine:
         time.sleep(0.3)
         return clicked
 
+    def _composer_unsent(self) -> str:
+        """输入框里还留着什么（没发出去的附件 / 文字）；空串 = 输入框是空的。读不到时按空处理（不误判）。"""
+        try:
+            n = int(self.page.js(self._ATTACHED_COUNT_JS) or 0)
+            t = int(self.page.js("(document.querySelector('textarea')||{value:''}).value.length") or 0)
+        except Exception:  # noqa: BLE001
+            return ""
+        parts = []
+        if n:
+            parts.append("%d 个附件" % n)
+        if t:
+            parts.append("%d 字提示词" % t)
+        return "、".join(parts)
+
+    def _click_send(self) -> str:
+        """只点发送按钮（不重新填字），返回 clicked / disabled / no-button。"""
+        try:
+            return str(self.page.js(
+                "(function(){var b=[...document.querySelectorAll('button,[role=button]')]"
+                ".filter(function(x){return x.offsetParent!==null;})"
+                ".find(function(x){return /发送|send/i.test(x.getAttribute('aria-label')||'')"
+                "||/发送|send/i.test(x.getAttribute('data-testid')||'')"
+                "||/send/i.test(x.innerText||'');});"
+                "if(!b)return 'no-button';"
+                "if(b.disabled)return 'disabled';"
+                "b.click();return 'clicked';})()"))
+        except Exception:  # noqa: BLE001
+            return "error"
+
     # ---------------- 等待生成 ----------------
     def _last_attachment(self) -> dict | None:
         atts = self.attachments()
@@ -1141,6 +1170,7 @@ class MuseEngine:
         previous_state = None
         last_activity = t_start
         progress_sent = 0
+        resent = False
         while time.time() < deadline:
             if stop_event is not None and stop_event.is_set():
                 raise MuseGenerationError("客户端已断开连接，终止生成任务")
@@ -1232,6 +1262,17 @@ class MuseEngine:
                         progress_sent = milestone
                     except Exception:
                         pass
+
+            # COOL AI 2026-11-08：发出 25 秒后模型毫无回复、输入框里还留着附件 / 文字 = 这条消息没发出去。
+            # 补点一次发送；60 秒仍没发出就报错，交给外层换号重试（以前要干等到总超时 10 分钟）。
+            if elapsed > 25.0 and cur_cnt == base_agent_cnt:
+                unsent = self._composer_unsent()
+                if unsent and not resent:
+                    resent = True
+                    log.warning("提示词发出 %.0f 秒后仍在输入框（%s），补点一次发送", elapsed, unsent)
+                    self._click_send()
+                elif unsent and elapsed > 60.0:
+                    raise MuseGenerationError("提示词没有发出去（%s 仍在输入框里），终止等待并换号重试" % unsent)
 
             if re.search(r"额度不足|积分不足|out of credits|达到上限|token limit", tail, re.I):
                 raise MuseGenerationError("账号额度不足")
