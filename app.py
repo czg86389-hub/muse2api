@@ -32,6 +32,7 @@ from contextlib import contextmanager
 import base64
 import collections
 import binascii
+import datetime
 import io
 import hashlib
 import json
@@ -71,6 +72,7 @@ if not log.handlers:
 
 CFG.ensure_dirs()
 app = FastAPI(title="muse2api", version="1.6.9")
+STARTED_AT = int(time.time())
 
 # Cookie 助手脚本从 muse.ai 页面发起导入请求，需要放行该来源；
 # 浏览器扩展从 chrome-extension:// 发起，也一并放行。
@@ -1988,6 +1990,126 @@ def admin_status(_=Depends(auth)):
     }
 
 
+@app.get("/admin/dashboard")
+def admin_dashboard(_=Depends(auth)):
+    """Single aggregate payload for the admin overview page."""
+    now = int(time.time())
+    accounts = store.list_accounts()
+    stats = store.stats()
+    browser_running = bool(engine.proc and engine.proc.poll() is None)
+
+    tasks = list(store.tasks.values())
+    by_status = collections.Counter((t.get("status") or "unknown") for t in tasks)
+    success = sum(by_status.get(k, 0) for k in ("completed", "succeeded"))
+    failed = by_status.get("failed", 0)
+    active = by_status.get("queued", 0) + by_status.get("processing", 0)
+    finished = success + failed
+    success_rate = round(success * 100 / finished, 1) if finished else 0.0
+    elapsed_values = [float(t["elapsed"]) for t in tasks
+                      if isinstance(t.get("elapsed"), (int, float)) and t["elapsed"] > 0]
+    avg_elapsed = round(sum(elapsed_values) / len(elapsed_values), 1) if elapsed_values else 0.0
+    by_kind = collections.Counter((t.get("kind") or "unknown") for t in tasks)
+    last_24h = sum(1 for t in tasks if (t.get("created_at") or 0) >= now - 86400)
+
+    daily = []
+    today = datetime.date.today()
+    for offset in range(6, -1, -1):
+        day = today - datetime.timedelta(days=offset)
+        start = int(time.mktime(day.timetuple()))
+        end = start + 86400
+        bucket = [t for t in tasks if start <= (t.get("created_at") or 0) < end]
+        ok = sum(1 for t in bucket if (t.get("status") or "") in ("completed", "succeeded"))
+        bad = sum(1 for t in bucket if (t.get("status") or "") == "failed")
+        daily.append({"date": day.strftime("%m-%d"), "total": len(bucket),
+                      "success": ok, "failed": bad,
+                      "other": max(0, len(bucket) - ok - bad)})
+
+    media = _media_items()
+    media_by_kind = collections.Counter(m["kind"] for m in media)
+
+    quota_rows = []
+    for account in accounts:
+        quota = account.get("quota") or {}
+        try:
+            pct = float(quota.get("weekly_used_pct"))
+        except (TypeError, ValueError):
+            pct = None
+        if not quota.get("found") or pct is None:
+            continue
+        quota_rows.append({
+            "id": account.get("id"),
+            "label": account.get("label") or account.get("id"),
+            "enabled": bool(account.get("enabled", True)),
+            "plan": quota.get("plan") or "",
+            "weekly_used_pct": round(pct, 1),
+            "weekly_reset": quota.get("weekly_reset") or "",
+            "extra_left": quota.get("extra_left") or "",
+            "checked_at": quota.get("checked_at") or 0,
+        })
+    quota_rows.sort(key=lambda row: row["weekly_used_pct"], reverse=True)
+    quota_high = sum(1 for row in quota_rows if row["weekly_used_pct"] >= 80)
+    quota_avg = (round(sum(row["weekly_used_pct"] for row in quota_rows)
+                       / len(quota_rows), 1) if quota_rows else 0.0)
+
+    enabled = int(stats.get("enabled", 0))
+    unknown = max(0, enabled - int(stats.get("healthy", 0)) - int(stats.get("error", 0)))
+    expiring_soon = sum(
+        1 for account in accounts
+        if account.get("enabled", True) and account.get("expires_at")
+        and 0 < int(account["expires_at"]) - now < 12 * 3600)
+
+    alerts = []
+    if not stats.get("total"):
+        alerts.append({"code": "no_accounts", "level": "warn", "count": 0})
+    if stats.get("error"):
+        alerts.append({"code": "account_errors", "level": "bad", "count": stats["error"]})
+    if stats.get("expired"):
+        alerts.append({"code": "expired", "level": "bad", "count": stats["expired"]})
+    if expiring_soon:
+        alerts.append({"code": "expiring", "level": "warn", "count": expiring_soon})
+    if quota_high:
+        alerts.append({"code": "quota_high", "level": "warn", "count": quota_high})
+    if not browser_running:
+        alerts.append({"code": "browser_idle", "level": "mute", "count": 0})
+    if not alerts:
+        alerts.append({"code": "all_good", "level": "ok", "count": 0})
+
+    return {
+        "now": now,
+        "started_at": STARTED_AT,
+        "uptime": max(0, now - STARTED_AT),
+        "browser_running": browser_running,
+        "accounts": {**stats, "unknown": unknown},
+        "tasks": {
+            "total": len(tasks), "success": success, "failed": failed,
+            "active": active, "success_rate": success_rate,
+            "avg_elapsed": avg_elapsed, "last_24h": last_24h,
+            "by_kind": dict(by_kind), "by_status": dict(by_status),
+            "daily": daily, "recent": store.list_tasks(8),
+        },
+        "media": {
+            "count": len(media),
+            "bytes": sum(item["bytes"] for item in media),
+            "by_kind": dict(media_by_kind),
+            "recent": media[:6],
+        },
+        "quota": {
+            "tracked": len(quota_rows), "average_weekly_used": quota_avg,
+            "high": quota_high, "accounts": quota_rows,
+        },
+        "config": {
+            "image_timeout": CFG.image_timeout,
+            "video_timeout": CFG.video_timeout,
+            "audio_timeout": CFG.audio_timeout,
+            "chat_timeout": CFG.chat_timeout,
+            "concurrency": CFG.max_concurrency,
+            "cdp_port": CFG.cdp_port,
+            "site": CFG.site_url,
+        },
+        "alerts": alerts,
+    }
+
+
 # ------------------------- 管理：账号池 -------------------------
 @app.get("/admin/accounts")
 def list_accounts(_=Depends(auth)):
@@ -2385,8 +2507,7 @@ def clear_tasks(payload: dict = Body(default={}), _=Depends(auth)):
     return {"removed": store.clear_tasks(int(payload.get("keep") or 0))}
 
 
-@app.get("/admin/media")
-def admin_media(_=Depends(auth)):
+def _media_items() -> list[dict]:
     d = CFG.media_dir
     items = []
     if os.path.isdir(d):
@@ -2398,6 +2519,12 @@ def admin_media(_=Depends(auth)):
             items.append({"name": name, "url": media_url(name), "bytes": os.path.getsize(p),
                           "mtime": int(os.path.getmtime(p)), "kind": media_kind(ext)})
     items.sort(key=lambda x: x["mtime"], reverse=True)
+    return items
+
+
+@app.get("/admin/media")
+def admin_media(_=Depends(auth)):
+    items = _media_items()
     return {"media": items, "count": len(items)}
 
 
@@ -2459,6 +2586,7 @@ def index():
 
 
 @app.get("/admin", response_class=HTMLResponse)
+@app.get("/dashboard", response_class=HTMLResponse)
 def admin_page():
     return _admin_html()
 

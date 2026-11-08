@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>muse2api · 账号池控制台</title>
+<title>muse2api · 管理控制台</title>
 <style>
   :root{
     --bg:#0a0e17; --bg2:#0e1421; --panel:#121a2b; --panel2:#0f1626;
@@ -91,7 +91,64 @@
   .stat{background:linear-gradient(180deg,var(--panel) 0%,var(--panel2) 100%);border:1px solid var(--line);border-radius:var(--radius);padding:15px 17px}
   .stat .k{color:var(--muted);font-size:12px;margin-bottom:4px}
   .stat .v{font-size:25px;font-weight:650;letter-spacing:.4px}
+  .stat .sub{color:var(--muted);font-size:11.5px;margin-top:5px}
   .stat.g .v{color:var(--ok)}.stat.r .v{color:var(--bad)}.stat.y .v{color:var(--warn)}.stat.b .v{color:var(--accent)}
+
+  /* ---------- 仪表盘 ---------- */
+  .dash-hero-main{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .dash-actions{display:flex;gap:8px;flex-wrap:wrap}
+  .dash-meta{display:flex;gap:8px 16px;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px solid rgba(32,41,61,.7);font-size:12px;color:var(--muted)}
+  .dash-meta b{color:var(--text);font-weight:600}
+  .dash-alerts{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .dash-alert{display:inline-flex;align-items:center;gap:7px;font-size:12px;padding:5px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg2);color:var(--muted)}
+  .dash-alert b{font-family:ui-monospace,monospace;color:var(--text)}
+  .dash-alert.ok{color:var(--ok);border-color:rgba(52,211,153,.35);background:rgba(52,211,153,.08)}
+  .dash-alert.warn{color:var(--warn);border-color:rgba(251,191,36,.35);background:rgba(251,191,36,.08)}
+  .dash-alert.bad{color:var(--bad);border-color:rgba(248,113,113,.35);background:rgba(248,113,113,.08)}
+  .dash-2col{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:16px;align-items:start;margin-bottom:16px}
+  .dash-2col>.card{margin-bottom:0;min-width:0}
+  .task-row{min-width:0}
+  .card-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+  .card-head h3{margin:0}
+  .quota-row{padding:10px 0;border-bottom:1px solid rgba(32,41,61,.55)}
+  .quota-row:last-child{border-bottom:0;padding-bottom:0}
+  .quota-top{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12.5px}
+  .quota-top b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .quota-bar{height:8px;border-radius:999px;background:var(--bg2);border:1px solid var(--line);overflow:hidden;margin-top:7px}
+  .quota-bar>i{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,var(--accent),var(--purple))}
+  .quota-bar>i.warn{background:linear-gradient(90deg,var(--warn),#f59e0b)}
+  .quota-bar>i.bad{background:linear-gradient(90deg,var(--bad),#dc2626)}
+  .quota-sub{display:flex;gap:10px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin-top:6px}
+  .seg{display:flex;height:12px;border-radius:999px;overflow:hidden;background:var(--bg2);border:1px solid var(--line)}
+  .seg>span{display:block;height:100%}
+  .seg .s-ok{background:var(--ok)}.seg .s-bad{background:var(--bad)}.seg .s-warn{background:var(--warn)}.seg .s-mute{background:var(--line2)}.seg .s-off{background:#37415a}
+  .seg-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:9px;font-size:12px;color:var(--muted)}
+  .seg-legend span{display:inline-flex;align-items:center;gap:5px}
+  .seg-legend i{width:8px;height:8px;border-radius:50%;display:inline-block}
+  .seg-legend i.s-ok{background:var(--ok)}.seg-legend i.s-bad{background:var(--bad)}.seg-legend i.s-warn{background:var(--warn)}.seg-legend i.s-off{background:#37415a}
+  .kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:7px 14px;font-size:12.5px}
+  .kv .k{color:var(--muted)}
+  .kv .v{text-align:right;font-family:ui-monospace,monospace;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .bars{display:flex;align-items:flex-end;gap:10px;height:150px;padding-top:8px}
+  .barcol{flex:1;min-width:0;height:100%;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:6px}
+  .barcol .bsum{font-size:11px;color:var(--muted);font-family:ui-monospace,monospace}
+  .barcol .stack{width:100%;max-width:44px;display:flex;flex-direction:column;justify-content:flex-end;gap:2px;min-height:3px}
+  .barcol .stack i{display:block;width:100%;border-radius:3px 3px 0 0}
+  .barcol .stack i.ok{background:var(--ok)}.barcol .stack i.bad{background:var(--bad)}.barcol .stack i.other{background:var(--line2)}
+  .barcol .blbl{font-size:10.5px;color:var(--muted);font-family:ui-monospace,monospace}
+  .task-row{display:flex;align-items:center;gap:9px;padding:9px 0;border-bottom:1px solid rgba(32,41,61,.55);font-size:12.5px}
+  .task-row:last-child{border-bottom:0;padding-bottom:0}
+  .task-row .tr-prompt{flex:1;min-width:0;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .task-row .mono{white-space:nowrap}
+  .dash-media{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:10px}
+  .dm{background:var(--bg2);border:1px solid var(--line);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;min-width:0}
+  .dm .dm-thumb{height:76px;background:#060911;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  .dm .dm-thumb img,.dm .dm-thumb video{width:100%;height:100%;object-fit:cover}
+  .dm .dm-thumb audio{width:94%}
+  .dm .dm-body{padding:7px 9px 9px}
+  .dm .dm-name{font-family:ui-monospace,monospace;font-size:10.5px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dm .dm-meta{color:var(--muted);font-size:10.5px;margin-top:2px}
+  @media (max-width:960px){.dash-2col{grid-template-columns:minmax(0,1fr)}}
 
   /* ---------- 表单 ---------- */
   label{display:block;font-size:12.5px;color:var(--muted);margin-bottom:5px}
@@ -281,7 +338,8 @@
   </div>
 
   <nav class="tabs">
-    <button class="active" data-t="pool">账号池</button>
+    <button class="active" data-t="dash">仪表盘</button>
+    <button data-t="pool">账号池</button>
     <button data-t="cookie">获取 Cookie</button>
     <button data-t="tasks">任务记录</button>
     <button data-t="media">媒体库</button>
@@ -291,8 +349,79 @@
 
   <div class="card" id="extensionUpgradeNotice" style="border-color:var(--warn)" role="note" data-i18n="extension-upgrade-notice"><b>重要：请手动升级浏览器插件至 1.0.2</b><br>更新服务不会自动升级已加载的扩展。下载新包，替换原扩展目录文件，再到 <code>chrome://extensions</code> 或 <code>edge://extensions</code> 点击“重新加载”。不同浏览器个人资料需分别升级。<br><a href="https://github.com/czg86389-hub/muse2api/releases/download/v1.6.9/muse2api-chrome-extension-v1.6.9.zip">下载扩展 1.0.2</a>；油猴用户请升级脚本至 1.1.2。</div>
 
+  <!-- ==================== 仪表盘 ==================== -->
+  <section class="tab active" id="tab-dash">
+    <div class="card" style="border-color:rgba(79,140,255,.4)">
+      <div class="dash-hero-main">
+        <div>
+          <h3 style="margin:0 0 4px">运行概览 <span class="tag">实时</span></h3>
+          <div class="hint" style="margin:0">账号健康、额度、任务与媒体的集中视图，每 8 秒自动刷新。</div>
+        </div>
+        <div class="dash-actions">
+          <button class="ghost mini" onclick="loadDashboard()">刷新</button>
+          <button class="ghost mini" onclick="keepaliveAll()">一键保活</button>
+          <button class="ghost mini" onclick="goTab('pool')">账号池</button>
+          <button class="primary-lg" onclick="goTab('cookie')">+ 添加账号</button>
+        </div>
+      </div>
+      <div class="dash-meta" id="dashMeta"><span>加载中…</span></div>
+      <div class="dash-alerts" id="dashAlerts"></div>
+    </div>
+
+    <div class="stats">
+      <div class="stat b"><div class="k">账号总数</div><div class="v" id="dTotal">0</div><div class="sub" id="dTotalSub">—</div></div>
+      <div class="stat g"><div class="k">可用账号</div><div class="v" id="dOk">0</div><div class="sub" id="dOkSub">—</div></div>
+      <div class="stat r"><div class="k">异常账号</div><div class="v" id="dBad">0</div><div class="sub" id="dBadSub">—</div></div>
+      <div class="stat y"><div class="k">进行中任务</div><div class="v" id="dActive">0</div><div class="sub" id="dActiveSub">—</div></div>
+      <div class="stat"><div class="k">任务总数</div><div class="v" id="dTasks">0</div><div class="sub" id="dTasksSub">—</div></div>
+      <div class="stat"><div class="k">媒体文件</div><div class="v" id="dMedia">0</div><div class="sub" id="dMediaSub">—</div></div>
+    </div>
+
+    <div class="dash-2col">
+      <div class="card">
+        <div class="card-head">
+          <h3>额度概览 <span class="tag" id="dQuotaTag">—</span></h3>
+          <button class="ghost mini" onclick="goTab('pool')">管理账号</button>
+        </div>
+        <div id="dQuota"><div class="empty">加载中…</div></div>
+      </div>
+      <div class="card">
+        <h3>账号健康</h3>
+        <div class="seg" id="dSeg"></div>
+        <div class="seg-legend" id="dSegLegend"></div>
+        <h3 style="margin:18px 0 8px">服务配置</h3>
+        <div class="kv" id="dConfig"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h3>任务趋势 <span class="tag">最近 7 天</span></h3>
+        <span class="hint" style="margin:0">成功 / 失败 / 其他</span>
+      </div>
+      <div class="bars" id="dChart"><div class="empty">加载中…</div></div>
+    </div>
+
+    <div class="dash-2col">
+      <div class="card">
+        <div class="card-head">
+          <h3>最近任务</h3>
+          <button class="ghost mini" onclick="goTab('tasks')">全部任务</button>
+        </div>
+        <div id="dRecentTasks"><div class="empty">加载中…</div></div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h3>最近媒体</h3>
+          <button class="ghost mini" onclick="goTab('media')">媒体库</button>
+        </div>
+        <div class="dash-media" id="dRecentMedia"><div class="empty">加载中…</div></div>
+      </div>
+    </div>
+  </section>
+
   <!-- ==================== 账号池 ==================== -->
-  <section class="tab active" id="tab-pool">
+  <section class="tab" id="tab-pool">
     <div class="warnbar" id="expWarn" style="display:none">
       <span id="expWarnText"></span>
       <button class="ghost mini" onclick="goTab('cookie')">去重新登录</button>
@@ -1267,6 +1396,56 @@ const I18N_EN = {
   "免費計劃": "Free",
   "免费方案": "Free",
   "免費方案": "Free",
+  "muse2api · 管理控制台": "muse2api · Admin Console",
+  "仪表盘": "Dashboard",
+  "运行概览": "Runtime overview",
+  "实时": "Live",
+  "账号健康、额度、任务与媒体的集中视图，每 8 秒自动刷新。": "Accounts, quota, tasks and media in one view; refreshes every 8 seconds.",
+  "一键保活": "Keep alive",
+  "+ 添加账号": "+ Add account",
+  "可用账号": "Healthy accounts",
+  "异常账号": "Accounts with errors",
+  "进行中任务": "Active tasks",
+  "任务总数": "Total tasks",
+  "额度概览": "Quota overview",
+  "管理账号": "Manage accounts",
+  "账号健康": "Account health",
+  "服务配置": "Service configuration",
+  "任务趋势": "Task trend",
+  "最近 7 天": "Last 7 days",
+  "成功 / 失败 / 其他": "Success / failed / other",
+  "最近任务": "Recent tasks",
+  "全部任务": "All tasks",
+  "最近媒体": "Recent media",
+  "还没有额度数据。到「账号池」点每个账号的「额度」实时查询。": "No quota data yet. Open Account pool and click Quota on an account to read it live.",
+  "还没有媒体文件": "No media files yet",
+  "最近 7 天还没有任务": "No tasks in the last 7 days",
+  "还没有账号，请先导入 Cookie": "No accounts yet; import a cookie first",
+  "账号异常，建议先测试或重新登录": "Accounts have errors; test them or log in again",
+  "账号已过期，请重新登录": "Accounts expired; log in again",
+  "账号有效期不足 12 小时": "Accounts expire in less than 12 hours",
+  "账号周用量已超过 80%": "Accounts used more than 80% of the weekly quota",
+  "浏览器当前空闲": "Browser is idle",
+  "一切正常": "All good",
+  "图片超时": "Image timeout",
+  "视频超时": "Video timeout",
+  "语音超时": "Audio timeout",
+  "对话超时": "Chat timeout",
+  "最大并发": "Max concurrency",
+  "CDP 端口": "CDP port",
+  "站点": "Site",
+  "会话状态正常": "Session status normal",
+  "建议先测试或重新登录": "Test or log in again",
+  "未检测": "Untested",
+  "排队 + 进行中": "Queued + running",
+  "运行时长": "Uptime",
+  "启动于": "Started at",
+  "并发": "Concurrency",
+  "未查询": "Not queried",
+  "语音": "Speech",
+  "任务": "Task",
+  "重置": "Reset",
+  "额外": "Extra",
   "✓ 会话有效，可正常生成": "✓ Session valid; generation should work",
   "✗ 保活失败: 未知错误": "✗ Keep-alive failed: unknown error",
 };
@@ -1403,6 +1582,18 @@ const I18N_EN_PATTERNS = ([
   ["期望生成视频，但提取成品类型为图片 \\((.*?)\\)，拒绝以图片冒充视频交付", "Expected a video, but the extracted result is an image ($1); refusing to deliver an image as a video"],
   ["期望生成视频，但下载成品类型为图片 \\((.*?)\\)，拒绝以图片冒充视频交付", "Expected a video, but the downloaded result is an image ($1); refusing to deliver an image as a video"],
   ["CDP (\\S+) 超时", "CDP $1 timed out"],
+  ["(\\d+)天 (\\d+)时", "$1d $2h"],
+  ["(\\d+)时 (\\d+)分", "$1h $2m"],
+  ["(\\d+)分 (\\d+)秒", "$1m $2s"],
+  ["(\\d+)秒", "$1s"],
+  ["可用 (\\d+) · 异常 (\\d+) · 禁用 (\\d+)", "$1 healthy · $2 errors · $3 disabled"],
+  ["已启用 (\\d+) · 未检测 (\\d+)", "$1 enabled · $2 untested"],
+  ["已过期 (\\d+)", "$1 expired"],
+  ["成功率 (.*?)% · 24h (\\d+)", "$1% success · $2 in 24h"],
+  ["(\\d+) 个已查询 · 平均 (.*?)%", "$1 queried · avg $2%"],
+  ["查询 (.*)", "checked $1"],
+  ["重置 (.*)", "reset $1"],
+  ["额外 (.*)", "extra $1"],
   ["✗ (.+)", "✗ $1"],
 ]).map(([re, rep]) => [new RegExp('^' + re + '$', 's'), rep]);
 const HAN_RE = /[㐀-鿿！-～　-〿]/;
@@ -1573,6 +1764,14 @@ function ago(ts){
   if (s < 86400) return Math.floor(s/3600) + ' 小时前';
   return Math.floor(s/86400) + ' 天前';
 }
+function fmtDur(seconds){
+  const s = Math.max(0, Math.floor(seconds || 0));
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  if (d) return d + '天 ' + h + '时';
+  if (h) return h + '时 ' + m + '分';
+  if (m) return m + '分 ' + (s % 60) + '秒';
+  return s + '秒';
+}
 function cp(el){
   const t = el.parentElement.innerText.replace(/^(复制|Copy)\n?/, '');
   navigator.clipboard.writeText(t).then(() => toast('已复制', 'ok'));
@@ -1589,6 +1788,7 @@ document.querySelectorAll('nav.tabs button').forEach(b => {
     document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
     $('tab-' + b.dataset.t).classList.add('active');
+    if (b.dataset.t === 'dash') loadDashboard();
     if (b.dataset.t === 'tasks') loadTasks();
     if (b.dataset.t === 'media') loadMedia();
     if (b.dataset.t === 'cookie') $('cmdText').textContent = buildCmd($('inBase').value);
@@ -2444,6 +2644,185 @@ async function upgradeNow(){
   }
 }
 
+/* ================= 仪表盘 ================= */
+const DASH_ALERT_TEXT = {
+  no_accounts: '还没有账号，请先导入 Cookie',
+  account_errors: '账号异常，建议先测试或重新登录',
+  expired: '账号已过期，请重新登录',
+  expiring: '账号有效期不足 12 小时',
+  quota_high: '账号周用量已超过 80%',
+  browser_idle: '浏览器当前空闲',
+  all_good: '一切正常',
+};
+let _dashBusy = false;
+
+async function loadDashboard(){
+  if (_dashBusy) return;
+  _dashBusy = true;
+  try{
+    const d = await api('/admin/dashboard');
+    renderDashboard(d);
+  }catch(e){
+    if ($('dashAlerts')) $('dashAlerts').innerHTML =
+      `<span class="dash-alert bad">${esc(e.message)}</span>`;
+  }finally{ _dashBusy = false; }
+}
+
+function renderDashboard(d){
+  const a = d.accounts || {}, t = d.tasks || {}, m = d.media || {};
+  const q = d.quota || {}, cfg = d.config || {};
+  $('dTotal').textContent = a.total ?? 0;
+  $('dTotalSub').textContent = `可用 ${a.healthy ?? 0} · 异常 ${a.error ?? 0} · 禁用 ${a.disabled ?? 0}`;
+  $('dOk').textContent = a.healthy ?? 0;
+  $('dOkSub').textContent = `已启用 ${a.enabled ?? 0} · 未检测 ${a.unknown ?? 0}`;
+  $('dBad').textContent = a.error ?? 0;
+  $('dBadSub').textContent = a.expired ? `已过期 ${a.expired}`
+    : (a.error ? '建议先测试或重新登录' : '会话状态正常');
+  $('dActive').textContent = t.active ?? 0;
+  $('dActiveSub').textContent = '排队 + 进行中';
+  $('dTasks').textContent = t.total ?? 0;
+  $('dTasksSub').textContent = `成功率 ${t.success_rate ?? 0}% · 24h ${t.last_24h ?? 0}`;
+  $('dMedia').textContent = m.count ?? 0;
+  $('dMediaSub').textContent = fmtBytes(m.bytes ?? 0);
+
+  $('dashMeta').innerHTML =
+    `<span>运行时长 <b>${fmtDur(d.uptime)}</b></span>` +
+    `<span>启动于 <b>${fmtTime(d.started_at)}</b></span>` +
+    `<span>浏览器 <b>${d.browser_running ? '运行中' : '空闲'}</b></span>` +
+    `<span>并发 <b>${esc(cfg.concurrency ?? '—')}</b></span>` +
+    `<span>CDP <b>${esc(cfg.cdp_port ?? '—')}</b></span>`;
+
+  const alerts = d.alerts || [];
+  $('dashAlerts').innerHTML = alerts.map(x => {
+    const text = DASH_ALERT_TEXT[x.code] || x.code;
+    const count = x.count ? `<b>${esc(x.count)}</b> ` : '';
+    return `<span class="dash-alert ${esc(x.level || 'mute')}">${count}${esc(text)}</span>`;
+  }).join('');
+
+  renderDashQuota(q);
+  renderDashHealth(a);
+  renderDashConfig(cfg);
+  renderDashChart(t.daily || []);
+  renderDashTasks(t.recent || []);
+  renderDashMedia(m.recent || []);
+}
+
+function renderDashQuota(q){
+  const rows = q.accounts || [];
+  $('dQuotaTag').textContent = rows.length
+    ? `${rows.length} 个已查询 · 平均 ${q.average_weekly_used ?? 0}%`
+    : '未查询';
+  if (!rows.length){
+    $('dQuota').innerHTML = '<div class="empty">还没有额度数据。到「账号池」点每个账号的「额度」实时查询。</div>';
+    return;
+  }
+  $('dQuota').innerHTML = rows.map(r => {
+    const pct = Math.max(0, Math.min(100, Number(r.weekly_used_pct) || 0));
+    const cls = pct >= 80 ? 'bad' : pct >= 50 ? 'warn' : '';
+    const badge = cls || 'ok';
+    const extra = r.extra_left ? `<span>额外 ${esc(r.extra_left)}</span>` : '';
+    const reset = r.weekly_reset ? `<span>重置 ${esc(r.weekly_reset)}</span>` : '';
+    return `<div class="quota-row">
+      <div class="quota-top"><b>${esc(r.label)}</b><span class="badge ${badge}">${pct}%</span></div>
+      <div class="quota-bar"><i class="${cls}" style="width:${pct}%"></i></div>
+      <div class="quota-sub"><span>${esc(r.plan || '—')}</span>${reset}${extra}<span>查询 ${ago(r.checked_at)}</span></div>
+    </div>`;
+  }).join('');
+}
+
+function renderDashHealth(a){
+  const parts = [
+    {n: a.healthy || 0, cls: 's-ok', label: '可用'},
+    {n: a.error || 0, cls: 's-bad', label: '异常'},
+    {n: a.unknown || 0, cls: 's-warn', label: '未检测'},
+    {n: a.disabled || 0, cls: 's-off', label: '禁用'},
+  ];
+  const total = parts.reduce((sum, x) => sum + x.n, 0);
+  if (!total){
+    $('dSeg').innerHTML = '<span class="s-mute" style="width:100%"></span>';
+    $('dSegLegend').innerHTML = '<span>还没有账号</span>';
+    return;
+  }
+  $('dSeg').innerHTML = parts.map(x => x.n
+    ? `<span class="${x.cls}" style="width:${(x.n / total * 100).toFixed(2)}%" title="${x.label} ${x.n}"></span>` : '').join('');
+  $('dSegLegend').innerHTML = parts.map(x =>
+    `<span><i class="${x.cls}"></i>${x.label} <b>${x.n}</b></span>`).join('');
+}
+
+function renderDashConfig(cfg){
+  const rows = [
+    ['图片超时', (cfg.image_timeout ?? '—') + ' 秒'],
+    ['视频超时', (cfg.video_timeout ?? '—') + ' 秒'],
+    ['语音超时', (cfg.audio_timeout ?? '—') + ' 秒'],
+    ['对话超时', (cfg.chat_timeout ?? '—') + ' 秒'],
+    ['最大并发', String(cfg.concurrency ?? '—')],
+    ['CDP 端口', String(cfg.cdp_port ?? '—')],
+    ['站点', cfg.site || '—'],
+  ];
+  $('dConfig').innerHTML = rows.map(([k, v]) =>
+    `<div class="k">${esc(k)}</div><div class="v" title="${esc(v)}">${esc(v)}</div>`).join('');
+}
+
+function renderDashChart(daily){
+  if (!daily.some(x => x.total)){
+    $('dChart').innerHTML = '<div class="empty">最近 7 天还没有任务</div>';
+    return;
+  }
+  const max = Math.max(1, ...daily.map(x => x.total || 0));
+  $('dChart').innerHTML = daily.map(x => {
+    const h = Math.round((x.total || 0) / max * 100);
+    const seg = (n, cls) => n ? `<i class="${cls}" style="flex:${n}"></i>` : '';
+    return `<div class="barcol" title="${esc(x.date)} · 共 ${x.total} · 成功 ${x.success} · 失败 ${x.failed}">
+      <div class="bsum">${x.total || ''}</div>
+      <div class="stack" style="height:${h}%">${seg(x.success, 'ok')}${seg(x.failed, 'bad')}${seg(x.other, 'other')}</div>
+      <div class="blbl">${esc(x.date)}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderDashTasks(tasks){
+  if (!tasks.length){
+    $('dRecentTasks').innerHTML = '<div class="empty">还没有任务记录</div>';
+    return;
+  }
+  $('dRecentTasks').innerHTML = tasks.map(t => {
+    const cls = (t.status === 'succeeded' || t.status === 'completed') ? 'ok'
+      : t.status === 'failed' ? 'bad' : t.status === 'processing' ? 'info' : 'warn';
+    const kind = t.kind === 'video' ? '视频' : t.kind === 'audio' ? '语音'
+      : t.kind === 'image' ? '图片' : '任务';
+    const open = t.result && t.result.url
+      ? `<a href="${esc(t.result.url)}" target="_blank" class="mono">打开</a>` : '';
+    return `<div class="task-row">
+      <span class="badge info">${kind}</span>
+      <span class="tr-prompt" title="${esc(t.prompt || '')}">${esc(t.prompt || '—')}</span>
+      <span class="badge ${cls}">${esc(t.status || '—')}</span>
+      <span class="mono">${t.elapsed ? esc(t.elapsed) + 's' : '—'}</span>
+      <span class="mono">${ago(t.created_at)}</span>
+      ${open}
+    </div>`;
+  }).join('');
+}
+
+function renderDashMedia(items){
+  if (!items.length){
+    $('dRecentMedia').innerHTML = '<div class="empty">还没有媒体文件</div>';
+    return;
+  }
+  $('dRecentMedia').innerHTML = items.map(m => {
+    let thumb;
+    if (m.kind === 'video') thumb = `<video src="${esc(m.url)}" muted playsinline preload="metadata"></video>`;
+    else if (m.kind === 'audio') thumb = `<audio src="${esc(m.url)}" controls preload="metadata"></audio>`;
+    else thumb = `<img src="${esc(m.url)}" loading="lazy" alt="">`;
+    return `<div class="dm">
+      <div class="dm-thumb">${thumb}</div>
+      <div class="dm-body">
+        <a class="dm-name" href="${esc(m.url)}" target="_blank" title="${esc(m.name)}">${esc(m.name)}</a>
+        <div class="dm-meta">${esc(m.kind)} · ${fmtBytes(m.bytes)}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
 /* ================= 总览刷新 ================= */
 async function loadStatus(){
   try{
@@ -2465,11 +2844,12 @@ async function loadStatus(){
   }
 }
 
-function refreshAll(){ loadStatus(); loadPool(); loadApikey(); loadRepoStatus(false); }
+function refreshAll(){ loadStatus(); loadPool(); loadDashboard(); loadApikey(); loadRepoStatus(false); }
 
 refreshAll();
 setInterval(() => {
   loadStatus(); loadPool();
+  if ($('tab-dash').classList.contains('active')) loadDashboard();
   if ($('tab-tasks').classList.contains('active')) loadTasks();
 }, 8000);
 setInterval(() => {
