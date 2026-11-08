@@ -1653,29 +1653,55 @@ async def audio_speech(req: AudioSpeechRequest, _=Depends(auth)):
 
     prompt = build_audio_prompt(req)
     timeout = req.timeout or CFG.audio_timeout
+    # 语音是同步接口，但同样写入任务记录，管理页才能统计 TTS 的声音生成。
+    task = store.create_task("audio", req.input)
+    store.update_task(task["id"], api_prompt=prompt, status="processing", progress=10)
+    started = time.time()
+
+    def _fail(exc: object) -> None:
+        store.update_task(task["id"], status="failed",
+                          elapsed=round(time.time() - started, 1), error=str(exc))
+
     try:
-        res, _acc = await asyncio.to_thread(_run_generation, prompt, "audio", timeout)
+        res, acc_id = await asyncio.to_thread(_run_generation, prompt, "audio", timeout)
     except MuseAuthError as exc:
+        _fail(exc)
         raise HTTPException(401, str(exc)) from exc
     except MuseGenerationError as exc:
+        _fail(exc)
         raise HTTPException(502, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        _fail(exc)
+        raise
 
-    path = res.get("path") or os.path.join(CFG.media_dir, res["filename"])
-    native_ext = (res.get("ext")
-                  or os.path.splitext(res["filename"])[1]).lower().lstrip(".")
-    native_fmt = _normalize_audio_format(native_ext)
-    actual_fmt = native_fmt
-    mime = res.get("mime") or _AUDIO_FORMAT_MIME.get(native_fmt, "audio/mpeg")
-    with open(path, "rb") as f:
-        data = f.read()
+    try:
+        path = res.get("path") or os.path.join(CFG.media_dir, res["filename"])
+        native_ext = (res.get("ext")
+                      or os.path.splitext(res["filename"])[1]).lower().lstrip(".")
+        native_fmt = _normalize_audio_format(native_ext)
+        actual_fmt = native_fmt
+        mime = res.get("mime") or _AUDIO_FORMAT_MIME.get(native_fmt, "audio/mpeg")
+        with open(path, "rb") as f:
+            data = f.read()
 
-    if fmt != native_fmt:
-        converted = await asyncio.to_thread(_convert_audio, path, fmt)
-        if converted:
-            data, mime, actual_fmt = converted, _AUDIO_FORMAT_MIME[fmt], fmt
+        if fmt != native_fmt:
+            converted = await asyncio.to_thread(_convert_audio, path, fmt)
+            if converted:
+                data, mime, actual_fmt = converted, _AUDIO_FORMAT_MIME[fmt], fmt
+    except Exception as exc:  # noqa: BLE001
+        _fail(exc)
+        raise
 
     ext = (native_ext if actual_fmt == native_fmt else actual_fmt) or "mp3"
     name = f"speech-{uuid.uuid4().hex[:12]}.{ext}"
+    url = media_url(res["filename"])
+    store.update_task(
+        task["id"], status="completed", progress=100, account=acc_id,
+        elapsed=round(time.time() - started, 1), url=url,
+        audio={"url": url, "filename": res["filename"],
+               "bytes": len(data), "format": actual_fmt},
+        result={"url": url, "filename": res["filename"],
+                "bytes": len(data), "kind": "audio"})
     return Response(content=data, media_type=mime, headers={
         "Content-Disposition": f'inline; filename="{name}"',
         "X-Muse-Media-Name": res["filename"],

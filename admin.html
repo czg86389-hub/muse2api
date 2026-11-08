@@ -664,7 +664,7 @@
   <section class="tab" id="tab-tasks">
     <div class="card">
       <h3>生成任务记录 <span class="tag" id="taskCount">0</span></h3>
-      <div class="hint">生视频是异步任务，状态会从 queued → processing → succeeded / failed。</div>
+      <div class="hint">生视频是异步任务；语音合成同步返回，也会写入记录。状态会从 queued → processing → succeeded / failed。</div>
       <div style="margin-bottom:12px;display:flex;gap:9px">
         <button class="ghost mini" onclick="loadTasks()">刷新</button>
         <button class="danger mini" onclick="clearTasks()">清空全部</button>
@@ -861,7 +861,7 @@
           <tr><td class="mono">GET</td><td class="mono">/v1/images/tasks/{task_id}</td><td>查询生图任务状态与结果。</td></tr>
           <tr><td class="mono">POST</td><td class="mono">/v1/videos</td><td>创建视频任务，别名 /v1/videos/generations。</td></tr>
           <tr><td class="mono">GET</td><td class="mono">/v1/videos/{task_id}</td><td>查询视频任务状态与结果。</td></tr>
-          <tr><td class="mono">POST</td><td class="mono">/v1/audio/speech</td><td>语音合成，返回音频二进制。</td></tr>
+          <tr><td class="mono">POST</td><td class="mono">/v1/audio/speech</td><td>语音合成，返回音频二进制，并写入任务记录。</td></tr>
           <tr><td class="mono">GET</td><td class="mono">/v1/media/{name}</td><td>下载生成的媒体文件，无需鉴权。</td></tr>
         </tbody>
       </table></div>
@@ -1544,7 +1544,7 @@ const I18N_EN = {
   "约 2 天": "~2 days",
   "设备标识（匿名访客也有，不是登录凭证）": "Device ID (anonymous visitors have it too; not a login credential)",
   "生成任务记录": "Generation tasks",
-  "生视频是异步任务，状态会从 queued → processing → succeeded / failed。": "Video generation is asynchronous; status goes queued → processing → succeeded / failed.",
+  "生视频是异步任务；语音合成同步返回，也会写入记录。状态会从 queued → processing → succeeded / failed。": "Video generation is asynchronous; speech synthesis returns synchronously and is recorded too. Status goes queued → processing → succeeded / failed.",
   "刷新": "Refresh",
   "清空全部": "Clear all",
   "任务 ID": "Task ID",
@@ -1928,7 +1928,7 @@ const I18N_EN = {
   "查询生图任务状态与结果。": "Get an image task's status and result.",
   "创建视频任务，别名 /v1/videos/generations。": "Create a video task; alias /v1/videos/generations.",
   "查询视频任务状态与结果。": "Get a video task's status and result.",
-  "语音合成，返回音频二进制。": "Speech synthesis; returns audio bytes.",
+  "语音合成，返回音频二进制，并写入任务记录。": "Speech synthesis; returns audio bytes and records the task.",
   "下载生成的媒体文件，无需鉴权。": "Download generated media; no auth.",
   "默认 muse-spark；常见模型名会自动映射到真实能力。": "Defaults to muse-spark; common model names are mapped to the matching capability.",
   "消息数组；为空时可以改用顶层 prompt。": "Message array; when empty, use the top-level prompt instead.",
@@ -2828,9 +2828,11 @@ async function loadTasks(){
       let out = '—';
       if (t.result && t.result.url) out = `<a href="${esc(t.result.url)}" target="_blank">查看结果</a> <span class="mono">${fmtBytes(t.result.bytes)}</span>`;
       else if (t.error) out = `<span style="color:var(--bad)">${esc(t.error).slice(0,120)}</span>`;
+      const kindLabel = t.kind === 'video' ? '视频' : t.kind === 'audio' ? '语音'
+        : t.kind === 'image' ? '图片' : '任务';
       return `<tr>
         <td class="mono">${esc(t.id)}</td>
-        <td>${t.kind === 'video' ? '<span class="badge info">视频</span>' : '<span class="badge info">图片</span>'}</td>
+        <td><span class="badge info">${kindLabel}</span></td>
         <td><span class="ellip" title="${esc(t.prompt)}">${esc(t.prompt)}</span></td>
         <td><span class="badge ${cls}">${esc(t.status)}</span></td>
         <td class="mono">${t.elapsed ? t.elapsed + 's' : '—'}</td>

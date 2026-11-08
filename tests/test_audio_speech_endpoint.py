@@ -135,12 +135,41 @@ async def main():
             assert res.body == MP3
             assert res.headers.get("x-muse-audio-format") == "mp3"
 
+            # 同步返回的语音同样写入任务记录（admin「生成任务记录」）。
+            audio_tasks = [t for t in module.store.list_tasks(20)
+                           if t.get("kind") == "audio"]
+            assert len(audio_tasks) == 2, audio_tasks
+            by_prompt = {t["prompt"]: t for t in audio_tasks}
+            done = by_prompt["Xin chào"]
+            assert done["status"] == "completed" and done["progress"] == 100
+            assert done["account"] == "acc-test"
+            assert "Xin chào" in done["api_prompt"]
+            assert done["result"]["kind"] == "audio"
+            assert done["result"]["url"].endswith("/v1/media/native.mp3")
+            assert done["result"]["bytes"] == len(MP3)
+            assert isinstance(done["elapsed"], (int, float))
+
+            # 生成失败时记录 failed 与错误原因，而不是静默丢弃。
+            def failing_run(prompt, kind, timeout, **kwargs):
+                raise module.MuseGenerationError("upstream boom")
+
+            module._run_generation = failing_run
+            try:
+                res = await client.post("/v1/audio/speech", {"input": "sẽ lỗi"})
+            finally:
+                module._run_generation = fake_run
+            assert res.status_code == 502, (res.status_code, res.body[:200])
+            failed = [t for t in module.store.list_tasks(20)
+                      if t.get("kind") == "audio" and t["prompt"] == "sẽ lỗi"]
+            assert failed and failed[0]["status"] == "failed"
+            assert "upstream boom" in failed[0]["error"]
+
         models = module.MODELS
         assert any(m["id"] == "muse-voice" for m in models)
         assert module.resolve_model("tts-1") == "muse-voice"
         assert module.resolve_model("gpt-4o-mini-tts") == "muse-voice"
 
-    print("PASS: audio prompt, auth, validation, binary response and format fallback")
+    print("PASS: audio prompt, auth, validation, binary response, format fallback and task records")
 
 
 if __name__ == "__main__":
