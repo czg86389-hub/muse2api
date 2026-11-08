@@ -95,9 +95,11 @@ async def main():
                                         response_format="mp3", speed=1.25)
         prompt = module.build_audio_prompt(req)
         assert "Xin chào" in prompt and "giọng nam trầm" in prompt and "1.25" in prompt
-        assert "只返回音频附件" in prompt
+        assert "return only the audio attachment" in prompt
         assert module.build_audio_prompt(
             module.AudioSpeechRequest(input="hi", voice="alloy")).find("alloy") < 0
+        unnamed = module.build_audio_prompt(module.AudioSpeechRequest(input="hi"))
+        assert "Voice:" not in unnamed and "female" not in unnamed
 
         async with Client(module.app, {}) as no_auth:
             res = await no_auth.post("/v1/audio/speech", {"input": "hi"})

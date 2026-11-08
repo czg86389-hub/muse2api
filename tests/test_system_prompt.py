@@ -80,15 +80,15 @@ async def main():
         assert settings["system_prompt"] == module.DEFAULT_SYSTEM_PROMPT
 
         msg = module.ChatMessage(role="user", content="hello")
-        assert module.build_chat_prompt([msg]) == "hello"
-        assert module.build_chat_prompt([msg], module._active_system_prompt()) == "hello"
+        assert module.build_chat_prompt([msg]) == "<user>\nhello\n</user>"
+        assert module.build_chat_prompt([msg], module._active_system_prompt()) == "<user>\nhello\n</user>"
         assert module.build_chat_prompt([], "SESSION RULE") == ""
         assert module._with_system_prompt("PROMPT") == "PROMPT"
 
         extra = module.build_chat_prompt([msg], "SESSION RULE")
         assert extra.startswith("<system>\nSESSION RULE\n</system>\n\n"), extra
         assert extra.count("<system>") == 1 and extra.count("</system>") == 1, extra
-        assert "用户：\nhello" in extra and not extra.startswith("hello")
+        assert "<user>\nhello\n</user>" in extra and not extra.startswith("hello")
 
         auth = {"Authorization": "Bearer prompt-secret"}
         async with Client(module.app, {}) as anonymous:
@@ -113,9 +113,12 @@ async def main():
 
             assert module._active_system_prompt() == "CUSTOM RULE"
             assert module._with_system_prompt("PROMPT") == "<system>\nCUSTOM RULE\n</system>\n\nPROMPT"
+            merged = module._with_system_prompt(
+                "<system>\nINSTRUCTION\n</system>\n\n<user>\nhello\n</user>")
+            assert merged == "<system>\nCUSTOM RULE\n\nINSTRUCTION\n</system>\n\n<user>\nhello\n</user>", merged
             chat = module.build_chat_prompt([msg], module._active_system_prompt())
             assert chat.startswith("<system>\nCUSTOM RULE\n</system>\n\n"), chat
-            assert "用户：\nhello" in chat
+            assert "<user>\nhello\n</user>" in chat
 
             # The media path goes through _run_generation -> _run_generation_locked.
             captured = {}
@@ -151,7 +154,7 @@ async def main():
                 module.safe_chat_stream = original_stream
             assert res.status_code == 200, res.body[:300]
             assert "CUSTOM RULE" in captured_chat["prompt"], captured_chat
-            assert "用户：\nhello" in captured_chat["prompt"], captured_chat
+            assert "<user>\nhello\n</user>" in captured_chat["prompt"], captured_chat
 
             # Top-level prompt fallback must still receive the active system prompt.
             module.safe_chat_stream = fake_stream
@@ -181,7 +184,7 @@ async def main():
                 "system_prompt_enabled": False, "system_prompt": ""})
             assert res.status_code == 200, res.body[:300]
             assert module._active_system_prompt() == ""
-            assert module.build_chat_prompt([msg], module._active_system_prompt()) == "hello"
+            assert module.build_chat_prompt([msg], module._active_system_prompt()) == "<user>\nhello\n</user>"
 
     print("PASS: system prompt defaults, chat formatting, settings API and media injection")
 

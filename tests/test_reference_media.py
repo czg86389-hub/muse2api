@@ -91,25 +91,25 @@ with tempfile.TemporaryDirectory() as home:
     kinds = app._reference_kinds(prepared)
     assert kinds == ["image", "video", "audio"]
     prompt = app.build_video_prompt(req, kinds)
-    assert "1 张图片、1 段视频、1 段音频" in prompt and "第一张" not in prompt
-    assert "附件对照：[图1] 是第 1 个附件（图片），[视频1] 是第 2 个附件（视频），[音频1] 是第 3 个附件（音频）" in prompt
+    assert "1 image, 1 video, 1 audio clip" in prompt and "first image" not in prompt
+    assert "Attachment legend: [图1] is attachment 1 (image), [视频1] is attachment 2 (video), [音频1] is attachment 3 (audio)" in prompt
     tokens = app.build_video_prompt(app.VideoRequest(prompt="[图2] 走进 [图1]", images=["a", "b"]), ["image", "image"])
-    assert "[图2] 是第 2 个附件（图片）" in tokens and "未说明时以第一张" in tokens
+    assert "[图2] is attachment 2 (image)" in tokens and "when unspecified use the first image" in tokens
     plain = app.build_video_prompt(app.VideoRequest(prompt="x", images=["a", "b"]), ["image", "image"])
-    assert "附件对照" not in plain and "以第一张作为主要起始画面" in plain
+    assert "Attachment legend" not in plain and "the first image is the main starting frame" in plain
     two_videos = app.build_video_prompt(app.VideoRequest(prompt="x", videos=["a", "b"]), ["video", "video"])
-    assert "[视频2] 是第 2 个附件（视频）" in two_videos
-    assert "图生视频" not in app.build_video_prompt(app.VideoRequest(prompt="x", videos=["v"], size="16:9"), ["video"])
-    assert "图生视频" in app.build_video_prompt(app.VideoRequest(prompt="x", image="i", size="16:9"))
+    assert "[视频2] is attachment 2 (video)" in two_videos
+    assert "image-to-video" not in app.build_video_prompt(app.VideoRequest(prompt="x", videos=["v"], size="16:9"), ["video"])
+    assert "image-to-video" in app.build_video_prompt(app.VideoRequest(prompt="x", image="i", size="16:9"))
     video_only = app.build_video_prompt(app.VideoRequest(prompt="x", videos=["v"]), ["video"])
-    assert "1 段视频" in video_only and "第一张图片" not in video_only
+    assert "1 video" in video_only and "first image" not in video_only
     image_prompt = app.build_image_prompt(app.ImageRequest(prompt="x", videos=["v"]), ["video"])
-    assert "1 段视频" in image_prompt and "纯净画面" not in image_prompt
-    assert "[视频1] 是第 1 个附件（视频）" in image_prompt
+    assert "1 video" in image_prompt and "Clean image requirement" not in image_prompt
+    assert "[视频1] is attachment 1 (video)" in image_prompt
     image_tokens = app.build_image_prompt(app.ImageRequest(prompt="[图1] 穿上 [图2] 的衣服", images=["a", "b"]), ["image", "image"])
-    assert "附件对照：[图1] 是第 1 个附件（图片），[图2] 是第 2 个附件（图片）" in image_tokens
+    assert "Attachment legend: [图1] is attachment 1 (image), [图2] is attachment 2 (image)" in image_tokens
     legacy = app.build_video_prompt(app.VideoRequest(prompt="x", image="i"))
-    assert "第一帧参考图" in legacy
+    assert "first-frame reference" in legacy
     print("PASS: ordered media fields, count limit and media-aware prompts")
 
     class FakeForm(dict):
@@ -147,7 +147,7 @@ with tempfile.TemporaryDirectory() as home:
                         prompt="x", **{"async": True})
         assert asyncio.run(app.images_edits(FakeMultipart(form), None)) == {"ok": True}
         assert app._reference_kinds(captured["refs"]) == ["image", "video", "audio"]
-        assert "1 段视频" in captured["prompt"]
+        assert "1 video" in captured["prompt"]
 
         bad = FakeForm({"audio": [FakeUpload(b"x", "text/html")]}, prompt="x", **{"async": True})
         try:

@@ -1125,7 +1125,7 @@ curl <span class="s">"BASE/v1/videos/task_xxx"</span> -H <span class="s">"Author
         <tbody>
           <tr><td class="mono">model</td><td>string</td><td>否</td><td>默认 muse-voice。</td></tr>
           <tr><td class="mono">input</td><td>string</td><td>是</td><td>要朗读的文本；只逐字朗读这段内容。</td></tr>
-          <tr><td class="mono">voice</td><td>string</td><td>否</td><td>音色描述，自由文本；默认取服务端配置。</td></tr>
+          <tr><td class="mono">voice</td><td>string</td><td>否</td><td>音色描述，自由文本；不传时使用上游默认音色。</td></tr>
           <tr><td class="mono">response_format</td><td>string</td><td>否</td><td>mp3、wav、m4a、ogg、flac、aac、opus 或 pcm；默认 mp3。</td></tr>
           <tr><td class="mono">speed</td><td>number</td><td>否</td><td>语速，0.25 到 4.0；默认 1。</td></tr>
           <tr><td class="mono">instructions</td><td>string</td><td>否</td><td>额外要求，例如语气、停顿、背景音。</td></tr>
@@ -1985,7 +1985,7 @@ const I18N_EN = {
   "等待上限（秒），默认 600。": "Wait limit in seconds; default 600.",
   "默认 muse-voice。": "Defaults to muse-voice.",
   "要朗读的文本；只逐字朗读这段内容。": "Text to read; only this content is read verbatim.",
-  "音色描述，自由文本；默认取服务端配置。": "Free-text voice description; defaults to the server setting.",
+  "音色描述，自由文本；不传时使用上游默认音色。": "Free-text voice description; the upstream default voice is used when omitted.",
   "mp3、wav、m4a、ogg、flac、aac、opus 或 pcm；默认 mp3。": "mp3, wav, m4a, ogg, flac, aac, opus or pcm; defaults to mp3.",
   "语速，0.25 到 4.0；默认 1。": "Speed from 0.25 to 4.0; default 1.",
   "额外要求，例如语气、停顿、背景音。": "Extra requirements such as tone, pauses or background sound.",

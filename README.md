@@ -179,7 +179,6 @@ Set variables in `.env` or in the service environment. Runtime settings saved fr
 | `MUSE2API_VIDEO_TIMEOUT` | `600` | Video timeout (seconds) |
 | `MUSE2API_AUDIO_TIMEOUT` | `180` | Speech timeout (seconds) |
 | `MUSE2API_CHAT_TIMEOUT` | `300` | Chat timeout (seconds) |
-| `MUSE2API_AUDIO_VOICE` | `自然清晰的女声` | Default voice description |
 | `MUSE2API_SYSTEM_PROMPT_ENABLED` | `0` | Attach the global system prompt to every request |
 | `MUSE2API_SYSTEM_PROMPT` | session-isolation text | System prompt content; use `\n` for line breaks |
 | `MUSE2API_MEDIA_CLEANUP_ENABLED` | `1` | Enable scheduled media cleanup |

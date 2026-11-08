@@ -204,7 +204,7 @@ async def check(source, home):
         assert calls[-1][1] == "video"
         assert calls[-1][3] == [
             "data:image/png;base64,c3RhcnQ=", "data:image/png;base64,c3R5bGU="]
-        assert "2 张参考图片" in calls[-1][0]
+        assert "2 reference images" in calls[-1][0]
         print("multi_reference_video_forwarding=PASS")
 
         for bad in [
