@@ -319,7 +319,7 @@
         </div>
       </div>
       <div class="hint" style="margin:11px 0 0" data-i18n="model-names-hint">
-        模型名：<code>muse-spark</code>（对话/代码）、<code>muse-image</code>（生图）、<code>muse-video</code>（生视频）。
+        模型名：<code>muse-spark</code>（对话/代码）、<code>muse-image</code>（生图）、<code>muse-video</code>（生视频）、<code>muse-voice</code>（语音）。
         完整调用示例见「接入文档」页签。
       </div>
     </div>
@@ -551,7 +551,7 @@
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px">
         <div>
           <h3 style="margin:0 0 4px">媒体库 <span class="tag" id="mediaCount">0</span></h3>
-          <div class="hint" style="margin:0">所有已生成并落盘的图片 / 视频，可直接下载或把链接给下游项目使用。</div>
+          <div class="hint" style="margin:0">所有已生成并落盘的图片 / 视频 / 音频，可直接下载或把链接给下游项目使用。</div>
         </div>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           <button class="ghost mini" onclick="loadMedia()">刷新</button>
@@ -592,6 +592,25 @@
       <div style="margin-top:12px"><button class="primary-lg" id="vidBtn" onclick="runVideo()">开始生成视频</button></div>
       <div class="result" id="vidRes"></div>
     </div>
+
+    <div class="card">
+      <h3>在线语音合成测试 <span class="tag">POST /v1/audio/speech</span></h3>
+      <div class="hint">让 Muse 按文本生成语音，约 10–40 秒返回二进制音频；默认 MP3。</div>
+      <div class="row">
+        <div style="flex:3"><label>朗读文本</label>
+          <textarea id="audInput" rows="3" style="width:100%;resize:vertical">Xin chào, đây là bản thử nghiệm tạo audio.</textarea></div>
+        <div style="max-width:240px"><label>音色描述</label>
+          <input type="text" id="audVoice" placeholder="例如：自然清晰的女声"></div>
+      </div>
+      <div class="row">
+        <div style="max-width:160px"><label>格式</label>
+          <select id="audFormat"><option>mp3</option><option>wav</option><option>m4a</option><option>ogg</option><option>flac</option></select></div>
+        <div style="max-width:160px"><label>语速</label>
+          <input type="number" id="audSpeed" value="1" min="0.25" max="4" step="0.05"></div>
+      </div>
+      <div style="margin-top:12px"><button class="primary-lg" id="audBtn" onclick="runAudio()">开始生成语音</button></div>
+      <div class="result" id="audRes"></div>
+    </div>
   </section>
 
   <!-- ==================== 接入文档 ==================== -->
@@ -610,11 +629,12 @@
           <tr><td class="mono">muse-spark</td><td>文本 / 代码对话（支持流式）</td><td class="mono">POST /v1/chat/completions<br>POST /v1/responses</td></tr>
           <tr><td class="mono">muse-image</td><td>文生图 / 图像编辑</td><td class="mono">POST /v1/images/generations</td></tr>
           <tr><td class="mono">muse-video</td><td>文生视频 / 图生视频</td><td class="mono">POST /v1/videos → GET /v1/videos/{id}</td></tr>
+          <tr><td class="mono">muse-voice</td><td>文本转语音（TTS）</td><td class="mono">POST /v1/audio/speech（二进制）</td></tr>
         </tbody>
       </table></div>
       <div class="hint" style="margin-top:6px" data-i18n="models-hint">
-        这三个就是 Muse 系列的真实能力：<b>Muse Spark</b>（语言 / 代码）、<b>Muse Image</b>（生图）、
-        <b>Muse Video</b>（生视频）。muse.ai 网页是自动路由的 agent、界面没有模型选择器，
+        这四个就是 Muse 系列的真实能力：<b>Muse Spark</b>（语言 / 代码）、<b>Muse Image</b>（生图）、
+        <b>Muse Video</b>（生视频）、<b>Muse Voice</b>（语音）。muse.ai 网页是自动路由的 agent、界面没有模型选择器，
         所以 <code>model</code> 字段只用于兼容下游 —— 传 <code>gpt-4o</code>、
         <code>claude-sonnet-4</code>、<code>dall-e-3</code> 等常见名字会自动映射到对应能力。
       </div>
@@ -655,7 +675,17 @@ curl -X POST <span class="s">"BASE/v1/videos"</span> \
 curl <span class="s">"BASE/v1/videos/task_xxx"</span> -H <span class="s">"Authorization: Bearer $MUSE2API_KEY"</span>
 <span class="c"># → {"status":"succeeded","result":{"url":"/v1/media/xxx.mp4"}}</span></pre>
 
-      <h4>5. Python（openai SDK 兼容）</h4>
+      <h4>5. 语音合成（curl，二进制）</h4>
+      <pre class="code"><span class="cp" onclick="cp(this)">复制</span>curl -X POST <span class="s">"BASE/v1/audio/speech"</span> \
+  -H <span class="s">"Authorization: Bearer $MUSE2API_KEY"</span> \
+  -H <span class="s">"Content-Type: application/json"</span> \
+  -d <span class="s">'{"model":"muse-voice","input":"Xin chào, đây là bản thử.","voice":"自然清晰的女声","response_format":"mp3"}'</span> \
+  --output speech.mp3
+
+<span class="c"># 直接返回音频字节：Content-Type: audio/mpeg，文件同时存入媒体库。</span>
+<span class="c"># X-Muse-Audio-Format 是实际格式；请求 wav/m4a 等格式时，服务端装了 ffmpeg 会自动转码。</span></pre>
+
+      <h4>6. Python（openai SDK 兼容）</h4>
       <pre class="code"><span class="cp" onclick="cp(this)">复制</span><span class="k">from</span> openai <span class="k">import</span> OpenAI
 <span class="k">import</span> time
 
@@ -674,9 +704,14 @@ t = requests.post(<span class="s">"BASE/v1/videos"</span>, json={<span class="s"
                      headers={<span class="s">"Authorization"</span>:<span class="s">"Bearer m2a_..."</span>}).json()
     <span class="k">if</span> s[<span class="s">"status"</span>] <span class="k">in</span> (<span class="s">"succeeded"</span>,<span class="s">"failed"</span>): <span class="k">break</span>
     time.sleep(<span class="s">5</span>)
-<span class="k">print</span>(s)</pre>
+<span class="k">print</span>(s)
 
-      <h4>6. 管理接口</h4>
+<span class="c"># 语音合成（直接写文件）</span>
+speech = client.audio.speech.create(
+    model=<span class="s">"muse-voice"</span>, voice=<span class="s">"自然清晰的女声"</span>, input=<span class="s">"Xin chào"</span>)
+speech.write_to_file(<span class="s">"speech.mp3"</span>)</pre>
+
+      <h4>7. 管理接口</h4>
       <div class="tblwrap"><table>
         <thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead>
         <tbody>
@@ -694,14 +729,14 @@ t = requests.post(<span class="s">"BASE/v1/videos"</span>, json={<span class="s"
         </tbody>
       </table></div>
 
-      <h4>7. 鉴权</h4>
+      <h4>8. 鉴权</h4>
       <div class="hint" style="margin:0" data-i18n="auth-hint">
         除 <code>/healthz</code>、<code>/readyz</code>、<code>/v1/media/*</code> 外，其余接口均需
         <code>Authorization: Bearer &lt;API Key&gt;</code>。API Key 在服务器
         <code>/opt/muse2api/.env</code> 的 <code>MUSE2API_KEY</code> 中配置。
       </div>
 
-      <h4>8. 接入各类客户端 / 智能体</h4>
+      <h4>9. 接入各类客户端 / 智能体</h4>
       <div class="hint">
         凡是支持「自定义 OpenAI 兼容端点」的客户端，都只填三个值就能用：
       </div>
@@ -731,6 +766,7 @@ t = requests.post(<span class="s">"BASE/v1/videos"</span>, json={<span class="s"
           <tr><td>翻译 / 总结 / 解释类工具</td><td class="mono">POST /v1/chat/completions</td><td><span class="badge ok">✅ 可用</span></td></tr>
           <tr><td>画图类客户端</td><td class="mono">POST /v1/images/generations</td><td><span class="badge ok">✅ 可用</span></td></tr>
           <tr><td>视频生成客户端</td><td class="mono">POST /v1/videos（异步轮询）</td><td><span class="badge ok">✅ 可用</span></td></tr>
+          <tr><td>语音合成 / TTS 客户端</td><td class="mono">POST /v1/audio/speech</td><td><span class="badge ok">✅ 可用</span></td></tr>
           <tr><td>需要「工具调用」的自主 Agent 模式</td><td class="mono">tool_calls / function calling</td><td><span class="badge warn">⚠️ 不可用</span></td></tr>
         </tbody>
       </table></div>
@@ -965,9 +1001,9 @@ const I18N_EN = {
   "耗时": "Duration",
   "创建时间": "Created",
   "结果 / 错误": "Result / Error",
-  "所有已生成并落盘的图片 / 视频，可直接下载或把链接给下游项目使用。": "All generated images / videos saved on disk. Download them directly or give the links to downstream projects.",
   "全选": "Select all",
   "删除选中 (": "Delete selected (",
+  "所有已生成并落盘的图片 / 视频 / 音频，可直接下载或把链接给下游项目使用。": "All generated images, videos and audio saved to disk. Download them directly or pass the links to downstream projects.",
   "在线生图测试": "Image generation test",
   "真实调用 muse.ai 生成，图片约 10–30 秒返回。": "Calls muse.ai for real; images return in about 10–30 seconds.",
   "比例": "Aspect ratio",
@@ -976,6 +1012,17 @@ const I18N_EN = {
   "异步任务，一般 60–120 秒完成，页面会自动轮询进度。": "Asynchronous task, usually done in 60–120 seconds; the page polls progress automatically.",
   "时长(秒)": "Duration (s)",
   "开始生成视频": "Generate video",
+  "在线语音合成测试": "Speech synthesis test",
+  "让 Muse 按文本生成语音，约 10–40 秒返回二进制音频；默认 MP3。": "Asks Muse to speak the text and returns binary audio in about 10–40 seconds; MP3 by default.",
+  "朗读文本": "Text to read",
+  "音色描述": "Voice description",
+  "例如：自然清晰的女声": "e.g. a natural, clear female voice",
+  "格式": "Format",
+  "语速": "Speed",
+  "开始生成语音": "Generate speech",
+  "请输入朗读文本": "Enter the text to read",
+  "正在请求 Muse 生成语音，通常 10–40 秒…": "Requesting speech from Muse; usually 10–40 seconds…",
+  "已保存到媒体库：": "Saved to the media library: ",
   "接入说明": "Integration guide",
   "1. 可用模型": "1. Available models",
   "模型 ID": "Model ID",
@@ -998,11 +1045,17 @@ const I18N_EN = {
   "# ① 创建任务": "# ① Create the task",
   "'{\"prompt\":\"一只小猫在草地上走动\",\"duration\":5,\"size\":\"16:9\"}'": "'{\"prompt\":\"A kitten walking on the grass\",\"duration\":5,\"size\":\"16:9\"}'",
   "# ② 轮询结果": "# ② Poll for the result",
-  "5. Python（openai SDK 兼容）": "5. Python (openai SDK compatible)",
+  "5. 语音合成（curl，二进制）": "5. Speech synthesis (curl, binary)",
+  "# 直接返回音频字节：Content-Type: audio/mpeg，文件同时存入媒体库。": "# Returns audio bytes directly with Content-Type: audio/mpeg; the file is also saved to the media library.",
+  "# X-Muse-Audio-Format 是实际格式；请求 wav/m4a 等格式时，服务端装了 ffmpeg 会自动转码。": "# X-Muse-Audio-Format is the actual format. If ffmpeg is installed, requests for wav/m4a and similar are transcoded automatically.",
+  "6. Python（openai SDK 兼容）": "6. Python (openai SDK compatible)",
   "# 生图": "# Image generation",
   "# 生视频（走原生接口，因为是异步任务）": "# Video generation (uses the native endpoint because it is asynchronous)",
   "\"小猫走动\"": "\"A kitten walking\"",
-  "6. 管理接口": "6. Admin API",
+  "# 语音合成（直接写文件）": "# Speech synthesis (writes straight to a file)",
+  "文本转语音（TTS）": "Text to speech (TTS)",
+  "语音合成 / TTS 客户端": "Speech synthesis / TTS clients",
+  "7. 管理接口": "7. Admin API",
   "方法": "Method",
   "路径": "Path",
   "说明": "Description",
@@ -1015,8 +1068,8 @@ const I18N_EN = {
   "更新该账号 cookie": "Update this account's cookies",
   "媒体库列表": "Media library list",
   "批量删除媒体文件": "Delete media files in batch",
-  "7. 鉴权": "7. Authentication",
-  "8. 接入各类客户端 / 智能体": "8. Connecting clients / agents",
+  "8. 鉴权": "8. Authentication",
+  "9. 接入各类客户端 / 智能体": "9. Connecting clients / agents",
   "凡是支持「自定义 OpenAI 兼容端点」的客户端，都只填三个值就能用：": "Any client that supports a \"custom OpenAI-compatible endpoint\" works with just three values:",
   "配置项": "Setting",
   "填什么": "Value",
@@ -1222,7 +1275,7 @@ const I18N_EN_HTML = {
   "extension-upgrade-notice": "<b>Important: manually upgrade the extension to 1.0.2</b><br>Updating the service does not update unpacked extensions. Replace files in the original folder and click Reload at <code>chrome://extensions</code> or <code>edge://extensions</code>, separately for each browser profile.<br><a href=\"https://github.com/czg86389-hub/muse2api/releases/download/v1.6.9/muse2api-chrome-extension-v1.6.9.zip\">Download extension 1.0.2</a>; upgrade the userscript to 1.1.2.",
   "repo-status-desc": "Comparing your local version with the latest version in the official GitHub repository… (online upgrades keep your <code>.env</code> keys and the <code>data/</code> Account Pool and media data)",
   "auth-banner": "\n      <b>Enter your API Key first so the page can load data</b><br>\n      <span style=\"color:var(--muted)\">\n        The API Key is this service's own \"access password\". It stops other people from using your Muse account quota.\n        It is <b style=\"color:var(--text)\">not</b> your Muse password. It is a random string generated at deploy time (it starts with <code>m2a_</code>).<br>\n        Paste it into the box at the top right and click \"Save\". Your browser remembers it, so you won't need to enter it again.\n      </span>\n    ",
-  "model-names-hint": "\n        Model names: <code>muse-spark</code> (chat/code), <code>muse-image</code> (images), <code>muse-video</code> (videos).\n        See the \"Integration Docs\" tab for full examples.\n      ",
+  "model-names-hint": "\n        Model names: <code>muse-spark</code> (chat/code), <code>muse-image</code> (images), <code>muse-video</code> (videos), <code>muse-voice</code> (speech).\n        See the \"Integration Docs\" tab for full examples.\n      ",
   "add-account-hint": "\n        Copy the <b>muse.ai</b> cookie string from your browser and paste it here. Required cookies:\n        <code>hatch_sess</code>. <code>hatch_vml</code> is an optional workspace token and does not block import.\n        For batch import, put one account per line in the format <code>label | cookie string</code> (label is optional).\n      ",
   "keepalive-hint": "The system runs <b>a silent background keep-alive every 30 minutes</b> and <b>fair multi-account rotation (LRU)</b>. \"Test\" actually opens muse.ai to verify the session.",
   "ext-why-hint": "\n        A small browser extension syncs <b>the muse.ai login you already have on your own computer</b>.\n        No Python, no terminal, no commands.<br>\n        <b>Why an extension is required</b>: muse.ai's login session cookie is marked\n        <code>httpOnly</code>, so page scripts (typing <code>document.cookie</code> in F12,\n        bookmarklets) can't read them. Only a browser extension's <code>cookies</code> API can.\n      ",
@@ -1236,7 +1289,7 @@ const I18N_EN_HTML = {
   "vml-role": "Optional workspace token; <b>not required for import</b>",
   "lifetime-hint": "Session validity is determined by upstream authentication. hatch_vml is an optional workspace token that may be absent or reissued; its absence or expiry alone does not prove the login is invalid. Test the account after import. Log in and import again when the upstream returns HTTP 401.",
   "docs-intro": "\n        The API follows the OpenAI style; downstream projects only need to change <code>base_url</code> and <code>api_key</code>.\n        <br>BASE URL: <code id=\"dBase\">—</code>\n      ",
-  "models-hint": "\n        These three are the real capabilities of the Muse family: <b>Muse Spark</b> (language / code), <b>Muse Image</b> (images),\n        <b>Muse Video</b> (videos). The muse.ai web app is an auto-routing agent with no model picker in the UI,\n        so the <code>model</code> field is only for downstream compatibility: common names like <code>gpt-4o</code>,\n        <code>claude-sonnet-4</code> and <code>dall-e-3</code> are mapped to the matching capability automatically.\n      ",
+  "models-hint": "\n        These four are the real capabilities of the Muse family: <b>Muse Spark</b> (language / code), <b>Muse Image</b> (images),\n        <b>Muse Video</b> (videos), <b>Muse Voice</b> (speech). The muse.ai web app is an auto-routing agent with no model picker in the UI,\n        so the <code>model</code> field is only for downstream compatibility: common names like <code>gpt-4o</code>,\n        <code>claude-sonnet-4</code> and <code>dall-e-3</code> are mapped to the matching capability automatically.\n      ",
   "auth-hint": "\n        Except for <code>/healthz</code>, <code>/readyz</code> and <code>/v1/media/*</code>, all endpoints require\n        <code>Authorization: Bearer &lt;API Key&gt;</code>. The API Key is configured in\n        <code>MUSE2API_KEY</code> in <code>/opt/muse2api/.env</code> on the server.\n      ",
   "model-alias-hint": "\n        <b>Any model name works</b>: common names (<code>gpt-4o</code>, <code>gpt-5</code>,\n        <code>claude-sonnet-4</code>, <code>deepseek-chat</code>, <code>gemini-2.5-pro</code>, etc.)\n        are mapped to the matching capability automatically; unknown names are passed through unchanged. muse.ai routes automatically anyway,\n        so the result is the same.\n      ",
   "tool-calls-hint": "\n        <b>About the \"tool calling\" limitation (important, tested):</b><br>\n        The muse.ai web assistant has an explicit alignment policy that refuses to \"output fake tool-call JSON\". Its actual reply in testing was\n        \"I won't output 'fake tool calls' in this JSON format — I don't have a get_weather tool.\"\n        Three prompt protocols with different wording and placement were tried, and all failed.<br>\n        So: <b>autonomous agent modes</b> that depend on <code>tool_calls</code> (reading/writing files, running commands, etc.) can't be supported;\n        but all <b>Q&amp;A-style</b> usage (chat, coding, explaining, translating, summarizing, images, videos) <b>works fully</b>.<br>\n        If a client sends a <code>tools</code> field anyway, the API won't error: it ignores the tool declarations and answers as a normal chat.\n      ",
@@ -2124,7 +2177,9 @@ async function loadMedia(){
         </label>
         <div class="thumb">${m.kind === 'video'
           ? `<video src="${esc(m.url)}" muted playsinline preload="metadata"></video>`
-          : `<img src="${esc(m.url)}" loading="lazy" alt="">`}</div>
+          : m.kind === 'audio'
+            ? `<div style="display:flex;align-items:center;justify-content:center;padding:10px 6px;width:100%;box-sizing:border-box"><audio src="${esc(m.url)}" controls preload="metadata" style="width:100%;min-width:0"></audio></div>`
+            : `<img src="${esc(m.url)}" loading="lazy" alt="">`}</div>
         <div class="meta">
           <div class="nm" title="${esc(m.name)}">${esc(m.name)}</div>
           <div style="margin-top:3px">${fmtBytes(m.bytes)} · ${fmtTime(m.mtime)}</div>
@@ -2213,6 +2268,50 @@ async function runVideo(){
   }catch(e){
     box.innerHTML = `<b style="color:var(--bad)">✗ 创建任务失败</b><pre class="out">${esc(e.message)}</pre>`;
     btn.disabled = false; btn.textContent = '开始生成视频';
+  }
+}
+
+let _lastAudioUrl = '';
+async function runAudio(){
+  const btn = $('audBtn'), box = $('audRes');
+  const input = $('audInput').value.trim();
+  if (!input) return toast('请输入朗读文本', 'warn');
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span>生成中…';
+  box.className = 'result show';
+  box.innerHTML = '<span class="spin"></span>正在请求 Muse 生成语音，通常 10–40 秒…';
+  const t0 = Date.now();
+  try{
+    const headers = {'Content-Type':'application/json'};
+    if (KEY) headers['Authorization'] = 'Bearer ' + KEY;
+    const speed = parseFloat($('audSpeed').value);
+    const r = await fetch('/v1/audio/speech', {method:'POST', headers, body: JSON.stringify({
+      model:'muse-voice', input,
+      voice: $('audVoice').value.trim() || undefined,
+      response_format: $('audFormat').value,
+      speed: Number.isFinite(speed) ? speed : undefined,
+    })});
+    if (!r.ok){
+      const txt = await r.text();
+      let detail = txt;
+      try{ const d = JSON.parse(txt); detail = (d.error && d.error.message) || d.detail || txt; }catch(e){}
+      if (r.status === 401) setAuth(false);
+      throw new Error(detail || ('HTTP ' + r.status));
+    }
+    const blob = await r.blob();
+    if (_lastAudioUrl) URL.revokeObjectURL(_lastAudioUrl);
+    _lastAudioUrl = URL.createObjectURL(blob);
+    const fmt = r.headers.get('X-Muse-Audio-Format') || $('audFormat').value;
+    const media = r.headers.get('X-Muse-Media-Name') || '';
+    const el = ((Date.now()-t0)/1000).toFixed(1);
+    box.innerHTML = `<b style="color:var(--ok)">✓ 生成成功</b>
+      <span class="mono" style="color:var(--muted);margin-left:10px">${el}s · ${esc(fmt)} · ${fmtBytes(blob.size)}</span>
+      <audio controls autoplay src="${_lastAudioUrl}" style="width:100%;margin-top:10px"></audio>
+      <div class="hint" style="margin-top:8px">已保存到媒体库：<code>${esc(media)}</code></div>`;
+    loadMedia();
+  }catch(e){
+    box.innerHTML = `<b style="color:var(--bad)">✗ 生成失败</b><pre class="out">${esc(e.message)}</pre>`;
+  }finally{
+    btn.disabled = false; btn.textContent = '开始生成语音';
   }
 }
 

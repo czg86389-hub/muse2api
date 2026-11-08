@@ -47,6 +47,20 @@ MAX_REFERENCE_TOTAL_BYTES = 100 * 1024 * 1024
 MAX_REFERENCE_VIDEO_SECONDS = 120
 _MIB = 1024 * 1024
 
+MEDIA_VIDEO_EXTS = (".mp4", ".webm", ".mov")
+MEDIA_AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac", ".opus")
+
+
+def media_kind(ext: str) -> str:
+    """落盘扩展名 -> image / video / audio。"""
+    e = (ext or "").lower()
+    if e in MEDIA_VIDEO_EXTS:
+        return "video"
+    if e in MEDIA_AUDIO_EXTS:
+        return "audio"
+    return "image"
+
+
 # 允许上传到 muse 输入框的素材类型 -> 落盘扩展名。
 # 图片/视频/文档取自 muse 前端白名单；音频不在白名单里，但输入框接受，
 # 且实测模型能读出 wav 的内容，所以一并放开。
@@ -977,18 +991,24 @@ class MuseEngine:
         "  if(el.closest('form, [class*=chat-user-bubble], [class*=\"group/msg\"]')) return;"
         "  var v = el.querySelector('video') || (el.tagName === 'VIDEO' ? el : null);"
         "  var img = el.querySelector('img') || (el.tagName === 'IMG' ? el : null);"
+        "  var au = el.querySelector('audio') || (el.tagName === 'AUDIO' ? el : null);"
         "  var isVid = (tid || '').includes('video') || !!v;"
-        "  var primary = isVid ? (v || img) : (img || v);"
+        "  var isAud = (tid || '').includes('audio') || !!au;"
+        "  var primary = isVid ? (v || img) : (isAud ? (au || img) : (img || v));"
         "  var src = primary ? (primary.currentSrc || primary.src || '') : '';"
-        "  if(src && !seen.has(src)){"
-        "    seen.add(src);"
+        "  var key = src || (isAud ? 'audio:' + (tid || '') : '');"
+        "  if(key && !seen.has(key)){"
+        "    seen.add(key);"
         "    list.push({"
-        "      tid: tid || el.getAttribute('data-testid') || (isVid ? 'video' : 'image'),"
+        "      tid: tid || el.getAttribute('data-testid') || (isVid ? 'video' : (isAud ? 'audio' : 'image')),"
         "      hasVideo: !!v,"
         "      hasImg: !!img,"
+        "      hasAudio: !!au,"
+        "      isAudio: isAud,"
         "      src: src,"
         "      vSrc: v ? (v.currentSrc || v.src || '') : '',"
         "      iSrc: img ? (img.currentSrc || img.src || '') : '',"
+        "      aSrc: au ? (au.currentSrc || au.src || '') : '',"
         "      w: primary ? (primary.videoWidth || primary.naturalWidth || 0) : 0,"
         "      h: primary ? (primary.videoHeight || primary.naturalHeight || 0) : 0"
         "    });"
@@ -1164,6 +1184,7 @@ class MuseEngine:
         deadline = time.time() + timeout
         t_start = time.time()
         stable_src, stable_n = "", 0
+        audio_key, audio_stable = None, 0
         last_txt, txt_stable = "", 0
         refusal_last, refusal_stable = "", 0
         seen_stop = False
@@ -1194,8 +1215,15 @@ class MuseEngine:
                         or bool(v_src)
                         or src.endswith((".mp4", ".webm", ".mov"))
                     )
+                elif expect == "audio":
+                    # 音频卡片在播放前没有任何 <audio> 元素或 URL，只能按 testid 认。
+                    is_match = bool(a.get("isAudio")) or "audio" in tid
                 else:
-                    is_match = ("image" in tid) or (not has_video and not src.endswith((".mp4", ".webm", ".mov")))
+                    is_match = (
+                        not a.get("isAudio")
+                        and (("image" in tid)
+                             or (not has_video and not src.endswith((".mp4", ".webm", ".mov"))))
+                    )
                 if is_match:
                     matching_atts.append(a)
 
@@ -1210,6 +1238,8 @@ class MuseEngine:
                     check_src = v_src if v_src else (
                         src if src.endswith((".mp4", ".webm", ".mov")) else ""
                     )
+                elif expect == "audio":
+                    check_src = ""
                 else:
                     check_src = src
                 if check_src and check_src not in baseline_sources:
@@ -1262,6 +1292,16 @@ class MuseEngine:
                         progress_sent = milestone
                     except Exception:
                         pass
+
+            # 音频卡片没有 src，按「卡片连续出现且 Stop 已消失」确认生成完成。
+            if expect == "audio" and att is not None:
+                akey = (att.get("tid") or "", att.get("src") or "")
+                if akey == audio_key:
+                    audio_stable += 1
+                else:
+                    audio_key, audio_stable = akey, 0
+                if not has_stop and audio_stable >= 1:
+                    return att
 
             # COOL AI 2026-11-08：发出 25 秒后模型毫无回复、输入框里还留着附件 / 文字 = 这条消息没发出去。
             # 补点一次发送；60 秒仍没发出就报错，交给外层换号重试（以前要干等到总超时 10 分钟）。
@@ -1336,40 +1376,51 @@ class MuseEngine:
                 r"(?:生成|制作|渲染|处理)[^。！？!?\n]{0,12}(?:失败|未成功)|"
                 r"\b(?:not|never|hasn['’]t|wasn['’]t|isn['’]t)\s+(?:(?:be|been|successfully)\s+){0,3}"
                 r"(?:generated|created|completed|ready)|"
-                r"\b(?:no|without)\s+(?:video|clip|image|picture|animation)\b"
+                r"\b(?:no|without)\s+(?:video|clip|image|picture|animation|audio|speech|voiceover)\b"
                 r"[^.\n]{0,60}\b(?:generated|created|ready)|"
                 r"\b(?:failed|cannot|can['’]t|could not|couldn['’]t|unable to)\b"
-                r"[^.\n]{0,60}\b(?:generat(?:e|ed|ing)|creat(?:e|ed|ing)|render|provide|video|image)\b|"
-                r"\b(?:video|image|render|upload)\b[^.\n]{0,32}\bfailed\b",
+                r"[^.\n]{0,60}\b(?:generat(?:e|ed|ing)|creat(?:e|ed|ing)|render|provide|video|image|audio|speech)\b|"
+                r"\b(?:video|image|audio|speech|voiceover|render|upload)\b[^.\n]{0,32}\bfailed\b",
                 text, re.I):
             return False
         return bool(re.search(
-            r"\.(?:webp|png|jpe?g|mp4|webm)|imagine_media|deliverable|"
+            r"\.(?:webp|png|jpe?g|mp4|webm|mp3|wav|m4a|ogg|flac|aac|opus)|"
+            r"imagine_media|deliverable|"
             r"generated\s+.*image|verified\s+generated|artifact|"
             r"^(?:已(?:经)?(?:成功)?生成|生成好了|生成完毕|已完成|做好了)(?:[，。！\s]|$)|"
-            r"(?:视频|影片|短片|图片|图像)[^。！？!?\n]{0,40}"
+            r"(?:视频|影片|短片|图片|图像|音频|语音)[^。！？!?\n]{0,40}"
             r"(?:已(?:经)?(?:成功)?生成|生成(?:成功|好了|完毕|完成)|已(?:经)?完成|做好了)|"
             r"(?:已(?:经)?(?:成功)?生成|生成好了|生成完毕|已完成|做好了)"
-            r"[^。！？!?\n]{0,32}(?:视频|影片|短片|图片|图像)|"
-            r"\b(?:video|clip|image|picture|animation)\b[^.\n]{0,60}"
+            r"[^。！？!?\n]{0,32}(?:视频|影片|短片|图片|图像|音频|语音)|"
+            r"\b(?:video|clip|image|picture|animation|audio|speech|voiceover)\b[^.\n]{0,60}"
             r"\b(?:generated|created|rendered|completed|ready)\b|"
             r"\b(?:generated|created|rendered|completed)\b[^.\n]{0,32}"
-            r"\b(?:video|clip|image|picture|animation)\b", text, re.I))
+            r"\b(?:video|clip|image|picture|animation|audio|speech|voiceover)\b", text, re.I))
 
     @classmethod
     def _media_refusal_text(cls, text: str, expect: str) -> str:
         """Return only an explicit media refusal line, never an arbitrary page tail."""
         if not text:
             return ""
-        patterns = [
-            r"^(?:没生成成|视频没生成成功|视频未生成成功|视频生成失败)[^\n]{0,240}"
-            r"(?:国家|地区|country|region)[^\n]{0,160}(?:不支持|不可用|无法|not available|unavailable|not supported)",
-            r"^(?:could not|couldn't|cannot|can't|unable to)[^\n]{0,120}video[^\n]{0,160}"
-            r"(?:country|region|not available|unavailable|not supported)",
-        ] if expect == "video" else [
-            r"^(?:图片没生成成功|图片未生成成功|图片生成失败|无法生成图片)",
-            r"^(?:could not|couldn't|cannot|can't|unable to)[^\n]{0,120}image",
-        ]
+        if expect == "video":
+            patterns = [
+                r"^(?:没生成成|视频没生成成功|视频未生成成功|视频生成失败)[^\n]{0,240}"
+                r"(?:国家|地区|country|region)[^\n]{0,160}(?:不支持|不可用|无法|not available|unavailable|not supported)",
+                r"^(?:could not|couldn't|cannot|can't|unable to)[^\n]{0,120}video[^\n]{0,160}"
+                r"(?:country|region|not available|unavailable|not supported)",
+            ]
+        elif expect == "audio":
+            patterns = [
+                r"^(?:音频没生成成功|音频未生成成功|音频生成失败|语音没生成成功|"
+                r"语音未生成成功|语音生成失败|无法生成音频|无法生成语音)",
+                r"^(?:could not|couldn't|cannot|can't|unable to)[^\n]{0,120}"
+                r"(?:audio|speech|voiceover|voice)",
+            ]
+        else:
+            patterns = [
+                r"^(?:图片没生成成功|图片未生成成功|图片生成失败|无法生成图片)",
+                r"^(?:could not|couldn't|cannot|can't|unable to)[^\n]{0,120}image",
+            ]
         for line in reversed((text or "").splitlines()):
             clean = cls._clean_model_text(line)
             if clean and any(re.search(pattern, clean, re.I) for pattern in patterns):
@@ -1396,6 +1447,75 @@ class MuseEngine:
         return JSON.stringify({ok:false, err:String(e)});
       }
     })(%s, %s)
+    """
+
+    # 音频卡片本身不带 URL：点播放后页面会 createObjectURL 出 blob: URL 再挂到 <audio>。
+    # 在播放前装钩子，既收集 createObjectURL 的音频 blob，也兜底记录 <audio>.src。
+    _AUDIO_HOOK_JS = r"""
+    (function(){
+      window.__museAudioBlobs = [];
+      if(window.__museAudioHook) return 'reset';
+      window.__museAudioHook = true;
+      function push(url, type, size){
+        if(!url) return;
+        for(var i=0;i<window.__museAudioBlobs.length;i++){
+          if(window.__museAudioBlobs[i].url === url) return;
+        }
+        window.__museAudioBlobs.push({url:url, type:type||'', size:size||0, t:Date.now()});
+      }
+      var orig = URL.createObjectURL;
+      URL.createObjectURL = function(obj){
+        var url = orig.call(URL, obj);
+        try{ push(url, obj && obj.type, obj && obj.size); }catch(e){}
+        return url;
+      };
+      var d = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
+      if(d && d.set){
+        Object.defineProperty(HTMLMediaElement.prototype, 'src', {
+          configurable: true, enumerable: d.enumerable, get: d.get,
+          set: function(v){
+            try{
+              if(String(v).indexOf('blob:') === 0) push(String(v), this.type || '', 0);
+            }catch(e){}
+            return d.set.call(this, v);
+          }
+        });
+      }
+      return 'installed';
+    })()
+    """
+
+    _AUDIO_PROBE_JS = r"""
+    JSON.stringify({
+      blobs: (window.__museAudioBlobs || []).filter(function(b){
+        return /^audio\//i.test(b.type || '') || (b.size > 0 && !b.type);
+      }),
+      audioSrcs: [].slice.call(document.querySelectorAll('audio'))
+        .map(function(a){return a.currentSrc || a.src || '';})
+        .filter(function(s){return s.indexOf('blob:') === 0;})
+    })
+    """
+
+    _AUDIO_PLAY_JS = r"""
+    (function(){
+      var card = document.querySelector('[data-testid="hatch-chat-attachment-presentation-audio"]')
+        || document.querySelector('[data-testid*="presentation-audio"]');
+      if(!card) return null;
+      var b = card.querySelector('button[aria-label="Play"]');
+      if(!b){
+        b = [].slice.call(card.querySelectorAll('button,[role="button"]')).find(function(x){
+          var label = (x.getAttribute('aria-label') || '').trim();
+          var tid = x.getAttribute('data-testid') || '';
+          return /^(play|播放)$/i.test(label) || /play/i.test(label + ' ' + tid);
+        });
+      }
+      if(!b) return null;
+      b.scrollIntoView({block:'center', inline:'center'});
+      var r = b.getBoundingClientRect();
+      if(r.width < 2 || r.height < 2) return null;
+      return JSON.stringify({x: Math.round(r.left + r.width / 2),
+                             y: Math.round(r.top + r.height / 2)});
+    })()
     """
 
     # ---------------- 文本 / 代码对话 ----------------
@@ -1563,6 +1683,68 @@ class MuseEngine:
             time.sleep(2)
         raise MuseGenerationError(f"未能取回生成结果: {last}")
 
+    # ---------------- 取音频字节 ----------------
+    def _audio_probe(self) -> dict:
+        try:
+            raw = self.page.js(self._AUDIO_PROBE_JS)
+            return json.loads(raw) if raw else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _audio_candidate(self, probe: dict) -> str:
+        blobs = probe.get("blobs") or []
+        # 优先本次钩子捕获的音频 blob；页面可能同时生成视频/图片预览。
+        for item in reversed(blobs):
+            url = item.get("url") or ""
+            if url.startswith("blob:") and str(item.get("type") or "").lower().startswith("audio/"):
+                return url
+        for url in probe.get("audioSrcs") or []:
+            if url.startswith("blob:"):
+                return url
+        return ""
+
+    def _click_audio_play(self) -> bool:
+        try:
+            raw = self.page.js(self._AUDIO_PLAY_JS)
+        except Exception:  # noqa: BLE001
+            return False
+        if not raw:
+            return False
+        try:
+            box = json.loads(raw)
+        except (TypeError, ValueError):
+            return False
+        if not box:
+            return False
+        x, y = int(box.get("x") or 0), int(box.get("y") or 0)
+        self.page.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+        for kind in ("mousePressed", "mouseReleased"):
+            self.page.send("Input.dispatchMouseEvent",
+                           {"type": kind, "x": x, "y": y, "button": "left", "clickCount": 1})
+        return True
+
+    def extract_audio_bytes(self, timeout: int = 40) -> tuple[bytes, str, str]:
+        """点播放让页面把 sandbox 音频解码成 blob: URL，再在页面内 fetch 回字节。"""
+        self.page.js(self._AUDIO_HOOK_JS)
+        deadline = time.time() + timeout
+        next_click, clicks = 0.0, 0
+        last = "未捕获到音频播放数据"
+        while time.time() < deadline:
+            probe = self._audio_probe()
+            url = self._audio_candidate(probe)
+            if url:
+                try:
+                    return self.extract_bytes(url, expect="audio", retries=2)
+                except MuseGenerationError as exc:
+                    last = str(exc)
+            if clicks < 4 and time.time() >= next_click:
+                clicks += 1
+                next_click = time.time() + 6.0
+                if not self._click_audio_play():
+                    last = "找不到音频卡片的播放按钮"
+            time.sleep(0.2)
+        raise MuseGenerationError(f"音频已生成但未能取回文件: {last}")
+
     # ---------------- 下载兜底 ----------------
     def _download_fallback(self, src: str, timeout: int = 180) -> str | None:
         directory = self.download_dir
@@ -1570,7 +1752,7 @@ class MuseEngine:
         # ponytail: fail closed when the selected result has no local download;
         # never click an unrelated/global button that can return the upload.
         clicked = self.page.js("""(function(src){
-            var media=[...document.querySelectorAll('img,video')]
+            var media=[...document.querySelectorAll('img,video,audio')]
                 .find(m=>(m.currentSrc||m.src||'')===src);
             var node=media && media.closest('[data-testid^="hatch-chat-attachment-presentation-"]');
             if(!node) return 'none';
@@ -1867,11 +2049,18 @@ class MuseEngine:
                 raise MuseGenerationError("等待生成超时，未出现新的生成结果")
 
             data = mime = url = None
-            selected_src = (att.get("vSrc") if expect == "video" else None) or att.get("src") or ""
+            selected_src = ""
             try:
-                data, mime, url = self.extract_bytes(selected_src, expect=expect)
+                if expect == "audio":
+                    data, mime, url = self.extract_audio_bytes()
+                else:
+                    selected_src = ((att.get("vSrc") if expect == "video" else None)
+                                    or att.get("src") or "")
+                    data, mime, url = self.extract_bytes(selected_src, expect=expect)
             except Exception:  # noqa: BLE001
                 self._debug_dump("extract-fail")
+                if expect == "audio":
+                    raise
 
             if data and hashlib.sha256(data).hexdigest() in upload_hashes:
                 log.warning("命中的附件是本次上传的参考素材，忽略并继续等待: %s", selected_src[:80])
@@ -1880,14 +2069,18 @@ class MuseEngine:
                 continue
 
             if data:
+                if not mime:
+                    mime = _sniff_mime(data) or ""
                 ext = self._pick_ext(mime, url, expect)
                 name = f"{uuid.uuid4().hex}{ext}"
                 dst = os.path.join(self.cfg.media_dir, name)
                 with open(dst, "wb") as f:
                     f.write(data)
-                kind = "video" if ext in (".mp4", ".webm", ".mov") else "image"
+                kind = media_kind(ext)
                 if expect == "video" and kind != "video":
                     raise MuseGenerationError(f"期望生成视频，但提取成品类型为图片 ({ext})，拒绝以图片冒充视频交付")
+                if expect == "audio" and kind != "audio":
+                    raise MuseGenerationError(f"期望生成音频，但提取成品类型为 {kind} ({ext})，拒绝交付")
                 return {"path": dst, "filename": name, "size": len(data), "ext": ext, "mime": mime,
                         "kind": kind,
                         "via": "blob", "attachment": att.get("tid"),
@@ -1908,9 +2101,11 @@ class MuseEngine:
             name = f"{uuid.uuid4().hex}{ext}"
             dst = os.path.join(self.cfg.media_dir, name)
             shutil.move(path, dst)
-            kind = "video" if ext in (".mp4", ".webm", ".mov") else "image"
+            kind = media_kind(ext)
             if expect == "video" and kind != "video":
                 raise MuseGenerationError(f"期望生成视频，但下载成品类型为图片 ({ext})，拒绝以图片冒充视频交付")
+            if expect == "audio" and kind != "audio":
+                raise MuseGenerationError(f"期望生成音频，但下载成品类型为 {kind} ({ext})，拒绝交付")
             return {"path": dst, "filename": name, "size": os.path.getsize(dst), "ext": ext, "mime": "",
                     "kind": kind,
                     "via": "download", "attachment": att.get("tid"),
@@ -1920,6 +2115,17 @@ class MuseEngine:
     @staticmethod
     def _pick_ext(mime: str, url: str, expect: str) -> str:
         m = (mime or "").lower()
+        if expect == "audio" or m.startswith("audio/"):
+            # audio/mp4 要排在 mp4 之前判断，否则会被当成视频扩展名。
+            for key, ext in (("mpeg", ".mp3"), ("mp3", ".mp3"), ("wav", ".wav"),
+                             ("mp4", ".m4a"), ("m4a", ".m4a"), ("ogg", ".ogg"),
+                             ("flac", ".flac"), ("aac", ".aac"), ("opus", ".opus")):
+                if key in m:
+                    return ext
+            for e in MEDIA_AUDIO_EXTS:
+                if e in (url or "").lower():
+                    return e
+            return ".mp3"
         for key, ext in (("mp4", ".mp4"), ("webm", ".webm"), ("png", ".png"),
                          ("jpeg", ".jpg"), ("jpg", ".jpg"), ("webp", ".webp"),
                          ("gif", ".gif")):
@@ -1934,7 +2140,7 @@ class MuseEngine:
         try:
             info = self.page.js(
                 "JSON.stringify({atts:[...document.querySelectorAll('" + ATT_SEL + "')]"
-                ".map(function(a){var m=a.querySelector('img,video');return {"
+                ".map(function(a){var m=a.querySelector('img,video,audio');return {"
                 "tid:a.getAttribute('data-testid'),"
                 "src:m?(m.currentSrc||m.src||'').slice(0,60):''};}),"
                 "buttons:[...document.querySelectorAll('button,[role=button]')]"

@@ -13,7 +13,7 @@
   🤝 本开源项目已链接并认可 <b><a href="https://linux.do/" target="_blank">LINUX DO 社区 (https://linux.do/)</a></b> —— 新的理想型社区（真诚、友善、团结、专业）
 </p>
 
-将 **[muse.ai](https://muse.ai/)** 网页端的前沿多模态能力逆向工程封装为标准的 **OpenAI 兼容 RESTful API**。通过无头浏览器 CDP 协议穿透、热备 WebSocket 隧道复用与动态 Session 管理，原生支持文本对话（2~3 秒级流式首字响应）、文生图、图生图编辑、文生视频、首帧图生视频，并提供多账号池亲和轮转、全自动 48 小时会话续期与云端 VM 唤醒保活，以及配套 Chrome 一键导号扩展。
+将 **[muse.ai](https://muse.ai/)** 网页端的前沿多模态能力逆向工程封装为标准的 **OpenAI 兼容 RESTful API**。通过无头浏览器 CDP 协议穿透、热备 WebSocket 隧道复用与动态 Session 管理，原生支持文本对话（2~3 秒级流式首字响应）、文生图、图生图编辑、文生视频、首帧图生视频、文本转语音，并提供多账号池亲和轮转、全自动 48 小时会话续期与云端 VM 唤醒保活，以及配套 Chrome 一键导号扩展。
 
 ---
 
@@ -59,6 +59,10 @@ Upload one product photo and get talking-head sales videos, story-style ad short
   - 支持上传单张首帧参考图，或通过 `images` 数组上传多张内容与风格参考图；多图模式以第一张作为主要起始画面。
   - 异步任务架构（`/v1/videos` 创建任务 + `/v1/videos/{task_id}` 状态轮询）。
   - 内置媒体资源服务 `/v1/media/{filename}`，自动持久化存储生成的 MP4 / WebP 资源。
+- 🔊 **文本转语音（Text to Speech）**
+  - 兼容 `/v1/audio/speech`，直接返回二进制音频（默认 MP3），可直接接入 OpenAI SDK 的 `client.audio.speech.create`。
+  - `voice` 接受自由文本音色描述（如「自然清晰的女声」「南方口音的男声」），`speed` 控制语速。
+  - 生成结果同时写入媒体库，可通过 `/v1/media/{filename}` 复用；请求 wav / m4a 等格式时，服务器装有 `ffmpeg` 会自动转码，否则返回 Muse 原生格式并在 `X-Muse-Audio-Format` 中标明。
 - ⚡ **真多账号并行并发（Multi-Account Parallel Execution）**
   - 基于 Chromium 原生 `Target.createBrowserContext` 隐身隔离容器，多任务在独立沙箱中并发执行。
   - 多账号同时生图、生视频、流式对话零互相阻塞，Cookie 与 Session 100% 隔离绝不串扰。
@@ -357,6 +361,38 @@ curl -X POST "http://localhost:18610/v1/images/edits" \
   }
   ```
 
+### 4. 文本转语音（Text to Speech）
+
+```bash
+curl -X POST "http://localhost:18610/v1/audio/speech" \
+  -H "Authorization: Bearer m2a_your_secret_key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "muse-voice",
+    "input": "Xin chào, đây là bản thử nghiệm tạo audio.",
+    "voice": "自然清晰的女声",
+    "response_format": "mp3",
+    "speed": 1.0
+  }' \
+  --output speech.mp3
+```
+
+响应是音频字节，`Content-Type` 为 `audio/mpeg`，并在 `Content-Disposition` 和 `X-Muse-Media-Name` 中给出文件名。OpenAI SDK 可以直接使用：
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:18610/v1", api_key="m2a_your_secret_key")
+speech = client.audio.speech.create(
+    model="muse-voice", voice="自然清晰的女声", input="Xin chào")
+speech.write_to_file("speech.mp3")
+```
+
+- `voice` 是自由文本描述，会原样进入提示词；`default` 或 OpenAI 的 `alloy` / `nova` 等名字会替换为 `MUSE2API_AUDIO_VOICE`。
+- `response_format` 支持 `mp3` / `wav` / `m4a` / `ogg` / `flac` / `aac` / `opus` / `pcm`；Muse 原生输出可能是 MP3 / WAV / OGG，格式不同时由 ffmpeg 转码。
+- Muse 的官方语音 RPC 单次限制约为 4 MiB / 20 秒；超长文本建议按段落拆成多次请求再拼接。
+- 同步返回，默认超时 `MUSE2API_AUDIO_TIMEOUT=180` 秒。
+
 ---
 
 ## 🎞️ 参考素材：图片 / 视频 / 音频 / 文档
@@ -404,6 +440,8 @@ Nginx 反代需把 `client_max_body_size` 调到 200M 左右，否则大素材�
 | `MUSE2API_CONCURRENCY` | `2` | 最大并发生成任务数（支持随服务器资源自由调高，默认 2） |
 | `MUSE2API_IMAGE_TIMEOUT` | `240` | 生图超时上限（秒） |
 | `MUSE2API_VIDEO_TIMEOUT` | `600` | 生视频超时上限（秒） |
+| `MUSE2API_AUDIO_TIMEOUT` | `180` | 语音合成超时上限（秒） |
+| `MUSE2API_AUDIO_VOICE` | `自然清晰的女声` | `/v1/audio/speech` 未指定 `voice` 时的默认音色描述 |
 | `MUSE2API_CHAT_TIMEOUT` | `300` | 对话生成超时上限（秒） |
 | `MUSE2API_REF_IMAGE_LOCAL_FILES` | `0` | 默认禁止读取服务器本地路径；仅可信单用户部署可显式设为 `1` 恢复 |
 | `MUSE2API_REF_IMAGE_PRIVATE_FETCH` | `0` | 默认仅允许公网 URL，并逐跳检查 DNS/重定向、固定已检查 IP、不使用环境代理；显式设为 `1` 才允许私网/本机 URL |

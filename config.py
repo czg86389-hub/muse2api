@@ -101,6 +101,8 @@ class Config:
     # 生成
     image_timeout: int = field(default_factory=lambda: int(_env("MUSE2API_IMAGE_TIMEOUT", "240")))
     video_timeout: int = field(default_factory=lambda: int(_env("MUSE2API_VIDEO_TIMEOUT", "600")))
+    audio_timeout: int = field(default_factory=lambda: int(_env("MUSE2API_AUDIO_TIMEOUT", "180")))
+    audio_voice: str = field(default_factory=lambda: _env("MUSE2API_AUDIO_VOICE", "自然清晰的女声"))
     chat_timeout: int = field(default_factory=lambda: int(_env("MUSE2API_CHAT_TIMEOUT", "300")))
     max_concurrency: int = field(default_factory=lambda: max(1, int(_env("MUSE2API_CONCURRENCY", "8"))))
 
