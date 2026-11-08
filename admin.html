@@ -772,7 +772,7 @@
       <h3>说明</h3>
       <div class="hint" data-i18n="sysprompt-help">
         <b>关闭时</b>：请求内容与原来完全一致。<br>
-        <b>开启时</b>：聊天会作为「背景与任务设定」放在用户消息之前；生图、生视频、语音会在 prompt 前加上这段文本。<br>
+        <b>开启时</b>：聊天会把这段文本放进 <code>&lt;system&gt;...&lt;/system&gt;</code> 块并放在用户消息之前；生图、生视频、语音会在 prompt 前加上同样的 <code>&lt;system&gt;</code> 块。<br>
         默认值可以通过 <code>MUSE2API_SYSTEM_PROMPT_ENABLED</code> 和 <code>MUSE2API_SYSTEM_PROMPT</code> 设置；在管理页保存后，以 <code>data/settings.json</code> 为准。多行内容直接在这里编辑即可。
       </div>
     </div>
@@ -815,7 +815,7 @@
           <tr><td>异步任务</td><td>视频和异步图片接口先返回 id，再轮询 GET；重复轮询不会重复生成。</td></tr>
           <tr><td>媒体</td><td>生成结果写入媒体库，可通过 /v1/media/{name} 下载，无需鉴权。</td></tr>
           <tr><td>参考素材</td><td>最多 10 个；单个不超过 40 MiB；合计不超过 100 MiB；支持 URL、Data URL、Base64 和对象形式。</td></tr>
-          <tr><td>System Prompt</td><td>管理页开启全局 System Prompt 后，会附加到对话、Responses、生图、视频和语音请求的提示词。</td></tr>
+          <tr><td>System Prompt</td><td>管理页开启全局 System Prompt 后，会用 system 标签包裹并附加到对话、Responses、生图、视频和语音请求的提示词。</td></tr>
         </tbody>
       </table></div>
 
@@ -1871,7 +1871,7 @@ const I18N_EN = {
   "视频和异步图片接口先返回 id，再轮询 GET；重复轮询不会重复生成。": "Video and async image endpoints return an id first, then you poll with GET; polling never triggers another generation.",
   "生成结果写入媒体库，可通过 /v1/media/{name} 下载，无需鉴权。": "Results are saved to the media library and can be downloaded from /v1/media/{name} without auth.",
   "最多 10 个；单个不超过 40 MiB；合计不超过 100 MiB；支持 URL、Data URL、Base64 和对象形式。": "Up to 10 items; each at most 40 MiB; 100 MiB in total; URLs, Data URLs, Base64 and object forms are accepted.",
-  "管理页开启全局 System Prompt 后，会附加到对话、Responses、生图、视频和语音请求的提示词。": "When the global System Prompt is enabled in the console, it is prepended to chat, Responses, image, video and speech prompts.",
+  "管理页开启全局 System Prompt 后，会用 system 标签包裹并附加到对话、Responses、生图、视频和语音请求的提示词。": "When the global System Prompt is enabled in the console, it is wrapped in system tags and prepended to chat, Responses, image, video and speech prompts.",
   "存活检查，无需鉴权。": "Liveness check; no auth.",
   "就绪检查，返回可用账号数与浏览器状态。": "Readiness check; returns the enabled account count and browser state.",
   "可用模型列表。": "List of available models.",
@@ -1995,7 +1995,7 @@ const I18N_EN = {
 };
 /* 含富文本的块：data-i18n="key" → 英文 innerHTML（须保留原有子元素的 id/class/属性） */
 const I18N_EN_HTML = {
-  "sysprompt-help": "\n        <b>When off</b>: requests are sent exactly as before.<br>\n        <b>When on</b>: chat adds this text as <i>Background and task setup</i> before the user message; image, video and speech prompts get this text as a prefix.<br>\n        You can set the defaults with <code>MUSE2API_SYSTEM_PROMPT_ENABLED</code> and <code>MUSE2API_SYSTEM_PROMPT</code>; after saving here, <code>data/settings.json</code> takes precedence. Edit multi-line content directly in this box.\n      ",
+  "sysprompt-help": "\n        <b>When off</b>: requests are sent exactly as before.<br>\n        <b>When on</b>: chat places this text in a <code>&lt;system&gt;...&lt;/system&gt;</code> block before the user messages; image, video and speech prompts get the same <code>&lt;system&gt;</code> block as a prefix.<br>\n        You can set the defaults with <code>MUSE2API_SYSTEM_PROMPT_ENABLED</code> and <code>MUSE2API_SYSTEM_PROMPT</code>; after saving here, <code>data/settings.json</code> takes precedence. Edit multi-line content directly in this box.\n      ",
   "extension-upgrade-notice": "<b>Important: manually upgrade the extension to 1.0.2</b><br>Updating the service does not update unpacked extensions. Replace files in the original folder and click Reload at <code>chrome://extensions</code> or <code>edge://extensions</code>, separately for each browser profile.<br><a href=\"https://github.com/czg86389-hub/muse2api/releases/download/v1.6.9/muse2api-chrome-extension-v1.6.9.zip\">Download extension 1.0.2</a>; upgrade the userscript to 1.1.2.",
   "repo-status-desc": "Comparing your local version with the latest version in the official GitHub repository… (online upgrades keep your <code>.env</code> keys and the <code>data/</code> Account Pool and media data)",
   "auth-banner": "\n      <b>Enter your API Key first so the page can load data</b><br>\n      <span style=\"color:var(--muted)\">\n        The API Key is this service's own \"access password\". It stops other people from using your Muse account quota.\n        It is <b style=\"color:var(--text)\">not</b> your Muse password. It is a random string generated at deploy time (it starts with <code>m2a_</code>).<br>\n        Paste it into the box at the top right and click \"Save\". Your browser remembers it, so you won't need to enter it again.\n      </span>\n    ",

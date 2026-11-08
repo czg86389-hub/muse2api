@@ -50,7 +50,7 @@ Upload one product photo and get talking-head sales videos, story-style ad short
   - 支持多轮对话上下文、System Prompt 设定。
   - 内置模型智能别名映射，`gpt-4o`、`gpt-5`、`claude-sonnet-4`、`deepseek-chat` 等常用模型名自动路由。
 - 🧠 **全局 System Prompt（可选，默认关闭）**
-  - 在管理页「设置」开启后，自动附加到对话、Responses、生图、生视频和语音请求。
+  - 在管理页「设置」开启后，以 `<system>...</system>` 块自动附加到对话、Responses、生图、生视频和语音请求。
   - 默认内容是 Session isolation；可直接编辑、恢复默认，或通过环境变量设置。
   - 关闭时请求内容与原来完全一致。
 - 🎨 **高质量生图与图像编辑（Images Generations & Edits）**
@@ -402,8 +402,8 @@ speech.write_to_file("speech.mp3")
 
 默认关闭。开启后，muse2api 会把这段文本附加到发往 Muse 的每个请求：
 
-- 对话 / Responses：作为「背景与任务设定」放在用户消息之前；
-- 生图 / 生视频 / 语音：作为 prompt 前缀。
+- 对话 / Responses：放在 `<system>...</system>` 块中，置于用户消息之前；
+- 生图 / 生视频 / 语音：以同样的 `<system>...</system>` 块作为 prompt 前缀。
 
 在管理页「设置」里可以直接开启、编辑和保存；也可以用环境变量设置默认值：
 

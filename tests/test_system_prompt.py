@@ -86,7 +86,8 @@ async def main():
         assert module._with_system_prompt("PROMPT") == "PROMPT"
 
         extra = module.build_chat_prompt([msg], "SESSION RULE")
-        assert "背景与任务设定" in extra and "SESSION RULE" in extra
+        assert extra.startswith("<system>\nSESSION RULE\n</system>\n\n"), extra
+        assert extra.count("<system>") == 1 and extra.count("</system>") == 1, extra
         assert "用户：\nhello" in extra and not extra.startswith("hello")
 
         auth = {"Authorization": "Bearer prompt-secret"}
@@ -111,9 +112,10 @@ async def main():
             assert res.json()["system_prompt"] == "CUSTOM RULE"
 
             assert module._active_system_prompt() == "CUSTOM RULE"
-            assert module._with_system_prompt("PROMPT") == "CUSTOM RULE\n\nPROMPT"
+            assert module._with_system_prompt("PROMPT") == "<system>\nCUSTOM RULE\n</system>\n\nPROMPT"
             chat = module.build_chat_prompt([msg], module._active_system_prompt())
-            assert "CUSTOM RULE" in chat and "用户：\nhello" in chat
+            assert chat.startswith("<system>\nCUSTOM RULE\n</system>\n\n"), chat
+            assert "用户：\nhello" in chat
 
             # The media path goes through _run_generation -> _run_generation_locked.
             captured = {}
@@ -128,7 +130,7 @@ async def main():
                 module._run_generation("MEDIA PROMPT", "image", 5)
             finally:
                 module._run_generation_locked = original
-            assert captured["prompt"] == "CUSTOM RULE\n\nMEDIA PROMPT", captured
+            assert captured["prompt"] == "<system>\nCUSTOM RULE\n</system>\n\nMEDIA PROMPT", captured
 
             # The chat endpoint must pass the active prompt into safe_chat_stream.
             module.store.add_account({"hatch_sess": "fixture"}, "prompt-test")

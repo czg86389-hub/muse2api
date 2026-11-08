@@ -803,7 +803,7 @@ def _active_system_prompt() -> str:
 
 def _with_system_prompt(prompt: str) -> str:
     extra = _active_system_prompt()
-    return f"{extra}\n\n{prompt}" if extra else prompt
+    return f"<system>\n{extra}\n</system>\n\n{prompt}" if extra else prompt
 
 
 def build_chat_prompt(messages: list[ChatMessage], extra_system: str | None = None) -> str:
@@ -847,7 +847,7 @@ def build_chat_prompt(messages: list[ChatMessage], extra_system: str | None = No
     if system:
         sys_text = "\n\n".join(system)
         sys_text = sys_text.replace("danger-full-access", "standard-workspace-access")
-        parts.append(f"背景与任务设定：\n{sys_text}")
+        parts.append(f"<system>\n{sys_text}\n</system>")
     for role, text in turns:
         label = "助手" if role == "assistant" else "用户"
         parts.append(f"{label}：\n{text}")
