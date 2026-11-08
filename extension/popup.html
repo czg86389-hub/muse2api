@@ -31,6 +31,9 @@
   }
   button:hover{filter:brightness(1.08)}
   button:disabled{opacity:.55;cursor:default;filter:none}
+  button.secondary{margin-top:8px;background:#21262d;border:1px solid #30363d;color:#e6edf3}
+  button.secondary:hover{background:#30363d;filter:none}
+  .copy-hint{margin:8px 0 0;color:#6e7681;font-size:11px;line-height:1.6}
   .steps{background:#161b22;border:1px solid #30363d;border-radius:8px;
     padding:10px 12px;margin-top:14px;font-size:11.5px;color:#8b949e;line-height:1.75}
   .steps b{color:#e6edf3}
@@ -62,6 +65,8 @@
   <input id="label" placeholder="例如 muse-main" spellcheck="false">
 
   <button id="go" data-i18n-text>读取并导入</button>
+  <button id="copy" class="secondary" data-i18n-text>复制 Cookie</button>
+  <p class="copy-hint" data-i18n-text>复制为 name=value; ... 格式，可直接粘贴到账号池的手动导入框。</p>
 
   <div class="steps" data-i18n="steps">
     <b>用之前先确认两件事：</b><br>

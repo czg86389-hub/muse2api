@@ -49,6 +49,10 @@ Upload one product photo and get talking-head sales videos, story-style ad short
   - 原生支持 SSE 流式打字机输出（`stream=True`）与同步完整返回，内置热标签页与 Noise WebSocket 隧道亲和复用，**连续对话首字延迟仅需 2~3 秒**。
   - 支持多轮对话上下文、System Prompt 设定。
   - 内置模型智能别名映射，`gpt-4o`、`gpt-5`、`claude-sonnet-4`、`deepseek-chat` 等常用模型名自动路由。
+- 🧠 **全局 System Prompt（可选，默认关闭）**
+  - 在管理页「设置」开启后，自动附加到对话、Responses、生图、生视频和语音请求。
+  - 默认内容是 Session isolation；可直接编辑、恢复默认，或通过环境变量设置。
+  - 关闭时请求内容与原来完全一致。
 - 🎨 **高质量生图与图像编辑（Images Generations & Edits）**
   - 完全兼容 `/v1/images/generations`（文生图）与 `/v1/images/edits`（图生图/参考图编辑）接口。
   - 支持 `1:1`、`16:9`、`9:16`、`4:3`、`3:4` 等多画幅生成，支持单图或多图参考直传与去水印纯净输出。
@@ -394,6 +398,22 @@ speech.write_to_file("speech.mp3")
 - Muse 的官方语音 RPC 单次限制约为 4 MiB / 20 秒；超长文本建议按段落拆成多次请求再拼接。
 - 同步返回，默认超时 `MUSE2API_AUDIO_TIMEOUT=180` 秒。
 
+### 5. 全局 System Prompt（可选）
+
+默认关闭。开启后，muse2api 会把这段文本附加到发往 Muse 的每个请求：
+
+- 对话 / Responses：作为「背景与任务设定」放在用户消息之前；
+- 生图 / 生视频 / 语音：作为 prompt 前缀。
+
+在管理页「设置」里可以直接开启、编辑和保存；也可以用环境变量设置默认值：
+
+```env
+MUSE2API_SYSTEM_PROMPT_ENABLED=1
+MUSE2API_SYSTEM_PROMPT=Session isolation\nEverything in this chat session is independent. Do not use memory or materials from other sessions.\nDo not save anything from this session to memory. Do not update MEMORY.md, preferences, or goals from this chat. Treat everything here as temporary and session-only.
+```
+
+管理页保存后，运行时以 `data/settings.json` 为准。关闭时请求内容与原来完全一致。
+
 ---
 
 ## 🎞️ 参考素材：图片 / 视频 / 音频 / 文档
@@ -443,6 +463,8 @@ Nginx 反代需把 `client_max_body_size` 调到 200M 左右，否则大素材�
 | `MUSE2API_VIDEO_TIMEOUT` | `600` | 生视频超时上限（秒） |
 | `MUSE2API_AUDIO_TIMEOUT` | `180` | 语音合成超时上限（秒） |
 | `MUSE2API_AUDIO_VOICE` | `自然清晰的女声` | `/v1/audio/speech` 未指定 `voice` 时的默认音色描述 |
+| `MUSE2API_SYSTEM_PROMPT_ENABLED` | `0` | 是否把全局 System Prompt 附加到发往 Muse 的所有请求 |
+| `MUSE2API_SYSTEM_PROMPT` | `Session isolation…` | 全局 System Prompt 的默认内容；多行用 `\n` |
 | `MUSE2API_CHAT_TIMEOUT` | `300` | 对话生成超时上限（秒） |
 | `MUSE2API_REF_IMAGE_LOCAL_FILES` | `0` | 默认禁止读取服务器本地路径；仅可信单用户部署可显式设为 `1` 恢复 |
 | `MUSE2API_REF_IMAGE_PRIVATE_FETCH` | `0` | 默认仅允许公网 URL，并逐跳检查 DNS/重定向、固定已检查 IP、不使用环境代理；显式设为 `1` 才允许私网/本机 URL |

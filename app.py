@@ -53,7 +53,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                Response, StreamingResponse)
 from pydantic import model_validator, BaseModel, Field, SecretStr, field_validator
 
-from config import CFG
+from config import CFG, DEFAULT_SYSTEM_PROMPT
 from engine import (ESSENTIAL_COOKIES, MAX_REFERENCE_IMAGE_BYTES,
                     MAX_REFERENCE_IMAGES, MAX_REFERENCE_TOTAL_BYTES,
                     REFERENCE_MIME_EXT, MuseAuthError, MuseEngine, MuseGenerationError,
@@ -617,6 +617,11 @@ class AccountProxy(BaseModel):
         return {"server": self.server, "username": self.username, "password": password}
 
 
+class SettingsRequest(BaseModel):
+    system_prompt_enabled: bool | None = None
+    system_prompt: str | None = None
+
+
 class AccountRequest(BaseModel):
     label: str = ""
     cookies: dict[str, str] = Field(default_factory=dict)
@@ -788,14 +793,30 @@ def _content_text(content) -> str:
     return str(content)
 
 
-def build_chat_prompt(messages: list[ChatMessage]) -> str:
+def _active_system_prompt() -> str:
+    """Runtime global system prompt; empty string means injection is off."""
+    settings = store.get_settings()
+    if not settings.get("system_prompt_enabled"):
+        return ""
+    return str(settings.get("system_prompt") or "").strip()
+
+
+def _with_system_prompt(prompt: str) -> str:
+    extra = _active_system_prompt()
+    return f"{extra}\n\n{prompt}" if extra else prompt
+
+
+def build_chat_prompt(messages: list[ChatMessage], extra_system: str | None = None) -> str:
     """把 messages 拼成发给 muse.ai 的一段提示词。
 
     muse.ai 网页本身是个带上下文的会话，但本 API 是无状态的（每次可能落到
     不同账号/页面），所以把历史拼进 prompt 最可控 —— 这正好匹配 Codex 这类
-    「每轮都带全量历史」的客户端。
+    「每轮都带全量历史」的客户端。extra_system 是管理页配置的全局提示词。
     """
     system, turns = [], []
+    extra = (extra_system or "").strip()
+    if extra:
+        system.append(extra)
     for m in messages:
         role = (m.role or "").strip().lower()
         text = _content_text(m.content).strip()
@@ -814,6 +835,9 @@ def build_chat_prompt(messages: list[ChatMessage]) -> str:
             system.append(text)
         else:
             turns.append((role, text))
+
+    if not turns:
+        return ""
 
     # 单轮且无系统指令 → 直接发原文，最贴近自然对话
     if len(turns) == 1 and not system and turns[0][0] == "user":
@@ -1148,6 +1172,8 @@ def _run_generation(prompt: str, kind: str, timeout: int,
                     reference_image: str | None = None,
                     reference_images: list[str] | None = None,
                     on_acquired=None) -> tuple[dict, str | None]:
+    # Global system prompt is applied here so image/video/audio share one injection point.
+    prompt = _with_system_prompt(prompt)
     # Browser ownership covers account selection, retry and cleanup, not just generate().
     deadline = time.monotonic() + max(1, timeout)
     if not GEN_LOCK.acquire(timeout=max(1, timeout)):
@@ -1708,7 +1734,10 @@ async def chat_completions(req: ChatRequest, _=Depends(auth)):
 
     对话与生图/生视频共用同一个浏览器实例，靠 `GEN_LOCK` 串行。
     """
-    prompt = build_chat_prompt(req.messages) or (req.prompt or "").strip()
+    prompt = build_chat_prompt(req.messages, _active_system_prompt())
+    if not prompt and (req.prompt or "").strip():
+        prompt = build_chat_prompt(
+            [ChatMessage(role="user", content=req.prompt)], _active_system_prompt())
     if not prompt:
         raise HTTPException(400, "messages 为空")
 
@@ -1878,7 +1907,7 @@ async def responses_api(req: ResponsesRequest, _=Depends(auth)):
     只实现 Codex 实际用到的子集：文本进 → 文本出（含流式事件）。
     muse.ai 不会返回结构化的 tool_calls，关于工具调用的边界见 README。
     """
-    prompt = build_chat_prompt(_responses_messages(req))
+    prompt = build_chat_prompt(_responses_messages(req), _active_system_prompt())
     if not prompt:
         raise HTTPException(400, "input 为空")
 
@@ -1988,6 +2017,29 @@ def admin_status(_=Depends(auth)):
                    "host": CFG.host, "port": CFG.port,
                    "public_base": base},
     }
+
+
+@app.get("/admin/settings")
+def admin_get_settings(_=Depends(auth)):
+    data = store.get_settings()
+    data["default_system_prompt"] = DEFAULT_SYSTEM_PROMPT
+    return data
+
+
+@app.post("/admin/settings")
+def admin_save_settings(req: SettingsRequest, _=Depends(auth)):
+    current = store.get_settings()
+    enabled = (current["system_prompt_enabled"] if req.system_prompt_enabled is None
+               else bool(req.system_prompt_enabled))
+    text = current["system_prompt"] if req.system_prompt is None else req.system_prompt
+    text = (text or "").strip()
+    if len(text) > 20000:
+        raise HTTPException(400, "System prompt 不能超过 20000 个字符")
+    if enabled and not text:
+        raise HTTPException(400, "启用 System Prompt 时内容不能为空")
+    data = store.save_settings(system_prompt_enabled=enabled, system_prompt=text)
+    data["default_system_prompt"] = DEFAULT_SYSTEM_PROMPT
+    return data
 
 
 @app.get("/admin/dashboard")

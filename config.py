@@ -31,6 +31,12 @@ def _load_dotenv():
 
 _load_dotenv()
 
+DEFAULT_SYSTEM_PROMPT = (
+    "Session isolation\n"
+    "Everything in this chat session is independent. Do not use memory or materials from other sessions.\n"
+    "Do not save anything from this session to memory. Do not update MEMORY.md, preferences, or goals from this chat. Treat everything here as temporary and session-only."
+)
+
 
 def _env(key: str, default: str) -> str:
     return os.environ.get(key, default)
@@ -121,6 +127,15 @@ class Config:
     tool_protocol: bool = field(
         default_factory=lambda: _env("MUSE2API_TOOL_PROTOCOL", "0").strip() != "0")
 
+    # 全局 System Prompt：默认关闭，只在显式开启时附加到发往 Muse 的请求。
+    # 管理页「设置」可以覆盖这里的默认值，运行时配置保存在 data/settings.json。
+    system_prompt_enabled: bool = field(
+        default_factory=lambda: _env("MUSE2API_SYSTEM_PROMPT_ENABLED", "0").strip().lower()
+        in ("1", "true", "yes", "on"))
+    system_prompt: str = field(
+        default_factory=lambda: _env("MUSE2API_SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT)
+        .replace("\\n", "\n"))
+
     # 保活设置：是否对已禁用的账号执行自动保活，**默认关闭**。
     # 开启后，被管理员在后台手动禁用的账号仍会由后台守护进程执行自动保活与 VM 唤醒，
     # 保持会话活性不失效，但依然不会参与正常业务生图、生视频与对话轮转调度。
@@ -151,6 +166,10 @@ class Config:
     @property
     def tasks_file(self) -> str:
         return os.path.join(self.data_dir, "tasks.json")
+
+    @property
+    def settings_file(self) -> str:
+        return os.path.join(self.data_dir, "settings.json")
 
     def ensure_dirs(self):
         for d in (self.base_dir, self.data_dir, self.media_dir, self.download_dir,

@@ -105,6 +105,34 @@ class Store:
             if _is_pos(ce.get("hatch_vml")):
                 a["expires_at"] = int(ce["hatch_vml"])
         self.tasks: dict[str, dict] = _read(cfg.tasks_file, {})
+        self.settings: dict = _read(cfg.settings_file, {})
+
+    # ---------- 运行时设置 ----------
+    def get_settings(self) -> dict:
+        base = {
+            "system_prompt_enabled": bool(self.cfg.system_prompt_enabled),
+            "system_prompt": str(self.cfg.system_prompt or ""),
+        }
+        stored = self.settings if isinstance(self.settings, dict) else {}
+        if isinstance(stored.get("system_prompt_enabled"), bool):
+            base["system_prompt_enabled"] = stored["system_prompt_enabled"]
+        if isinstance(stored.get("system_prompt"), str):
+            base["system_prompt"] = stored["system_prompt"]
+        if isinstance(stored.get("updated_at"), int):
+            base["updated_at"] = stored["updated_at"]
+        return base
+
+    def save_settings(self, **patch) -> dict:
+        with _LOCK:
+            current = self.get_settings()
+            if patch.get("system_prompt_enabled") is not None:
+                current["system_prompt_enabled"] = bool(patch["system_prompt_enabled"])
+            if patch.get("system_prompt") is not None:
+                current["system_prompt"] = str(patch["system_prompt"])
+            current["updated_at"] = int(time.time())
+            self.settings = current
+            _write(self.cfg.settings_file, current)
+            return current
 
     # ---------- 账号 ----------
     def add_account(self, cookies: dict, label: str = "",
