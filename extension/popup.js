@@ -34,6 +34,12 @@ const I18N_EN = {
   '账号标签（可留空）': 'Account label (optional)',
   '例如 muse-main': 'e.g. muse-main',
   '读取并导入': 'Read and import',
+  '复制 Cookie': 'Copy cookies',
+  '复制为 name=value; ... 格式，可直接粘贴到账号池的手动导入框。':
+    'Copy format: name=value; ...; paste it into the account pool manual import box.',
+  '✓ 已复制 {n} 条 Cookie 到剪贴板。': '✓ Copied {n} cookies to the clipboard.',
+  '注意：缺少核心项 {missing}。': 'Note: missing core cookies: {missing}.',
+  '复制失败：{msg}': 'Copy failed: {msg}',
   // popup.js 日志 / 状态
   '请先填服务地址': 'Please enter the service URL first',
   '请先填 API Key': 'Please enter the API Key first',
@@ -160,6 +166,40 @@ async function grabCookies() {
   return { cookies: out, expires: exp };
 }
 
+async function copyCookies() {
+  try {
+    const { cookies } = await grabCookies();
+    const names = Object.keys(cookies).sort();
+    if (!names.length) {
+      return log(t('没读到 muse.ai 的 Cookie。\n请先在这个浏览器里打开并登录 '
+                 + 'https://muse.ai/ ，再回来点一次。'), 'bad');
+    }
+    const header = names.map((n) => `${n}=${cookies[n]}`).join('; ');
+    try {
+      await navigator.clipboard.writeText(header);
+    } catch (e) {
+      const ta = document.createElement('textarea');
+      ta.value = header;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+    const missing = ESSENTIAL.filter((n) => !(n in cookies));
+    let msg = t('✓ 已复制 {n} 条 Cookie 到剪贴板。', { n: names.length });
+    if (missing.length) {
+      msg += '\n' + t('注意：缺少核心项 {missing}。', {
+        missing: missing.join(LANG === 'en' ? ', ' : '、'),
+      });
+    }
+    log(msg, missing.length ? 'warn' : 'ok');
+  } catch (e) {
+    log(t('复制失败：{msg}', { msg: e && e.message ? e.message : String(e) }), 'bad');
+  }
+}
+
 async function run() {
   const base = normBase($('base').value);
   const key = $('key').value.trim();
@@ -232,4 +272,5 @@ async function run() {
 applyLang();
 $('langSel').addEventListener('change', (e) => setLang(e.target.value));
 $('go').addEventListener('click', run);
+$('copy').addEventListener('click', copyCookies);
 loadCfg();

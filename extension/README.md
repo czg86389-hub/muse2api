@@ -40,6 +40,8 @@ Edge：
 2. 到 muse2api 管理页「账号池」页顶部，复制 BASE URL 和 API Key。
 3. 点浏览器工具栏上的扩展图标，把这两项填进去（只需要填一次，会记住）。
 4. 点「读取并导入」。看到「✓ 导入成功」就完成了。
+5. 如果要把 Cookie 手动粘贴到别处，点「复制 Cookie」。复制格式是
+   `name=value; name=value; ...`，可以直接粘贴到账号池的手动导入框。
 
 
 四、常见问题
@@ -58,8 +60,9 @@ A: 检查服务地址是不是 https，以及服务本身能不能打开
    （浏览器直接访问 服务地址/admin 试试）。
 
 Q: 会不会把我的 Cookie 传到别的地方？
-A: 不会。扩展只有 cookies 和 storage 两个权限，代码就在 popup.js 里，
-   你可以自己看：它只往你填的那个服务地址发一个 POST，没有别的请求。
+A: 不会。扩展只有 cookies、storage、activeTab 和 clipboardWrite 权限，
+   代码就在 popup.js 里，你可以自己看：它只往你填的那个服务地址发一个 POST，
+   「复制 Cookie」只写本机剪贴板，没有别的请求。
 
 
 五、卸载

@@ -16,6 +16,7 @@ services:
       # 超时配置（秒）
       - MUSE2API_IMAGE_TIMEOUT=240
       - MUSE2API_VIDEO_TIMEOUT=600
+      - MUSE2API_AUDIO_TIMEOUT=180
       - MUSE2API_CHAT_TIMEOUT=300
     volumes:
       # 持久化账号配置、任务日志及媒体文件

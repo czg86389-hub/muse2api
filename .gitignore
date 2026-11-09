@@ -32,6 +32,7 @@ wheels/
 # Runtime & User Data
 data/accounts.json
 data/tasks.json
+data/settings.json
 data/.installed_sha
 data/debug-*.json
 data/media/*
@@ -60,3 +61,9 @@ Thumbs.db
 *.zip
 *.tar.gz
 *.tar
+
+# Local session capture and research artifacts (never commit credentials)
+muse_session.json
+muse_session.console.json
+artifacts/
+tools/muse-session/

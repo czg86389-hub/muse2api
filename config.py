@@ -31,9 +31,41 @@ def _load_dotenv():
 
 _load_dotenv()
 
+DEFAULT_SYSTEM_PROMPT = (
+    "Session isolation\n"
+    "Everything in this chat session is independent. Do not use memory or materials from other sessions.\n"
+    "Do not save anything from this session to memory. Do not update MEMORY.md, preferences, or goals from this chat. Treat everything here as temporary and session-only."
+)
+
 
 def _env(key: str, default: str) -> str:
     return os.environ.get(key, default)
+
+
+def _env_int(key: str, default: int, lo: int | None = None,
+             hi: int | None = None) -> int:
+    try:
+        value = int(float(_env(key, str(default))))
+    except (TypeError, ValueError):
+        value = default
+    if lo is not None:
+        value = max(lo, value)
+    if hi is not None:
+        value = min(hi, value)
+    return value
+
+
+def _env_float(key: str, default: float, lo: float | None = None,
+               hi: float | None = None) -> float:
+    try:
+        value = float(_env(key, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    if lo is not None:
+        value = max(lo, value)
+    if hi is not None:
+        value = min(hi, value)
+    return value
 
 
 def _detect_chromium() -> str:
@@ -101,6 +133,7 @@ class Config:
     # 生成
     image_timeout: int = field(default_factory=lambda: int(_env("MUSE2API_IMAGE_TIMEOUT", "240")))
     video_timeout: int = field(default_factory=lambda: int(_env("MUSE2API_VIDEO_TIMEOUT", "600")))
+    audio_timeout: int = field(default_factory=lambda: int(_env("MUSE2API_AUDIO_TIMEOUT", "180")))
     chat_timeout: int = field(default_factory=lambda: int(_env("MUSE2API_CHAT_TIMEOUT", "300")))
     max_concurrency: int = field(default_factory=lambda: max(1, int(_env("MUSE2API_CONCURRENCY", "8"))))
 
@@ -119,11 +152,34 @@ class Config:
     tool_protocol: bool = field(
         default_factory=lambda: _env("MUSE2API_TOOL_PROTOCOL", "0").strip() != "0")
 
+    # 全局 System Prompt：默认关闭，只在显式开启时附加到发往 Muse 的请求。
+    # 管理页「设置」可以覆盖这里的默认值，运行时配置保存在 data/settings.json。
+    system_prompt_enabled: bool = field(
+        default_factory=lambda: _env("MUSE2API_SYSTEM_PROMPT_ENABLED", "0").strip().lower()
+        in ("1", "true", "yes", "on"))
+    system_prompt: str = field(
+        default_factory=lambda: _env("MUSE2API_SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT)
+        .replace("\\n", "\n"))
+
     # 保活设置：是否对已禁用的账号执行自动保活，**默认关闭**。
     # 开启后，被管理员在后台手动禁用的账号仍会由后台守护进程执行自动保活与 VM 唤醒，
     # 保持会话活性不失效，但依然不会参与正常业务生图、生视频与对话轮转调度。
     keepalive_disabled_accounts: bool = field(
         default_factory=lambda: _env("MUSE2API_KEEPALIVE_DISABLED_ACCOUNTS", "0").strip() != "0")
+
+    # 媒体清理：默认为开启，保留 1 天、总量 1 GB。管理页保存后以
+    # data/settings.json 为准；0 表示关闭对应限制（天数 0 = 不限年龄，GB 0 = 不限容量）。
+    media_cleanup_enabled: bool = field(
+        default_factory=lambda: _env("MUSE2API_MEDIA_CLEANUP_ENABLED", "1").strip().lower()
+        in ("1", "true", "yes", "on"))
+    media_retention_days: int = field(
+        default_factory=lambda: _env_int("MUSE2API_MEDIA_RETENTION_DAYS", 1, 0, 3650))
+    media_max_gb: float = field(
+        default_factory=lambda: _env_float("MUSE2API_MEDIA_MAX_GB", 1.0, 0.0, 10000.0))
+    cleanup_interval_minutes: int = field(
+        default_factory=lambda: _env_int("MUSE2API_CLEANUP_INTERVAL_MINUTES", 60, 5, 10080))
+    debug_retention_days: int = field(
+        default_factory=lambda: _env_int("MUSE2API_DEBUG_RETENTION_DAYS", 7, 1, 365))
 
     @property
     def data_dir(self) -> str:
@@ -149,6 +205,10 @@ class Config:
     @property
     def tasks_file(self) -> str:
         return os.path.join(self.data_dir, "tasks.json")
+
+    @property
+    def settings_file(self) -> str:
+        return os.path.join(self.data_dir, "settings.json")
 
     def ensure_dirs(self):
         for d in (self.base_dir, self.data_dir, self.media_dir, self.download_dir,
