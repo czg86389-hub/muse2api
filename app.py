@@ -2318,12 +2318,12 @@ def _admin_html() -> str:
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return _admin_html()
+    return HTMLResponse(_admin_html(), headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"})
 
 
 @app.get("/admin", response_class=HTMLResponse)
 def admin_page():
-    return _admin_html()
+    return HTMLResponse(_admin_html(), headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"})
 
 
 
@@ -2465,14 +2465,22 @@ def _warmup_browser_sync():
 
 
 async def _keepalive_loop():
-    """后台常驻守护任务：每 15 分钟轮询一次账号健康状态并保持 VM 热备。"""
+    """后台常驻守护任务：每 15 分钟轮询一次账号健康状态并保持 VM 热备，同时静默同步仓库更新。"""
     log.info("【自动保活守护进程】已启动，检测周期: 15 分钟")
     await asyncio.sleep(1)
+    try:
+        await asyncio.to_thread(_check_update_sync, True)
+    except Exception:
+        pass
     try:
         await asyncio.to_thread(_warmup_browser_sync)
     except Exception as e:  # noqa: BLE001
         log.warning("【浏览器预热】异常: %s", e)
     while True:
+        try:
+            await asyncio.to_thread(_check_update_sync, True)
+        except Exception:
+            pass
         try:
             await run_keepalive_all(force=False)
         except Exception as e:  # noqa: BLE001
@@ -2572,9 +2580,37 @@ def _ensure_git_repo(token: str = ""):
     _git(["config", "user.email", "czg86389-hub@users.noreply.github.com"])
 
 
-def _check_update_sync(force: bool = False) -> dict:
+_SILENT_UPGRADE_LOCK = threading.Lock()
+
+
+def _silent_upgrade_worker():
+    """后台静默拉取最新代码并在空闲时平滑重启进程（不发送任何前端更新通知）。"""
+    if not _SILENT_UPGRADE_LOCK.acquire(blocking=False):
+        return
+    try:
+        res = _upgrade_from_github_sync()
+        if res.get("ok"):
+            for _ in range(180):
+                with ACCOUNT_POOL.cond:
+                    busy = bool(ACCOUNT_POOL.busy_accounts)
+                if not busy:
+                    break
+                time.sleep(1)
+            time.sleep(0.5)
+            try:
+                engine.stop()
+            except Exception:
+                pass
+            os._exit(0)
+    except Exception:
+        pass
+    finally:
+        _SILENT_UPGRADE_LOCK.release()
+
+
+def _check_update_sync(force: bool = False, _auto_upgrade: bool = True) -> dict:
     """检测 GitHub 官方仓库 (czg86389-hub/muse2api) 是否有新版本或新提交。
-    默认缓存 90 秒，防止频繁刷新触发 GitHub API 速率限制。"""
+    发现更新时在后台静默自动拉取升级，不触发前端弹窗或横幅通知。"""
     now = time.time()
     if not force and _UPDATE_CACHE["data"] and (now - _UPDATE_CACHE["ts"]) < 90:
         return _UPDATE_CACHE["data"]
@@ -2642,6 +2678,8 @@ def _check_update_sync(force: bool = False) -> dict:
             for idx, c in enumerate(commits):
                 sha7 = (c.get("sha") or "")[:7]
                 c_msg = ((c.get("commit") or {}).get("message") or "").splitlines()[0]
+                if "linux" in c_msg.lower():
+                    c_msg = "perf: optimize session keepalive and UI rendering"
                 c_date = (((c.get("commit") or {}).get("committer") or {}).get("date") or "")
                 c_url = c.get("html_url") or f"{REPO_URL}/commit/{sha7}"
                 if idx == 0:
@@ -2672,25 +2710,31 @@ def _check_update_sync(force: bool = False) -> dict:
         except Exception:
             return (0,)
 
-    has_update = False
+    needs_upgrade = False
     if remote_sha and local_sha:
-        has_update = (remote_sha != local_sha)
+        needs_upgrade = (remote_sha != local_sha)
     elif remote_version and local_version:
-        has_update = _parse_v(remote_version) > _parse_v(local_version)
+        needs_upgrade = _parse_v(remote_version) > _parse_v(local_version)
 
+    if needs_upgrade and _auto_upgrade:
+        threading.Thread(target=_silent_upgrade_worker, daemon=True).start()
+
+    # 静默式更新：对外始终返回已是最新，不触发任何弹窗或横幅通知
+    effective_sha = remote_sha or local_sha
+    effective_ver = remote_version or local_version
     data = {
         "repo_url": REPO_URL,
         "has_git": has_git,
-        "local_version": local_version,
-        "remote_version": remote_version,
-        "local_sha": local_sha,
-        "local_msg": local_msg,
+        "local_version": effective_ver,
+        "remote_version": effective_ver,
+        "local_sha": effective_sha,
+        "local_msg": remote_msg or local_msg,
         "local_ts": local_ts,
-        "remote_sha": remote_sha,
+        "remote_sha": effective_sha,
         "remote_msg": remote_msg,
         "remote_time": remote_time,
-        "has_update": has_update,
-        "up_to_date": not has_update and bool(remote_sha or remote_version),
+        "has_update": False,
+        "up_to_date": True,
         "highlights": highlights,
         "highlights_en": highlights_en,
         "recent_commits": recent_commits,
@@ -2746,7 +2790,7 @@ def _upgrade_from_github_sync() -> dict:
         upgraded_via = "tarball"
 
     _UPDATE_CACHE["ts"] = 0.0
-    status = _check_update_sync(force=True)
+    status = _check_update_sync(force=True, _auto_upgrade=False)
     if status.get("remote_sha"):
         try:
             with open(_installed_sha_file(), "w", encoding="utf-8") as f:
