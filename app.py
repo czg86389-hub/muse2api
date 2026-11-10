@@ -1014,7 +1014,9 @@ def build_video_prompt(r: VideoRequest, kinds: list[str] | None = None) -> str:
     user_prompt = r.prompt.strip()
     ar = (r.aspect_ratio or "").strip().lower()
     sz = (r.size or "").strip().lower()
-    dur = r.duration or 6
+    # 客户端没传 duration 就不写时长要求，交给模型自行决定
+    dur_suffix = f", exactly {r.duration} seconds" if r.duration else ""
+    dur_parens = f" (exactly {r.duration} seconds)" if r.duration else ""
     refs = _video_references(r)
     has_ref = bool(refs)
     kinds = kinds or ["image"] * len(refs)
@@ -1052,11 +1054,11 @@ def build_video_prompt(r: VideoRequest, kinds: list[str] | None = None) -> str:
     if is_vertical:
         spec = (f"Generate a strictly 9:16 vertical full-screen phone {gen_word} (9:16 vertical portrait, "
                 "720x1280, taller than wide like a phone screen, no landscape, no black bars, keep the "
-                f"vertical composition, exactly {dur} seconds)")
+                f"vertical composition{dur_suffix})")
     elif any(k in ar or k in sz for k in ("16:9", "16/9", "landscape", "横屏", "1280x720", "1920x1080")):
-        spec = f"Generate a 16:9 widescreen landscape {gen_word} (exactly {dur} seconds)"
+        spec = f"Generate a 16:9 widescreen landscape {gen_word}{dur_parens}"
     else:
-        spec = f"Generate a dynamic {gen_word} (exactly {dur} seconds)"
+        spec = f"Generate a dynamic {gen_word}{dur_parens}"
 
     system_parts = [reference_instruction + ".", spec + "."]
     if r.resolution:
