@@ -72,6 +72,7 @@ Upload one product photo and get talking-head sales videos, story-style ad short
   - 无需手工 F12 抓包，点一下扩展图标即刻将当前浏览器登录态（含 `HttpOnly` 核心 Cookie 与真实过期时间）提取并安全推送至账号池。
 - 🖥️ **现代化深色运维面板（Web Console）与实时在线热升级**
   - 内置开箱即用的 Web UI，支持实时查看服务健康度、账号池额度与状态、一键全池保活、任务进度回放、媒体库管理与在线接口调试。
+  - 媒体库的视频列表仅懒加载 JPEG 缩略图，点击封面或「打开」才加载该视频，关闭预览即释放播放器。缩略图由 FFmpeg 按需生成，缓存在 `data/thumbnails/`，删除媒体时同步清理；旧视频无需重新生成。Docker 镜像已包含 FFmpeg，手动部署需安装 `ffmpeg`；缺少依赖或视频损坏时显示播放占位，不会回退为预加载原视频。
   - **全网节点实时更新广播与一键升级**：当官方 GitHub 仓库发布新版本或修复时，所有已部署节点的管理后台顶部会自动弹出更新通知横幅，点击 **「⚡ 一键在线升级并重启」** 即可自动拉取最新代码并平滑重启（自动保留本地 `.env` 配置与账号数据）。
 
 ---
@@ -109,7 +110,7 @@ Upload one product photo and get talking-head sales videos, story-style ad short
 1. **安装系统依赖与 Chromium**：
    ```bash
    sudo apt-get update
-   sudo apt-get install -y chromium fonts-wqy-zenhei python3 python3-pip python3-venv
+   sudo apt-get install -y chromium ffmpeg fonts-wqy-zenhei python3 python3-pip python3-venv
    ```
 
 2. **配置 Python 虚拟环境**：

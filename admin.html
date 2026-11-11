@@ -153,6 +153,15 @@
   .tile .check-tag input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:var(--accent)}
   .tile .thumb{height:150px;background:#060911;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative}
   .tile .thumb img,.tile .thumb video{width:100%;height:100%;object-fit:contain;display:block}
+  .tile button.thumb{width:100%;padding:0;border:0;border-radius:0;cursor:pointer;color:#fff}
+  .tile .thumb img[hidden]{display:none}
+  .tile .play-icon{position:absolute;display:grid;place-items:center;width:44px;height:44px;border-radius:50%;background:rgba(0,0,0,.65);font-size:21px;pointer-events:none}
+  .tile button.thumb:focus-visible{outline:2px solid var(--accent);outline-offset:-3px}
+  dialog.media-dialog{width:min(960px,calc(100% - 32px));max-height:calc(100dvh - 32px);padding:16px;border:1px solid var(--line);border-radius:var(--radius);background:var(--bg2);color:var(--text)}
+  dialog.media-dialog::backdrop{background:rgba(0,0,0,.75)}
+  .media-dialog header{display:flex;align-items:center;gap:16px;margin-bottom:12px}
+  .media-dialog h2{margin:0;flex:1;min-width:0;font-size:15px;overflow-wrap:anywhere}
+  .media-dialog video{display:block;width:100%;max-height:75dvh;background:#000}
   .tile .meta{padding:9px 11px;font-size:11.5px;color:var(--muted)}
   .tile .meta .nm{font-family:ui-monospace,monospace;color:var(--text);font-size:11px;word-break:break-all}
   .tile .meta .ac{display:flex;gap:6px;margin-top:7px;align-items:center}
@@ -751,6 +760,11 @@ t = requests.post(<span class="s">"BASE/v1/videos"</span>, json={<span class="s"
 
 <div id="toasts"></div>
 
+<dialog id="mediaDialog" class="media-dialog" aria-labelledby="mediaPreviewTitle">
+  <header><h2 id="mediaPreviewTitle" data-no-i18n></h2><button class="btn" type="button" onclick="closeMediaPreview()">关闭预览</button></header>
+  <div id="mediaPlayer"></div>
+</dialog>
+
 <dialog id="proxyDialog" class="proxy-dialog" aria-labelledby="proxyTitle" aria-describedby="proxyHelp">
   <form id="proxyForm">
     <h2 id="proxyTitle">账号代理</h2>
@@ -799,6 +813,8 @@ function setLang(v){
 }
 /* 整句：中文 → 英文 */
 const I18N_EN = {
+  "播放视频": "Play video",
+  "关闭预览": "Close preview",
   "代理配置已保存，账号浏览器状态待测试": "Proxy saved; account browser status still needs testing",
   "代理地址或完整链接": "Proxy address or full URL",
   "可直接粘贴包含用户名和密码的 HTTP、SOCKS5 或 SOCKS5h 链接，立即测试，无需先保存。": "Paste an HTTP, SOCKS5 or SOCKS5h URL including credentials and test it immediately, without saving.",
@@ -1524,6 +1540,7 @@ function goTab(name){
 }
 document.querySelectorAll('nav.tabs button').forEach(b => {
   b.onclick = () => {
+    closeMediaPreview();
     document.querySelectorAll('nav.tabs button').forEach(x => x.classList.remove('active'));
     document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
@@ -2003,6 +2020,49 @@ async function clearTasks(){
 let _allMedia = [];
 let _selectedMedia = new Set();
 
+function releaseMediaPlayer(){
+  const video = $('mediaPlayer').querySelector('video');
+  if (video){
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+  }
+  $('mediaPlayer').replaceChildren();
+}
+
+function closeMediaPreview(){
+  releaseMediaPlayer();
+  if ($('mediaDialog').open) $('mediaDialog').close();
+}
+
+$('mediaDialog').addEventListener('close', releaseMediaPlayer);
+$('mediaDialog').addEventListener('click', e => {
+  if (e.target === $('mediaDialog')) closeMediaPreview();
+});
+
+function openMediaPreview(name){
+  const media = _allMedia.find(m => m.name === name && m.kind === 'video');
+  if (!media) return;
+  releaseMediaPlayer();
+  $('mediaPreviewTitle').textContent = name;
+  const video = document.createElement('video');
+  video.controls = true;
+  video.playsInline = true;
+  video.preload = 'none';
+  // The original video URL is assigned only after an explicit click.
+  video.src = media.url;
+  $('mediaPlayer').appendChild(video);
+  if (!$('mediaDialog').open) $('mediaDialog').showModal();
+  video.play().catch(() => {}); // Controls remain available if autoplay is blocked.
+}
+
+$('mediaGrid').addEventListener('click', e => {
+  const trigger = e.target.closest('[data-play-video]');
+  if (!trigger || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+  e.preventDefault();
+  openMediaPreview(trigger.closest('.tile').dataset.name);
+});
+
 function updateMediaSelectionUI(){
   const count = _selectedMedia.size;
   const total = _allMedia.length;
@@ -2092,6 +2152,7 @@ async function delSelectedMedia(){
 }
 
 async function loadMedia(){
+  closeMediaPreview();
   try{
     const d = await api('/admin/media');
     const ms = d.media || [];
@@ -2114,14 +2175,17 @@ async function loadMedia(){
         <label class="check-tag" title="勾选以批量操作" onclick="event.stopPropagation()">
           <input type="checkbox" class="tile-check" ${isSel ? 'checked' : ''} onchange="toggleMediaSelect('${esc(m.name)}')">
         </label>
-        <div class="thumb">${m.kind === 'video'
-          ? `<video src="${esc(m.url)}" muted playsinline preload="metadata"></video>`
-          : `<img src="${esc(m.url)}" loading="lazy" alt="">`}</div>
+        ${m.kind === 'video'
+          ? `<button type="button" class="thumb" data-play-video aria-label="播放视频" title="播放视频">
+              ${m.thumbnail_url ? `<img src="${esc(m.thumbnail_url)}" loading="lazy" decoding="async" alt="" onerror="this.hidden=true">` : ''}
+              <span class="play-icon" aria-hidden="true">▶</span>
+            </button>`
+          : `<div class="thumb"><img src="${esc(m.url)}" loading="lazy" alt=""></div>`}
         <div class="meta">
           <div class="nm" title="${esc(m.name)}">${esc(m.name)}</div>
           <div style="margin-top:3px">${fmtBytes(m.bytes)} · ${fmtTime(m.mtime)}</div>
           <div class="ac">
-            <a class="badge info" href="${esc(m.url)}" target="_blank">打开</a>
+            <a class="badge info" href="${esc(m.url)}" target="_blank" ${m.kind === 'video' ? 'data-play-video' : ''}>打开</a>
             <a class="badge mute" href="${esc(m.url)}" download>下载</a>
             <a class="badge bad" href="javascript:void(0)" onclick="delSingleMedia('${esc(m.name)}')">删除</a>
           </div>
