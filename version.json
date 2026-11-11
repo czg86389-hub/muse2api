@@ -1,19 +1,19 @@
 {
-  "version": "1.6.9",
-  "updated_at": "2026-11-05",
+  "version": "1.6.10",
+  "updated_at": "2026-11-11",
   "repo": "https://github.com/czg86389-hub/muse2api",
   "highlights": [
-    "修复 1.6.8 代理检测结果未回写的问题：测试当前已保存的代理后，账号列表会更新为已连通、未通过或未测试。 升级后，对之前显示未确认的账号重新点一次“测试连通性”，即可写入实际结果。",
-    "先测试新链接再保存时，仅复用 5 分钟内、同账号、同节点及认证、同登录会话的服务端实测结果，避免刚测通过又显示未确认。",
-    "更换节点、密码或 Cookie、结果过期时不会继承旧成功；失败结果仍显示未通过，代理连通不等于账号浏览器或生成能力正常。",
-    "不同配置的临时测试继续不改已保存路线或账号健康；无检测记录显示“代理未测试”，不再被空记录误标为“代理未确认”。",
-    "更新服务后请强制刷新管理页。插件仍为 1.0.2、油猴脚本仍为 1.1.2；当前版本无需重装，旧插件需在每个浏览器个人资料中手动升级。"
+    "修复发送按钮误匹配侧栏历史、Send feedback 或 Resend 的问题，避免参考图和长提示词留在输入框未提交。",
+    "首次发送、重试和发送状态检查统一定位当前输入区域，识别中英文标签、disabled、aria-disabled 和 inert 状态。",
+    "继续校验实际发送及媒体成品；点击发送不等于任务完成，不把上传的参考素材当生成结果。",
+    "核验仓库、管理面板及中英文界面的社区推广内容清理状态；感谢 @WXJJ0520 的 PR #48。",
+    "更新服务后请强制刷新管理页。插件仍为 1.0.2、油猴脚本仍为 1.1.2；当前版本无需重装，旧扩展仍需在各浏览器个人资料中手动升级。"
   ],
   "highlights_en": [
-    "Fix the 1.6.8 proxy-status regression: testing the currently saved proxy now updates the account-list connectivity result. After upgrading, retest accounts with old unconfirmed records once to persist an actual result.",
-    "When saving a newly tested URL, adopt only a server-observed result from the last five minutes for the same account, route, credentials and login session.",
-    "Changed routes, passwords or cookies and expired receipts never inherit success. Failed checks stay failed; proxy reachability does not prove browser or generation readiness.",
-    "Testing a different unsaved configuration still leaves the saved route and account health unchanged. Empty records display Proxy untested instead of Proxy unconfirmed.",
-    "Hard-refresh after updating. Extension remains 1.0.2 and userscript 1.1.2; current versions need no reinstall. Update older extensions manually in every browser profile."
+    "Fix send-button matching against sidebar history, Send feedback and Resend, which could leave prompts and reference attachments unsubmitted.",
+    "Initial sends, retries and readiness checks share one composer-scoped locator with localized labels and disabled, aria-disabled and inert handling.",
+    "Keep actual submission and generated-media verification; clicking Send is not task completion, and uploaded references are not generated results.",
+    "Verify repository and bilingual dashboard community-promotion cleanup. Thanks to @WXJJ0520 for PR #48.",
+    "Hard-refresh after updating. Extension remains 1.0.2 and userscript 1.1.2; current versions need no reinstall. Older extensions require a manual update in every browser profile."
   ]
 }

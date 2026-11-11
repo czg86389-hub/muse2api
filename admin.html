@@ -286,7 +286,7 @@
     <button data-t="docs">接入文档</button>
   </nav>
 
-  <div class="card" id="extensionUpgradeNotice" style="border-color:var(--warn)" role="note" data-i18n="extension-upgrade-notice"><b>重要：请手动升级浏览器插件至 1.0.2</b><br>更新服务不会自动升级已加载的扩展。下载新包，替换原扩展目录文件，再到 <code>chrome://extensions</code> 或 <code>edge://extensions</code> 点击“重新加载”。不同浏览器个人资料需分别升级。<br><a href="https://github.com/czg86389-hub/muse2api/releases/download/v1.6.9/muse2api-chrome-extension-v1.6.9.zip">下载扩展 1.0.2</a>；油猴用户请升级脚本至 1.1.2。</div>
+  <div class="card" id="extensionUpgradeNotice" style="border-color:var(--warn)" role="note" data-i18n="extension-upgrade-notice"><b>重要：请手动升级浏览器插件至 1.0.2</b><br>更新服务不会自动升级已加载的扩展。下载新包，替换原扩展目录文件，再到 <code>chrome://extensions</code> 或 <code>edge://extensions</code> 点击“重新加载”。不同浏览器个人资料需分别升级。<br><a href="https://github.com/czg86389-hub/muse2api/releases/download/v1.6.10/muse2api-chrome-extension-v1.6.10.zip">下载扩展 1.0.2</a>；油猴用户请升级脚本至 1.1.2。</div>
 
   <!-- ==================== 账号池 ==================== -->
   <section class="tab active" id="tab-pool">
@@ -1211,7 +1211,7 @@ const I18N_EN = {
 };
 /* 含富文本的块：data-i18n="key" → 英文 innerHTML（须保留原有子元素的 id/class/属性） */
 const I18N_EN_HTML = {
-  "extension-upgrade-notice": "<b>Important: manually upgrade the extension to 1.0.2</b><br>Updating the service does not update unpacked extensions. Replace files in the original folder and click Reload at <code>chrome://extensions</code> or <code>edge://extensions</code>, separately for each browser profile.<br><a href=\"https://github.com/czg86389-hub/muse2api/releases/download/v1.6.9/muse2api-chrome-extension-v1.6.9.zip\">Download extension 1.0.2</a>; upgrade the userscript to 1.1.2.",
+  "extension-upgrade-notice": "<b>Important: manually upgrade the extension to 1.0.2</b><br>Updating the service does not update unpacked extensions. Replace files in the original folder and click Reload at <code>chrome://extensions</code> or <code>edge://extensions</code>, separately for each browser profile.<br><a href=\"https://github.com/czg86389-hub/muse2api/releases/download/v1.6.10/muse2api-chrome-extension-v1.6.10.zip\">Download extension 1.0.2</a>; upgrade the userscript to 1.1.2.",
   "repo-status-desc": "Comparing your local version with the latest version in the official GitHub repository… (online upgrades keep your <code>.env</code> keys and the <code>data/</code> Account Pool and media data)",
   "auth-banner": "\n      <b>Enter your API Key first so the page can load data</b><br>\n      <span style=\"color:var(--muted)\">\n        The API Key is this service's own \"access password\". It stops other people from using your Muse account quota.\n        It is <b style=\"color:var(--text)\">not</b> your Muse password. It is a random string generated at deploy time (it starts with <code>m2a_</code>).<br>\n        Paste it into the box at the top right and click \"Save\". Your browser remembers it, so you won't need to enter it again.\n      </span>\n    ",
   "model-names-hint": "\n        Model names: <code>muse-spark</code> (chat/code), <code>muse-image</code> (images), <code>muse-video</code> (videos).\n        See the \"Integration Docs\" tab for full examples.\n      ",
