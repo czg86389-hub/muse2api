@@ -37,6 +37,7 @@ data/debug-*.json
 data/media/*
 !data/media/.gitkeep
 data/downloads/*
+data/thumbnails/
 !data/downloads/.gitkeep
 # 临时邮箱账号（含明文密码，用于接收 muse.ai 登录验证码）——绝不入库
 data/mail_accounts.txt
