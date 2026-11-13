@@ -329,6 +329,20 @@
       <div class="stat"><div class="k">媒体文件</div><div class="v" id="sMedia">0</div></div>
     </div>
 
+    <div class="card" id="schedulerPanel">
+      <h3>任务调度 <span class="tag">设置立即生效</span></h3>
+      <div class="hint">降低并发不会中断正在运行的任务；自动模式按启用、已导入登录凭据且未标记异常的账号数调整，同一账号始终只执行一个任务。</div>
+      <form id="schedulerForm" onsubmit="event.preventDefault();saveScheduler()">
+        <div class="row">
+          <div><label for="schedulerMode">并发模式</label><select id="schedulerMode"><option value="manual">手动设置</option><option value="auto">按可用账号自动调整</option></select></div>
+          <div><label for="schedulerManual">手动并发上限</label><input id="schedulerManual" type="number" min="1" max="32" required value="2"></div>
+          <div><label for="schedulerAuto">自动模式并发上限</label><input id="schedulerAuto" type="number" min="1" max="32" required value="4"></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap"><button type="submit" id="schedulerSave">保存调度设置</button><span class="hint" id="schedulerSummary" aria-live="polite">正在读取调度状态…</span></div>
+      </form>
+      <div class="hint" style="margin-top:10px">自动上限用于控制浏览器的资源占用，可按服务器负载调整。</div>
+    </div>
+
     <div class="card">
       <h3>添加账号 <span class="tag">支持批量</span></h3>
       <div class="hint" data-i18n="add-account-hint">
@@ -799,6 +813,19 @@ function setLang(v){
 }
 /* 整句：中文 → 英文 */
 const I18N_EN = {
+  "任务调度": "Task scheduling",
+  "设置立即生效": "Changes apply immediately",
+  "并发模式": "Concurrency mode",
+  "手动设置": "Manual",
+  "按可用账号自动调整": "Automatic by available accounts",
+  "手动并发上限": "Manual concurrency limit",
+  "自动模式并发上限": "Automatic concurrency cap",
+  "保存调度设置": "Save scheduling settings",
+  "正在读取调度状态…": "Loading scheduler status\u2026",
+  "调度设置已保存并生效": "Scheduling settings saved and applied",
+  "降低并发不会中断正在运行的任务；自动模式按启用、已导入登录凭据且未标记异常的账号数调整，同一账号始终只执行一个任务。": "Lowering concurrency does not interrupt active jobs. Automatic mode counts enabled accounts with login credentials and no known errors; each account runs one job at a time.",
+  "自动上限用于控制浏览器的资源占用，可按服务器负载调整。": "Adjust the automatic cap to match server capacity.",
+
   "代理配置已保存，账号浏览器状态待测试": "Proxy saved; account browser status still needs testing",
   "代理地址或完整链接": "Proxy address or full URL",
   "可直接粘贴包含用户名和密码的 HTTP、SOCKS5 或 SOCKS5h 链接，立即测试，无需先保存。": "Paste an HTTP, SOCKS5 or SOCKS5h URL including credentials and test it immediately, without saving.",
@@ -2328,10 +2355,35 @@ async function upgradeNow(){
   }
 }
 
+let schedulerLoaded = false;
+function renderScheduler(s, accounts = []) {
+  if (!s) return;
+  if (!schedulerLoaded) {
+    $('schedulerMode').value = s.mode;
+    $('schedulerManual').value = s.manual_limit;
+    $('schedulerAuto').value = s.auto_limit;
+    schedulerLoaded = true;
+  }
+  $('schedulerSummary').textContent = LANG === 'en'
+    ? `Limit ${s.effective_limit} · Active ${s.active} · Waiting ${s.waiting} · Accounts ${s.available_accounts}`
+    : `生效上限 ${s.effective_limit} · 运行 ${s.active} · 等待 ${s.waiting} · 可用账号 ${s.available_accounts}`;
+
+}
+async function saveScheduler() {
+  if (!$('schedulerForm').reportValidity()) return;
+  const button = $('schedulerSave'); button.disabled = true;
+  try {
+    const settings = {mode:$('schedulerMode').value, manual_limit:Number($('schedulerManual').value),
+      auto_limit:Number($('schedulerAuto').value)};
+    await api('/admin/scheduler', {method:'PUT', body:JSON.stringify(settings)});
+    schedulerLoaded = false; await loadStatus(); toast('调度设置已保存并生效', 'ok');
+  } catch(e) { toast(e.message, 'bad'); } finally { button.disabled = false; }
+}
 /* ================= 总览刷新 ================= */
 async function loadStatus(){
   try{
     const d = await api('/admin/status');
+    renderScheduler(d.scheduler);
     $('pSvc').className = 'pill on';
     $('pSvc').innerHTML = '<span class="led"></span>服务 <b>正常</b>';
     $('pBr').className = 'pill ' + (d.browser_running ? 'on' : 'off');
