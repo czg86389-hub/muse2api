@@ -55,6 +55,7 @@ from engine import (ESSENTIAL_COOKIES, MAX_REFERENCE_IMAGE_BYTES,
                     MuseModelRefusalError, RefImageSafetyError, reference_kind)
 from engine import MuseProxyError
 from store import Store, account_expiry, min_expiry
+from video_health import VideoHealth, VideoHealthSettings
 from proxy import normalize_server, request_proxy_context, split_proxy_url
 
 import sys
@@ -139,7 +140,8 @@ class AccountPoolManager:
 
     def acquire(self, account_id: str | None = None, preferred_id: str | None = None,
                 rotate: bool = True, force_rotate: bool = False,
-                timeout: float = 60.0, record_use: bool = True) -> dict:
+                timeout: float = 60.0, record_use: bool = True,
+                kind: str | None = None) -> dict:
         deadline = time.monotonic() + timeout
         with self.cond:
             while True:
@@ -151,6 +153,8 @@ class AccountPoolManager:
                     acc = self.store.get_account(account_id)
                     if not acc or not acc.get("enabled", True):
                         raise MuseAuthError(f"指定账号 {account_id} 不存在或已禁用")
+                    if not VIDEO_HEALTH.eligible(acc, kind):
+                        raise MuseGenerationError("指定账号当前处于视频冷却或不可用状态")
                     if account_id not in self.busy_accounts:
                         self.busy_accounts.add(account_id)
                         return acc
@@ -160,7 +164,7 @@ class AccountPoolManager:
                         preferred_id=pref,
                         rotate=rotate,
                         force_rotate=force_rotate,
-                        exclude_ids=self.busy_accounts,
+                        exclude_ids=self.busy_accounts | {a["id"] for a in self.store.accounts if not VIDEO_HEALTH.eligible(a, kind)},
                         record_use=record_use,
                     )
                     if acc:
@@ -171,6 +175,8 @@ class AccountPoolManager:
                 if not live:
                     raise MuseAuthError("没有可用账号，请先在管理页面导入 cookie")
 
+                if kind == "video" and not any(VIDEO_HEALTH.eligible(a) for a in live):
+                    raise MuseGenerationError("没有可用的视频账号，账号可能处于视频拒答冷却中")
                 self.cond.wait(timeout=min(remaining, 0.5))
 
     def release(self, account_id: str | None):
@@ -184,6 +190,7 @@ class AccountPoolManager:
 GEN_LOCK = ConcurrencyLock(limit=CFG.max_concurrency)
 ACCOUNT_POOL = AccountPoolManager(store)
 IMAGE_TASK_LOCK = threading.Lock()
+VIDEO_HEALTH = VideoHealth(os.path.join(CFG.data_dir, "video-health.json"))
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -1096,6 +1103,8 @@ def _run_generation(prompt: str, kind: str, timeout: int,
                     reference_image: str | None = None,
                     reference_images: list[str] | None = None,
                     on_acquired=None) -> tuple[dict, str | None]:
+    if kind == "video" and not any(VIDEO_HEALTH.eligible(a) for a in store.accounts):
+        raise MuseGenerationError("没有可用的视频账号，账号可能处于视频拒答冷却中")
     # Browser ownership covers account selection, retry and cleanup, not just generate().
     deadline = time.monotonic() + max(1, timeout)
     if not GEN_LOCK.acquire(timeout=max(1, timeout)):
@@ -1122,7 +1131,7 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
     acc = ACCOUNT_POOL.acquire(account_id=account_id,
                                preferred_id=None,
                                rotate=True,
-                               timeout=max(1, remaining_wait))
+                               timeout=max(1, remaining_wait), kind=kind)
     cur_acc = acc
     last_exc = None
     try:
@@ -1139,7 +1148,7 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
                 rem = int(deadline - time.monotonic()) if deadline is not None else timeout
                 if rem <= 0:
                     break
-                alt = ACCOUNT_POOL.acquire(rotate=True, force_rotate=True, timeout=rem)
+                alt = ACCOUNT_POOL.acquire(rotate=True, force_rotate=True, timeout=rem, kind=kind)
                 if not alt or (old_id and alt["id"] == old_id):
                     if alt:
                         cur_acc = alt
@@ -1166,6 +1175,8 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
                                       account_id=cur_acc["id"], on_progress=on_progress,
                                       reference_image=reference_image, **engine_kwargs)
                 store.mark(cur_acc["id"], True, "")
+                if kind == "video":
+                    store.update_account(cur_acc["id"], **VIDEO_HEALTH.reset_updates())
                 _sync_cookies(cur_acc["id"])
                 return res, cur_acc["id"]
             except MuseAuthError as exc:
@@ -1179,6 +1190,8 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
             except MuseGenerationError as exc:
                 last_exc = exc
                 store.mark(cur_acc["id"], True, f"任务异常: {str(exc)[:60]}")
+                if kind == "video" and isinstance(exc, MuseModelRefusalError):
+                    store.update_account(cur_acc["id"], **VIDEO_HEALTH.refusal_updates(cur_acc, str(exc)))
                 try:
                     engine.reset_thread()
                 except Exception:
@@ -1829,6 +1842,22 @@ def get_media(name: str):
     return FileResponse(p)
 
 
+@app.get("/admin/video-health")
+def get_video_health(_=Depends(auth)):
+    return VIDEO_HEALTH.status(store.accounts)
+
+@app.put("/admin/video-health")
+def save_video_health(req: VideoHealthSettings, _=Depends(auth)):
+    VIDEO_HEALTH.save(req)
+    with ACCOUNT_POOL.cond: ACCOUNT_POOL.cond.notify_all()
+    return VIDEO_HEALTH.status(store.accounts)
+
+@app.post("/admin/accounts/{aid}/video-cooldown/reset")
+def reset_video_cooldown(aid: str, _=Depends(auth)):
+    with _account_operation(aid):
+        store.update_account(aid, **VIDEO_HEALTH.reset_updates())
+    return {"ok": True}
+
 # ------------------------- 管理：总览 -------------------------
 @app.get("/admin/status")
 def admin_status(_=Depends(auth)):
@@ -1836,6 +1865,7 @@ def admin_status(_=Depends(auth)):
     return {
         "accounts": store.list_accounts(),
         "stats": store.stats(),
+        "video_health": VIDEO_HEALTH.status(store.accounts),
         "tasks": store.list_tasks(20),
         "media_count": len(os.listdir(CFG.media_dir))
         if os.path.isdir(CFG.media_dir) else 0,
