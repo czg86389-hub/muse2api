@@ -55,6 +55,7 @@ from engine import (ESSENTIAL_COOKIES, MAX_REFERENCE_IMAGE_BYTES,
                     MuseModelRefusalError, RefImageSafetyError, reference_kind)
 from engine import MuseProxyError
 from store import Store, account_expiry, min_expiry
+from scheduler import ConcurrencyLock, SchedulerPolicy, SchedulerSettings, account_available
 from proxy import normalize_server, request_proxy_context, split_proxy_url
 
 import sys
@@ -89,47 +90,6 @@ engine = MuseEngine(CFG)
 engine.proxy_resolver = lambda aid: (store.get_account(aid) or {}).get("proxy")
 
 
-class ConcurrencyLock:
-    """多账号并发调度锁。
-    由 CFG.max_concurrency 限制最大并发槽位；
-    同时提供与标准 Lock 兼容的 acquire / release / locked 接口，
-    确保向下兼容历史单锁断言与管理端操作。"""
-    def __init__(self, limit: int = 2):
-        self.limit = max(1, limit)
-        self._sem = threading.Semaphore(self.limit)
-        self._count_lock = threading.Lock()
-        self._active_count = 0
-
-    def acquire(self, blocking: bool = True, timeout: float | None = -1) -> bool:
-        if timeout is None:
-            timeout = -1
-        if timeout < 0:
-            ok = self._sem.acquire(blocking=blocking)
-        else:
-            ok = self._sem.acquire(blocking=blocking, timeout=timeout)
-        if ok:
-            with self._count_lock:
-                self._active_count += 1
-        return ok
-
-    def release(self):
-        with self._count_lock:
-            if self._active_count > 0:
-                self._active_count -= 1
-        self._sem.release()
-
-    def locked(self) -> bool:
-        with self._count_lock:
-            return self._active_count > 0
-
-    def __enter__(self):
-        self.acquire()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.release()
-
-
 class AccountPoolManager:
     """账号并发冲突管理器：确保同一账号不会同时被两个并发任务操作，多账号则并行执行。"""
     def __init__(self, store_instance):
@@ -149,7 +109,7 @@ class AccountPoolManager:
 
                 if account_id:
                     acc = self.store.get_account(account_id)
-                    if not acc or not acc.get("enabled", True):
+                    if not acc or not account_available(acc):
                         raise MuseAuthError(f"指定账号 {account_id} 不存在或已禁用")
                     if account_id not in self.busy_accounts:
                         self.busy_accounts.add(account_id)
@@ -160,14 +120,14 @@ class AccountPoolManager:
                         preferred_id=pref,
                         rotate=rotate,
                         force_rotate=force_rotate,
-                        exclude_ids=self.busy_accounts,
+                        exclude_ids=self.busy_accounts | {a["id"] for a in self.store.accounts if not account_available(a)},
                         record_use=record_use,
                     )
                     if acc:
                         self.busy_accounts.add(acc["id"])
                         return acc
 
-                live = [a for a in self.store.accounts if a.get("enabled", True) and a.get("cookies")]
+                live = [a for a in self.store.accounts if account_available(a)]
                 if not live:
                     raise MuseAuthError("没有可用账号，请先在管理页面导入 cookie")
 
@@ -181,7 +141,9 @@ class AccountPoolManager:
             self.cond.notify_all()
 
 
-GEN_LOCK = ConcurrencyLock(limit=CFG.max_concurrency)
+SCHEDULER = SchedulerPolicy(os.path.join(CFG.data_dir, "scheduler.json"),
+                            lambda: store.accounts, CFG.max_concurrency)
+GEN_LOCK = ConcurrencyLock(limit=CFG.max_concurrency, limit_provider=SCHEDULER.limit)
 ACCOUNT_POOL = AccountPoolManager(store)
 IMAGE_TASK_LOCK = threading.Lock()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -381,7 +343,12 @@ def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
         cur_exp = expires
         last_exc = None
         leased_id = None
+        slot_acquired = False
         try:
+            slot_acquired = GEN_LOCK.acquire(timeout=timeout)
+            if not slot_acquired:
+                q.put(("error", MuseGenerationError("等待对话并发槽位超时")))
+                return
             for attempt in range(2):
                 if stop_event.is_set():
                     return
@@ -414,18 +381,18 @@ def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
                         if refreshed:
                             cur_cookies = refreshed["cookies"]
                             cur_exp = refreshed.get("cookies_exp")
-                    with GEN_LOCK:
+
+                    if stop_event.is_set():
+                        return
+                    engine.start()
+                    for chunk in engine.chat_stream(
+                        cur_cookies, prompt, cur_exp, timeout,
+                        account_id=cur_id, stop_event=stop_event
+                    ):
+                        yielded = True
+                        q.put(("data", chunk))
                         if stop_event.is_set():
                             return
-                        engine.start()
-                        for chunk in engine.chat_stream(
-                            cur_cookies, prompt, cur_exp, timeout,
-                            account_id=cur_id, stop_event=stop_event
-                        ):
-                            yielded = True
-                            q.put(("data", chunk))
-                            if stop_event.is_set():
-                                return
                     if cur_id:
                         store.mark(cur_id, True, "")
                         _sync_cookies(cur_id)
@@ -447,11 +414,15 @@ def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
                         break
             if last_exc is not None:
                 q.put(("error", last_exc))
+        except Exception as exc:
+            q.put(("error", exc))
         finally:
             if leased_id:
                 ACCOUNT_POOL.release(leased_id)
             engine.close_current_page()
             _clear_account_proxy()
+            if slot_acquired:
+                GEN_LOCK.release()
             q.put(("done", None))
 
     threading.Thread(target=worker, daemon=True).start()
@@ -1829,6 +1800,22 @@ def get_media(name: str):
     return FileResponse(p)
 
 
+def _scheduler_status():
+    return {**SCHEDULER.settings(), **SCHEDULER.counts(), **GEN_LOCK.snapshot()}
+
+
+@app.get("/admin/scheduler")
+def get_scheduler(_=Depends(auth)):
+    return _scheduler_status()
+
+
+@app.put("/admin/scheduler")
+def save_scheduler(req: SchedulerSettings, _=Depends(auth)):
+    SCHEDULER.save(req)
+    GEN_LOCK.notify()
+    return _scheduler_status()
+
+
 # ------------------------- 管理：总览 -------------------------
 @app.get("/admin/status")
 def admin_status(_=Depends(auth)):
@@ -1836,6 +1823,7 @@ def admin_status(_=Depends(auth)):
     return {
         "accounts": store.list_accounts(),
         "stats": store.stats(),
+        "scheduler": _scheduler_status(),
         "tasks": store.list_tasks(20),
         "media_count": len(os.listdir(CFG.media_dir))
         if os.path.isdir(CFG.media_dir) else 0,
