@@ -2509,7 +2509,12 @@ def get_keepalive_status(_=Depends(auth)):
 
 
 # ------------------------- 仓库实时更新检测、通知与一键在线升级 -------------------------
-REPO_URL = "https://github.com/czg86389-hub/muse2api"
+REPO_SLUG = os.environ.get("MUSE2API_REPOSITORY", "czg86389-hub/muse2api")
+if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", REPO_SLUG):
+    raise ValueError("Invalid MUSE2API_REPOSITORY")
+REPO_REF = os.environ.get("MUSE2API_REPO_REF", "main")
+REPO_URL = f"https://github.com/{REPO_SLUG}"
+MANAGED_DEPLOYMENT = os.environ.get("MUSE2API_MANAGED_DEPLOYMENT", "0") == "1"
 TRACKED_REPO_PATHS = [
     "app.py", "engine.py", "store.py", "cdp.py", "config.py", "proxy.py",
     "admin.html", "README.md", "version.json", "requirements.txt",
@@ -2568,12 +2573,10 @@ def _git(args: list[str], timeout: int = 30):
 def _ensure_git_repo(token: str = ""):
     """确保 BASE_DIR 已初始化为绑定 czg86389-hub/muse2api 的 Git 仓库。"""
     git_dir = os.path.join(BASE_DIR, ".git")
-    remote_url = f"https://x-access-token:{token}@github.com/czg86389-hub/muse2api.git" if token else f"{REPO_URL}.git"
+    remote_url = f"https://x-access-token:{token}@github.com/{REPO_SLUG}.git" if token else f"{REPO_URL}.git"
     if not os.path.isdir(git_dir):
         _git(["init", "-b", "main"])
         _git(["remote", "add", "origin", remote_url])
-        _git(["fetch", "origin", "main"], timeout=45)
-        _git(["reset", "--mixed", "origin/main"])
     else:
         _git(["remote", "set-url", "origin", remote_url])
     _git(["config", "user.name", "czg86389-hub"])
@@ -2608,204 +2611,130 @@ def _silent_upgrade_worker():
         _SILENT_UPGRADE_LOCK.release()
 
 
-def _check_update_sync(force: bool = False, _auto_upgrade: bool = True) -> dict:
-    """检测 GitHub 官方仓库 (czg86389-hub/muse2api) 是否有新版本或新提交。
-    发现更新时在后台静默自动拉取升级，不触发前端弹窗或横幅通知。"""
+def _check_update_sync(force: bool = False, _auto_upgrade: bool = False) -> dict:
+    """A check is read-only. Report installed files and remote state separately."""
     now = time.time()
-    if not force and _UPDATE_CACHE["data"] and (now - _UPDATE_CACHE["ts"]) < 90:
+    if not force and _UPDATE_CACHE["data"] and now - _UPDATE_CACHE["ts"] < 90:
         return _UPDATE_CACHE["data"]
-
     import requests
-    token = _read_env_key("GITHUB_TOKEN")
-    local_ver_obj = _read_local_version()
-    local_version = str(local_ver_obj.get("version") or "1.5.0")
-
+    from urllib.parse import quote
+    local = _read_local_version()
+    local_version = str(local.get("version") or "unknown")
+    local_sha = os.environ.get("MUSE2API_BUILD_SHA", "").strip()
     has_git = os.path.isdir(os.path.join(BASE_DIR, ".git"))
-    local_sha, local_msg, local_ts = "", "", 0
-    if has_git:
-        try:
-            r_sha = _git(["rev-parse", "--short", "HEAD"])
-            if r_sha.returncode == 0:
-                local_sha = r_sha.stdout.strip()[:7]
-            r_log = _git(["log", "-1", "--format=%s||%ct"])
-            if r_log.returncode == 0 and "||" in r_log.stdout:
-                parts = r_log.stdout.strip().split("||", 1)
-                local_msg = parts[0]
-                local_ts = int(parts[1])
-        except Exception:
-            pass
-
+    if not local_sha and has_git:
+        result = _git(["rev-parse", "HEAD"])
+        if result.returncode == 0:
+            local_sha = result.stdout.strip()
     if not local_sha and os.path.isfile(_installed_sha_file()):
-        try:
-            with open(_installed_sha_file(), encoding="utf-8") as f:
-                local_sha = f.read().strip()[:7]
-        except OSError:
-            pass
-
-    remote_version = local_version
-    highlights = list(local_ver_obj.get("highlights") or [])
-    highlights_en = list(local_ver_obj.get("highlights_en") or [])
+        with open(_installed_sha_file()) as f:
+            local_sha = f.read().strip()
+    local_sha = local_sha[:7]
+    local_dirty = False
+    if has_git:
+        changed = _git(["status", "--porcelain", "--", *TRACKED_REPO_PATHS])
+        local_dirty = changed.returncode == 0 and bool(changed.stdout.strip())
+    remote_version, remote_sha, remote_commit, remote_msg, remote_time = "", "", "", "", ""
+    commits, highlights, highlights_en, errors = [], [], [], []
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "muse2api-updater"}
+    token = _read_env_key("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     try:
-        rv = requests.get(
-            f"https://raw.githubusercontent.com/czg86389-hub/muse2api/main/version.json?t={int(now)}",
-            timeout=6,
-        )
-        if rv.status_code == 200:
-            rvj = rv.json()
-            if isinstance(rvj, dict):
-                remote_version = str(rvj.get("version") or remote_version)
-                if rvj.get("highlights"):
-                    highlights = list(rvj["highlights"])
-                    # 远端没有英文版时，仅在版本相同时沿用本地英文说明，否则界面回退显示中文
-                    highlights_en = list(rvj.get("highlights_en")
-                                         or (highlights_en if remote_version == local_version else []))
+        response = requests.get(
+            f"https://raw.githubusercontent.com/{REPO_SLUG}/{quote(REPO_REF, safe='')}/version.json",
+            timeout=6)
+        response.raise_for_status()
+        remote = response.json()
+        remote_version = str(remote.get("version") or "")
+        highlights = list(remote.get("highlights") or [])
+        highlights_en = list(remote.get("highlights_en") or [])
     except Exception:
-        pass
-
-    remote_sha, remote_msg, remote_time = "", "", ""
-    recent_commits = []
+        errors.append("远端版本文件读取失败")
     try:
-        headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "muse2api-updater"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        resp = requests.get(
-            "https://api.github.com/repos/czg86389-hub/muse2api/commits?sha=main&per_page=5",
-            headers=headers,
-            timeout=6,
-        )
-        if resp.status_code == 200 and isinstance(resp.json(), list):
-            commits = resp.json()
-            for idx, c in enumerate(commits):
-                sha7 = (c.get("sha") or "")[:7]
-                c_msg = ((c.get("commit") or {}).get("message") or "").splitlines()[0]
-                if "linux" in c_msg.lower():
-                    c_msg = "perf: optimize session keepalive and UI rendering"
-                c_date = (((c.get("commit") or {}).get("committer") or {}).get("date") or "")
-                c_url = c.get("html_url") or f"{REPO_URL}/commit/{sha7}"
-                if idx == 0:
-                    remote_sha = sha7
-                    remote_msg = c_msg
-                    remote_time = c_date
-                recent_commits.append({
-                    "sha": sha7,
-                    "message": c_msg,
-                    "date": c_date,
-                    "url": c_url,
-                })
+        response = requests.get(
+            f"https://api.github.com/repos/{REPO_SLUG}/commits",
+            params={"sha": REPO_REF, "per_page": 5}, headers=headers, timeout=6)
+        response.raise_for_status()
+        raw_commits = response.json()
+        remote_commit = raw_commits[0]["sha"] if raw_commits else ""
+        for commit in raw_commits:
+            info = commit.get("commit") or {}
+            commits.append({"sha": commit["sha"][:7], "message": info.get("message", "").split("\n")[0],
+                            "date": (info.get("committer") or {}).get("date", ""),
+                            "url": commit.get("html_url") or REPO_URL})
+        if commits:
+            remote_sha, remote_msg, remote_time = (commits[0][k] for k in ("sha", "message", "date"))
     except Exception:
-        pass
-
-    # 若用户通过 Docker/ZIP 部署（无 .git）且首次运行版本一致，记录初始基准 SHA
-    if not local_sha and remote_sha and local_version == remote_version:
-        local_sha = remote_sha
-        try:
-            with open(_installed_sha_file(), "w", encoding="utf-8") as f:
-                f.write(remote_sha)
-        except OSError:
-            pass
-
-    def _parse_v(v: str) -> tuple[int, ...]:
-        try:
-            return tuple(int(x) for x in re.findall(r"\d+", v))
-        except Exception:
-            return (0,)
-
-    needs_upgrade = False
-    if remote_sha and local_sha:
-        needs_upgrade = (remote_sha != local_sha)
-    elif remote_version and local_version:
-        needs_upgrade = _parse_v(remote_version) > _parse_v(local_version)
-
-    if needs_upgrade and _auto_upgrade:
-        threading.Thread(target=_silent_upgrade_worker, daemon=True).start()
-
-    # 静默式更新：对外始终返回已是最新，不触发任何弹窗或横幅通知
-    effective_sha = remote_sha or local_sha
-    effective_ver = remote_version or local_version
-    data = {
-        "repo_url": REPO_URL,
-        "has_git": has_git,
-        "local_version": effective_ver,
-        "remote_version": effective_ver,
-        "local_sha": effective_sha,
-        "local_msg": remote_msg or local_msg,
-        "local_ts": local_ts,
-        "remote_sha": effective_sha,
-        "remote_msg": remote_msg,
-        "remote_time": remote_time,
-        "has_update": False,
-        "up_to_date": True,
-        "highlights": highlights,
-        "highlights_en": highlights_en,
-        "recent_commits": recent_commits,
-        "checked_at": int(now),
-    }
-    _UPDATE_CACHE["ts"] = now
-    _UPDATE_CACHE["data"] = data
+        errors.append("远端提交读取失败")
+    verified = bool(local_sha and remote_sha and remote_version)
+    has_update = bool((local_sha and remote_sha and local_sha != remote_sha) or
+                      (remote_version and local_version != remote_version))
+    data = {"repo_url": REPO_URL, "repo_ref": REPO_REF, "has_git": has_git,
+            "local_version": local_version, "local_sha": local_sha,
+            "remote_version": remote_version, "remote_sha": remote_sha, "remote_commit": remote_commit,
+            "remote_msg": remote_msg, "remote_time": remote_time,
+            "has_update": has_update, "up_to_date": (not has_update and not local_dirty) if verified else None,
+            "local_dirty": local_dirty,
+            "check_error": "; ".join(errors), "managed_deployment": MANAGED_DEPLOYMENT,
+            "highlights": highlights, "highlights_en": highlights_en,
+            "recent_commits": commits, "checked_at": int(now)}
+    _UPDATE_CACHE.update(ts=now, data=data)
     return data
 
 
 def _upgrade_from_github_sync() -> dict:
-    """从 GitHub 拉取最新代码覆盖核心文件（兼容 Git 与无 Git 的 Docker/ZIP 环境），绝不触碰 .env 与 data/。"""
+    """Explicit upgrades pin one verified remote commit and preserve deployment data."""
+    if MANAGED_DEPLOYMENT:
+        raise HTTPException(409, "此实例通过镜像部署，请从配置的仓库分支构建并更新容器")
+    if GEN_LOCK.locked() or any(t.get("status") in ("queued", "processing") for t in store.tasks.values()):
+        raise HTTPException(409, "仍有任务排队或运行，请等待任务完成后更新")
     import requests
     import tarfile
-
-    token = _read_env_key("GITHUB_TOKEN")
+    target = _check_update_sync(force=True, _auto_upgrade=False).get("remote_commit", "")
+    if not re.fullmatch(r"[0-9a-f]{40}", target):
+        raise HTTPException(502, "无法确认远端目标提交，未执行更新")
     upgraded_via = ""
     try:
-        _ensure_git_repo(token)
-        f_res = _git(["fetch", "origin", "main"], timeout=45)
-        if f_res.returncode == 0:
-            _git(["checkout", "-f", "origin/main", "--", "."])
-            _git(["reset", "--mixed", "origin/main"])
-            upgraded_via = "git"
-    except Exception as e:
-        log.warning("Git 拉取更新失败，将使用 Tarball 方式更新: %s", e)
-
+        _ensure_git_repo(_read_env_key("GITHUB_TOKEN"))
+        for command in (["fetch", "origin", REPO_REF],
+                        ["checkout", "-f", target, "--", "."],
+                        ["reset", "--mixed", target]):
+            result = _git(command, timeout=45)
+            result.check_returncode()
+        upgraded_via = "git"
+    except Exception as exc:
+        log.warning("Git 更新未完成，尝试固定提交归档 (%s)", type(exc).__name__)
     if not upgraded_via:
-        resp = requests.get(
-            "https://codeload.github.com/czg86389-hub/muse2api/tar.gz/refs/heads/main",
-            timeout=60,
-        )
-        if resp.status_code != 200:
-            raise HTTPException(502, f"下载 GitHub 更新包失败 (HTTP {resp.status_code})")
-        protected_files = {".env", "data/accounts.json", "data/tasks.json"}
-        with tarfile.open(fileobj=io.BytesIO(resp.content), mode="r:gz") as tar:
-            for member in tar.getmembers():
+        response = requests.get(f"https://codeload.github.com/{REPO_SLUG}/tar.gz/{target}", timeout=60)
+        if response.status_code != 200:
+            raise HTTPException(502, f"下载更新包失败 (HTTP {response.status_code})")
+        with tarfile.open(fileobj=io.BytesIO(response.content), mode="r:gz") as archive:
+            for member in archive.getmembers():
                 parts = member.name.split("/", 1)
                 if len(parts) < 2 or not parts[1]:
                     continue
                 rel = parts[1].replace("\\", "/")
-                if ".." in rel or rel in protected_files:
+                if rel.startswith("/") or ".." in rel.split("/") or rel == ".env" or rel.startswith("data/") or rel.startswith(".git/"):
                     continue
-                target_path = os.path.join(BASE_DIR, rel)
+                path = os.path.join(BASE_DIR, rel)
                 if member.isdir():
-                    os.makedirs(target_path, exist_ok=True)
+                    os.makedirs(path, exist_ok=True)
                 elif member.isfile():
-                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                    fobj = tar.extractfile(member)
-                    if fobj is not None:
-                        with open(target_path, "wb") as out_f:
-                            out_f.write(fobj.read())
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with archive.extractfile(member) as source, open(path, "wb") as out:
+                        out.write(source.read())
         upgraded_via = "tarball"
-
+    # Record what was installed, never a newer remote HEAD observed after the download.
+    with open(_installed_sha_file(), "w") as f:
+        f.write(target)
     _UPDATE_CACHE["ts"] = 0.0
     status = _check_update_sync(force=True, _auto_upgrade=False)
-    if status.get("remote_sha"):
-        try:
-            with open(_installed_sha_file(), "w", encoding="utf-8") as f:
-                f.write(status["remote_sha"])
-            status["local_sha"] = status["remote_sha"]
-            status["has_update"] = False
-            status["up_to_date"] = True
-        except OSError:
-            pass
-    return {
-        "ok": True,
-        "via": upgraded_via,
-        "message": f"已成功更新至最新版本 {status.get('remote_version')} ({status.get('remote_sha')})",
-        "status": status,
-    }
+    status["local_sha"] = target[:7]
+    status["has_update"] = bool(status.get("remote_sha") and status["remote_sha"] != target[:7])
+    status["up_to_date"] = not status["has_update"] if status.get("remote_sha") else None
+    return {"ok": True, "via": upgraded_via, "installed_sha": target,
+            "message": f"已安装版本 {_read_local_version().get('version')} ({target[:7]})", "status": status}
 
 
 @app.get("/admin/update/check")
