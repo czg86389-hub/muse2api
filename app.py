@@ -55,6 +55,7 @@ from engine import (ESSENTIAL_COOKIES, MAX_REFERENCE_IMAGE_BYTES,
                     MuseModelRefusalError, RefImageSafetyError, reference_kind)
 from engine import MuseProxyError
 from store import Store, account_expiry, min_expiry
+from generation_timing import QueuePolicy, QueueSettings, TaskTiming
 from proxy import normalize_server, request_proxy_context, split_proxy_url
 
 import sys
@@ -139,12 +140,12 @@ class AccountPoolManager:
 
     def acquire(self, account_id: str | None = None, preferred_id: str | None = None,
                 rotate: bool = True, force_rotate: bool = False,
-                timeout: float = 60.0, record_use: bool = True) -> dict:
-        deadline = time.monotonic() + timeout
+                timeout: float | None = 60.0, record_use: bool = True) -> dict:
+        deadline = None if timeout is None else time.monotonic() + timeout
         with self.cond:
             while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
                     raise MuseGenerationError("等待空闲账号超时，当前所有账号均处于繁忙中")
 
                 if account_id:
@@ -171,7 +172,7 @@ class AccountPoolManager:
                 if not live:
                     raise MuseAuthError("没有可用账号，请先在管理页面导入 cookie")
 
-                self.cond.wait(timeout=min(remaining, 0.5))
+                self.cond.wait(timeout=0.5 if remaining is None else min(remaining, 0.5))
 
     def release(self, account_id: str | None):
         if not account_id:
@@ -184,6 +185,7 @@ class AccountPoolManager:
 GEN_LOCK = ConcurrencyLock(limit=CFG.max_concurrency)
 ACCOUNT_POOL = AccountPoolManager(store)
 IMAGE_TASK_LOCK = threading.Lock()
+QUEUE_POLICY = QueuePolicy(os.path.join(CFG.data_dir, "generation-queue.json"))
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -1091,24 +1093,34 @@ def _pos(v) -> bool:
         return False
 
 
+def _generation_callback(callback, *args):
+    if callback:
+        try:
+            callback(*args)
+        except Exception as exc:
+            log.warning("Task metadata callback failed: %s", type(exc).__name__)
+
+
 def _run_generation(prompt: str, kind: str, timeout: int,
                     account_id: str | None = None, on_progress=None,
                     reference_image: str | None = None,
                     reference_images: list[str] | None = None,
-                    on_acquired=None) -> tuple[dict, str | None]:
-    # Browser ownership covers account selection, retry and cleanup, not just generate().
-    deadline = time.monotonic() + max(1, timeout)
-    if not GEN_LOCK.acquire(timeout=max(1, timeout)):
-        raise MuseGenerationError("等待浏览器队列超时，请稍后重试")
+                    on_acquired=None, on_account=None, on_queue=None, on_error=None) -> tuple[dict, str | None]:
+    if not any(a.get("enabled", True) and a.get("cookies") for a in store.accounts):
+        raise MuseGenerationError("没有可用的生成账号，请检查账号池")
+    queue_timeout = QUEUE_POLICY.settings()["queue_timeout"]
+    t0 = time.monotonic()
+    acquired = GEN_LOCK.acquire(timeout=queue_timeout or None)
+    queued = time.monotonic() - t0
+    _generation_callback(on_queue, queued)
+    if not acquired:
+        raise MuseGenerationError("排队时限已到，尚未开始生成；请稍后重试或调整独立排队时限")
     try:
-        if on_acquired:
-            try:
-                on_acquired()
-            except Exception:
-                pass
         return _run_generation_locked(prompt, kind, timeout, account_id,
                                       on_progress, reference_image, reference_images,
-                                      deadline=deadline)
+                                      on_acquired=on_acquired, on_account=on_account,
+                                      on_queue=on_queue, on_error=on_error,
+                                      queued=queued, queue_timeout=queue_timeout)
     finally:
         GEN_LOCK.release()
 
@@ -1117,44 +1129,60 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
                     account_id: str | None = None, on_progress=None,
                     reference_image: str | None = None,
                     reference_images: list[str] | None = None,
-                    deadline=None) -> tuple[dict, str | None]:
-    remaining_wait = int(deadline - time.monotonic()) if deadline is not None else timeout
-    acc = ACCOUNT_POOL.acquire(account_id=account_id,
-                               preferred_id=None,
-                               rotate=True,
-                               timeout=max(1, remaining_wait))
-    cur_acc = acc
+                    deadline=None, on_acquired=None, on_account=None,
+                    on_queue=None, on_error=None, queued=0.0, queue_timeout=None) -> tuple[dict, str | None]:
+    if queue_timeout is None:
+        queue_timeout = QUEUE_POLICY.settings()["queue_timeout"]
+
+    def lease(**kwargs):
+        nonlocal queued, deadline
+        remaining = max(0.001, queue_timeout - queued) if queue_timeout else None
+        t0 = time.monotonic()
+        try:
+            return ACCOUNT_POOL.acquire(timeout=remaining, **kwargs)
+        finally:
+            waited = time.monotonic() - t0
+            queued += waited
+            # Retry account waits also use the queue budget, never the generation budget.
+            if deadline is not None:
+                deadline += waited
+            _generation_callback(on_queue, queued)
+
+    cur_acc = lease(account_id=account_id, preferred_id=None, rotate=True)
+    if deadline is None:
+        deadline = time.monotonic() + max(1, timeout)
     last_exc = None
     try:
+        if on_acquired:
+            on_acquired()
         for attempt in range(2):
-            if deadline is not None and time.monotonic() >= deadline:
-                raise MuseGenerationError("任务总等待时限已到，停止重试")
+            # Preserve the original failure, including a refusal at the deadline boundary.
+            if isinstance(last_exc, MuseModelRefusalError) or time.monotonic() >= deadline:
+                if last_exc is not None:
+                    raise last_exc
+                raise MuseGenerationError("生成时限已到（不含排队时间），已停止等待")
             if attempt > 0:
-                if isinstance(last_exc, MuseModelRefusalError):
-                    break
                 old_id = cur_acc["id"] if cur_acc else None
                 if old_id:
                     ACCOUNT_POOL.release(old_id)
                 cur_acc = None
-                rem = int(deadline - time.monotonic()) if deadline is not None else timeout
-                if rem <= 0:
-                    break
-                alt = ACCOUNT_POOL.acquire(rotate=True, force_rotate=True, timeout=rem)
-                if not alt or (old_id and alt["id"] == old_id):
-                    if alt:
-                        cur_acc = alt
-                    break
+                try:
+                    alt = lease(rotate=True, force_rotate=True)
+                except (MuseAuthError, MuseGenerationError):
+                    raise last_exc
                 cur_acc = alt
-                log.info("【生图/视频自动切号】切换到备用账号 %s (%s) 重试...", cur_acc.get("label"), cur_acc["id"])
+                if not alt or (old_id and alt["id"] == old_id):
+                    break
+            _generation_callback(on_account, cur_acc["id"], attempt + 1)
             try:
                 _bind_account_proxy(cur_acc)
                 refreshed = _renew_and_persist(cur_acc["id"], wake_vm=True, force=(attempt > 0))
                 if refreshed:
                     cur_acc = refreshed
                 engine.start()
-                remaining = int(deadline - time.monotonic()) if deadline is not None else timeout
+                remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise MuseGenerationError("任务总等待时限已到，停止重试")
+                    raise MuseGenerationError("生成准备超时（不含排队时间），尚未发送本次提示词")
                 refs = list(reference_images or [])
                 engine_kwargs = {}
                 if len(refs) == 1 and not reference_image:
@@ -1178,14 +1206,16 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
                 engine.close_current_page()
             except MuseGenerationError as exc:
                 last_exc = exc
-                store.mark(cur_acc["id"], True, f"任务异常: {str(exc)[:60]}")
+                store.mark(cur_acc["id"], True, f"任务异常: {str(exc)[:200]}")
                 try:
                     engine.reset_thread()
                 except Exception:
                     pass
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 engine.close_current_page()
                 last_exc = MuseGenerationError(f"生成失败: {exc}")
+            if on_error:
+                on_error(str(last_exc))
         raise last_exc
     finally:
         if cur_acc:
@@ -1278,29 +1308,30 @@ def _queue_image(req: ImageRequest, prompt: str, reference_images: list[str],
         task = store.create_task("image", req.prompt)
         tid = task["id"]
         store.update_task(tid, api_prompt=prompt, size=req.size,
-                          response_format=req.response_format, progress=0,
+                          response_format=req.response_format, progress=0, queue_elapsed=0.0,
                           image_request_key=key_hash, image_request_hash=request_hash)
 
     def worker():
-        timing = {"t0": time.time()}
+        timing = TaskTiming(store, tid)
         def _on_acquired():
-            timing["t0"] = time.time()
-            store.update_task(tid, status="processing", progress=5)
+            timing.acquired()
+            store.update_task(tid, progress=5)
         try:
             res, acc_id = _run_generation(
                 prompt, "image", req.timeout or CFG.image_timeout,
                 reference_images=reference_images,
                 on_progress=lambda p: store.update_task(tid, progress=p),
-                on_acquired=_on_acquired)
+                on_acquired=_on_acquired, on_account=timing.account,
+                on_queue=timing.queued, on_error=timing.error)
             # Store only media metadata, not large base64 payloads or reference credentials.
             store.update_task(tid, status="completed", progress=100, account=acc_id,
-                              elapsed=round(time.time() - timing["t0"], 1),
+                              **timing.finish(),
                               url=media_url(res["filename"]),
                               result={**{k: res[k] for k in ("filename", "size", "kind")},
                                       "url": media_url(res["filename"])})
         except Exception as exc:  # noqa: BLE001
             store.update_task(tid, status="failed", error=str(exc),
-                              elapsed=round(time.time() - timing["t0"], 1))
+                              **timing.finish())
 
     threading.Thread(target=worker, daemon=True).start()
     return JSONResponse(status_code=202, content={
@@ -1457,23 +1488,24 @@ async def create_video(req: VideoRequest, _=Depends(auth)):
     prompt = build_video_prompt(req, _reference_kinds(ref_images))
     timeout = req.timeout or CFG.video_timeout
     task = store.create_task("video", req.prompt)
-    store.update_task(task["id"], api_prompt=prompt)
+    store.update_task(task["id"], api_prompt=prompt, queue_elapsed=0.0)
 
     store.update_task(task["id"], progress=10)
 
     def worker():
-        timing = {"t0": time.time()}
+        timing = TaskTiming(store, task["id"])
         def _on_acquired():
-            timing["t0"] = time.time()
-            store.update_task(task["id"], status="processing", progress=15)
+            timing.acquired()
+            store.update_task(task["id"], progress=15)
         try:
             def prog_cb(p):
                 store.update_task(task["id"], progress=p)
             res, acc_id = _run_generation(prompt, "video", timeout, on_progress=prog_cb,
-                                          reference_images=ref_images, on_acquired=_on_acquired)
+                                          reference_images=ref_images, on_acquired=_on_acquired, on_account=timing.account,
+                on_queue=timing.queued, on_error=timing.error)
             vurl = media_url(res["filename"])
             store.update_task(task["id"], status="completed", progress=100, account=acc_id,
-                              elapsed=round(time.time() - timing["t0"], 1),
+                              **timing.finish(),
                               url=vurl,
                               video={"url": vurl},
                               result={"url": vurl,
@@ -1481,7 +1513,7 @@ async def create_video(req: VideoRequest, _=Depends(auth)):
                                       "bytes": res["size"], "kind": res["kind"]})
         except Exception as exc:  # noqa: BLE001
             store.update_task(task["id"], status="failed",
-                              elapsed=round(time.time() - timing["t0"], 1), error=str(exc))
+                              **timing.finish(), error=str(exc))
 
     threading.Thread(target=worker, daemon=True).start()
     return {"id": task["id"], "task_id": task["id"], "object": "video.task", "status": "queued",
@@ -1829,6 +1861,15 @@ def get_media(name: str):
     return FileResponse(p)
 
 
+@app.get("/admin/generation-queue")
+def get_generation_queue(_=Depends(auth)):
+    return QUEUE_POLICY.settings()
+
+@app.put("/admin/generation-queue")
+def save_generation_queue(req: QueueSettings, _=Depends(auth)):
+    QUEUE_POLICY.save(req)
+    return QUEUE_POLICY.settings()
+
 # ------------------------- 管理：总览 -------------------------
 @app.get("/admin/status")
 def admin_status(_=Depends(auth)):
@@ -1836,6 +1877,7 @@ def admin_status(_=Depends(auth)):
     return {
         "accounts": store.list_accounts(),
         "stats": store.stats(),
+        "generation_queue": QUEUE_POLICY.settings(),
         "tasks": store.list_tasks(20),
         "media_count": len(os.listdir(CFG.media_dir))
         if os.path.isdir(CFG.media_dir) else 0,
