@@ -329,6 +329,16 @@
       <div class="stat"><div class="k">媒体文件</div><div class="v" id="sMedia">0</div></div>
     </div>
 
+    <div class="card" id="videoHealthPanel">
+      <h3>视频账号冷却</h3>
+      <div class="hint">地区类文字拒答或连续两次未生成媒体时，暂时跳过该账号的视频任务。图片和对话不受影响；这不代表账号被永久封禁。</div>
+      <form id="videoHealthForm" onsubmit="event.preventDefault();saveVideoHealth()">
+        <div class="row"><div style="max-width:340px"><label for="videoHealthSeconds">视频拒答冷却（秒，0 为关闭）</label><input id="videoHealthSeconds" type="number" min="0" max="86400" required value="900"></div></div>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:12px"><button id="videoHealthSave" type="submit">保存视频冷却设置</button><span class="hint" id="videoHealthSummary"></span></div>
+      </form>
+      <div id="videoCooldowns" style="margin-top:10px"></div>
+    </div>
+
     <div class="card">
       <h3>添加账号 <span class="tag">支持批量</span></h3>
       <div class="hint" data-i18n="add-account-hint">
@@ -799,6 +809,12 @@ function setLang(v){
 }
 /* 整句：中文 → 英文 */
 const I18N_EN = {
+  "视频账号冷却": "Video account cooldowns",
+  "地区类文字拒答或连续两次未生成媒体时，暂时跳过该账号的视频任务。图片和对话不受影响；这不代表账号被永久封禁。": "Temporarily skip an account for video after a regional text refusal or two consecutive text-only refusals. Images and chat remain available; this does not establish a permanent account ban.",
+  "视频拒答冷却（秒，0 为关闭）": "Video refusal cooldown (seconds; 0 = off)",
+  "保存视频冷却设置": "Save video cooldown settings",
+  "视频冷却设置已保存": "Video cooldown settings saved",
+
   "代理配置已保存，账号浏览器状态待测试": "Proxy saved; account browser status still needs testing",
   "代理地址或完整链接": "Proxy address or full URL",
   "可直接粘贴包含用户名和密码的 HTTP、SOCKS5 或 SOCKS5h 链接，立即测试，无需先保存。": "Paste an HTTP, SOCKS5 or SOCKS5h URL including credentials and test it immediately, without saving.",
@@ -2328,10 +2344,29 @@ async function upgradeNow(){
   }
 }
 
+let videoHealthLoaded = false;
+function renderVideoHealth(s) {
+  if (!s) return;
+  if (!videoHealthLoaded) {$('videoHealthSeconds').value=s.video_cooldown;videoHealthLoaded=true;}
+  $('videoHealthSummary').textContent = LANG==='en' ? `Video-eligible accounts: ${s.eligible_video_accounts}` : `视频可用账号：${s.eligible_video_accounts}`;
+  $('videoCooldowns').innerHTML = s.cooling_accounts.map(a => `<div class="hint"><span class="badge warn">${LANG==='en'?'Video cooldown':'视频冷却'}</span> ${esc(a.label)} · ${fmtTime(a.until)} <button type="button" class="ghost mini" onclick="resetVideoCooldown('${esc(a.id)}')">${LANG==='en'?'Resume video':'恢复视频调度'}</button></div>`).join('');
+}
+async function saveVideoHealth() {
+  if (!$('videoHealthForm').reportValidity()) return;
+  const button=$('videoHealthSave');button.disabled=true;
+  try {await api('/admin/video-health',{method:'PUT',body:JSON.stringify({video_cooldown:Number($('videoHealthSeconds').value)})});videoHealthLoaded=false;await loadStatus();toast('视频冷却设置已保存','ok');}
+  catch(e){toast(e.message,'bad');}finally{button.disabled=false;}
+}
+async function resetVideoCooldown(id) {
+  try {await api('/admin/accounts/'+encodeURIComponent(id)+'/video-cooldown/reset',{method:'POST'});await loadStatus();}
+  catch(e){toast(e.message,'bad');}
+}
+
 /* ================= 总览刷新 ================= */
 async function loadStatus(){
   try{
     const d = await api('/admin/status');
+    renderVideoHealth(d.video_health);
     $('pSvc').className = 'pill on';
     $('pSvc').innerHTML = '<span class="led"></span>服务 <b>正常</b>';
     $('pBr').className = 'pill ' + (d.browser_running ? 'on' : 'off');

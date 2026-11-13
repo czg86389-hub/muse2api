@@ -60,3 +60,6 @@ Thumbs.db
 *.zip
 *.tar.gz
 *.tar
+
+# Video refusal policy
+data/video-health.json
