@@ -144,6 +144,36 @@ Upload one product photo and get talking-head sales videos, story-style ad short
 
 ---
 
+### 方式三：Windows 裸机部署（Win10 / Win11）
+
+1. **安装 Python 3.10+**：官网安装包，安装时勾选 *Add python.exe to PATH*。浏览器 Chrome / Edge 任装其一即可，程序会自动探测（也可通过 `MUSE2API_CHROMIUM` 手动指定路径）。
+
+2. **创建虚拟环境并安装依赖**（PowerShell / CMD）：
+   ```bat
+   git clone https://github.com/czg86389-hub/muse2api.git
+   cd muse2api
+   python -m venv venv
+   venv\Scripts\python.exe -m pip install -r requirements.txt
+   copy .env.example .env
+   ```
+
+3. **一键启动 / 停止（推荐）**：双击 `deploy\windows\muse2api.bat`，菜单式控制启动、停止、重启、状态查看与日志查看。启动时日志自动写入仓库根目录 `server.log`；停止时会一并清理服务拉起的浏览器残留进程，不影响你自己打开的浏览器窗口。
+
+4. **手动命令行启动**：
+   ```bat
+   venv\Scripts\python.exe -m uvicorn app:app --host 127.0.0.1 --port 18610
+   ```
+   提示：改用 `venv\Scripts\pythonw.exe -m uvicorn ...` 启动不会有控制台黑框（脚本已默认如此，日志重定向到 `server.log`）。
+
+5. **访问管理面板**：打开浏览器访问 `http://127.0.0.1:18610/admin`
+
+Windows 注意事项：
+- `MUSE2API_CHROMIUM` 留空时自动探测 Chrome / Edge 常见安装路径（含 `msedge.exe`）。
+- 浏览器 profile 默认在 `%USERPROFILE%\muse2api-profiles`，浏览器相关报错时可整个删除后重试。
+- 账号导入扩展同样适用于 Edge：在 `edge://extensions` 开发者模式加载 `extension/` 目录。
+
+---
+
 ## 🧩 账号导入（Chrome 扩展 / 油猴脚本）
 
 > **v1.6.6 用户请务必手动升级插件：Chrome/Edge 扩展最低 1.0.2，油猴脚本最低 1.1.2。**
