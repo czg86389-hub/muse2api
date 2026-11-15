@@ -54,7 +54,12 @@ def check(root, home, observe):
             expect(a['ok'] is expected_ok, f'{name}: account state changed incorrectly')
             expect(result['ok'] is (name == 'assigned'), f'{name}: wrong probe result')
             expect(get.call_args.kwargs.get('allow_redirects') is False, 'session must not follow redirects')
-            if name != 'assigned':
+            if name == 'unassigned':
+                expect(a['cookies'].get('hatch_sess') == 'renewed-fixture',
+                       f'{name}: rotated session cookie dropped')
+                expect(all(a[k] == before[k] for k in ('synced_at', 'last_keepalive')),
+                       f'{name}: unconfirmed session marked as synced')
+            elif name != 'assigned':
                 expect(all(a[k] == before[k] for k in protected), f'{name}: modified protected session data')
             else:
                 expect(a['cookies']['hatch_sess'] == 'renewed-fixture', 'renewed cookie not saved')
