@@ -209,11 +209,36 @@
   .tile{position:relative;background:var(--bg2);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;transition:.18s}
   .tile:hover{border-color:#37415a;transform:translateY(-2px)}
   .tile.selected{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
-  .tile .check-tag{position:absolute;top:8px;left:8px;z-index:3;display:flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:6px;background:rgba(15,23,42,.82);backdrop-filter:blur(4px);border:1px solid var(--line);cursor:pointer;transition:.15s}
-  .tile .check-tag:hover{border-color:var(--accent);background:rgba(15,23,42,.95)}
-  .tile .check-tag input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:var(--accent)}
+  /* 不要在这里用 backdrop-filter：每个卡片一个背景模糊层，几百个卡片滚动时会把渲染进程卡死 */
+  .tile .check-tag{position:absolute;top:8px;left:8px;z-index:3;display:flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:6px;background:rgba(15,23,42,.92);border:1px solid var(--line);cursor:pointer;transition:.15s}
+  .tile .check-tag:hover{border-color:var(--accent);background:rgba(15,23,42,.98)}
+  .tile .check-tag input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:var(--accent);color-scheme:dark}
   .tile .thumb{height:150px;background:#060911;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative}
-  .tile .thumb img,.tile .thumb video{width:100%;height:100%;object-fit:contain;display:block}
+  .tile .thumb[data-preview]{cursor:zoom-in}
+  .tile .thumb img{width:100%;height:100%;object-fit:contain;display:block}
+  /* 视频首帧：元素只挂靠近视口的卡片，滚动离开就拆掉，翻页再多也不会堆几百个播放器 */
+  .tile .thumb video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block;background:#060911}
+  .tile .thumb .playbadge{position:absolute;right:8px;bottom:8px;z-index:2;display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:50%;background:rgba(8,12,22,.84);border:1px solid var(--line);color:var(--accent);font-size:12px;line-height:1;padding-left:2px;pointer-events:none;transition:.15s}
+  .tile .thumb:hover .playbadge{border-color:var(--accent);background:rgba(8,12,22,.95)}
+  .tile .thumb .playbtn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;width:100%;height:100%;border:0;padding:0;background:linear-gradient(160deg,#0d1424,#060911);color:var(--text);font:inherit;cursor:pointer}
+  .tile .thumb .playbtn .picon{display:flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:50%;border:1px solid var(--line);background:rgba(79,140,255,.14);color:var(--accent);font-size:13px;line-height:1;padding-left:2px;transition:.15s}
+  .tile .thumb .playbtn .pkind{font-size:10px;letter-spacing:.09em;color:var(--muted)}
+  .tile .thumb .playbtn:hover .picon{border-color:var(--accent);background:rgba(79,140,255,.26)}
+  .pager{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:16px;font-size:12px;color:var(--muted)}
+  .pager-btns{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .pager-pages{display:flex;align-items:center;gap:6px}
+  .pager-btns button{min-width:30px;justify-content:center}
+  .pager-btns button[aria-current="page"]{border-color:var(--accent);color:var(--accent);background:rgba(79,140,255,.12)}
+  .pager-btns button:disabled{opacity:.38;cursor:default}
+  .pager-gap{padding:0 2px;color:var(--muted)}
+  .mview{position:fixed;inset:0;z-index:120;display:none;align-items:center;justify-content:center;padding:24px;background:rgba(3,6,12,.84)}
+  .mview.show{display:flex}
+  .mview-box{max-width:min(1100px,94vw);max-height:90vh;display:flex;flex-direction:column;gap:10px;padding:14px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius)}
+  .mview-head{display:flex;align-items:center;justify-content:space-between;gap:14px;font-size:12px;color:var(--muted)}
+  .mview-head .nm{font-family:ui-monospace,monospace;color:var(--text);word-break:break-all}
+  .mview-body{display:flex;align-items:center;justify-content:center;min-height:80px}
+  .mview-body img,.mview-body video{max-width:100%;max-height:74vh;display:block;border-radius:8px;background:#060911}
+  .mview-body audio{width:min(560px,84vw)}
   .tile .meta{padding:9px 11px;font-size:11.5px;color:var(--muted)}
   .tile .meta .nm{font-family:ui-monospace,monospace;color:var(--text);font-size:11px;word-break:break-all}
   .tile .meta .ac{display:flex;gap:6px;margin-top:7px;align-items:center}
@@ -668,10 +693,10 @@
       </div>
       <div class="tblwrap"><table>
         <thead><tr>
-          <th>任务 ID</th><th>类型</th><th>提示词</th><th>状态</th>
+          <th>任务 ID</th><th>类型</th><th>使用账号</th><th>提示词</th><th>状态</th>
           <th>耗时</th><th>创建时间</th><th>结果 / 错误</th><th></th>
         </tr></thead>
-        <tbody id="taskBody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+        <tbody id="taskBody"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
       </table></div>
     </div>
   </section>
@@ -691,6 +716,14 @@
         </div>
       </div>
       <div class="grid" id="mediaGrid"><div class="empty">加载中…</div></div>
+      <div class="pager" id="mediaPager">
+        <span class="pager-info" id="mediaRange"></span>
+        <div class="pager-btns">
+          <button class="ghost mini" id="mediaPrev" onclick="goMediaPage(_mediaPage - 1)" title="上一页">‹</button>
+          <span id="mediaPages" class="pager-pages"></span>
+          <button class="ghost mini" id="mediaNext" onclick="goMediaPage(_mediaPage + 1)" title="下一页">›</button>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -1311,6 +1344,16 @@ speech.write_to_file(<span class="s">"speech.mp3"</span>)</pre>
 
 <div id="toasts"></div>
 
+<div class="mview" id="mView">
+  <div class="mview-box" role="dialog" aria-modal="true" aria-label="media preview">
+    <div class="mview-head">
+      <span class="nm" id="mViewName"></span>
+      <a class="badge info" id="mViewOpen" href="#" target="_blank">打开</a>
+    </div>
+    <div class="mview-body" id="mViewBody"></div>
+  </div>
+</div>
+
 <dialog id="proxyDialog" class="proxy-dialog" aria-labelledby="proxyTitle" aria-describedby="proxyHelp">
   <form id="proxyForm">
     <h2 id="proxyTitle">账号代理</h2>
@@ -1543,6 +1586,7 @@ const I18N_EN = {
   "清空全部": "Clear all",
   "任务 ID": "Task ID",
   "类型": "Type",
+  "使用账号": "Account",
   "提示词": "Prompt",
   "耗时": "Duration",
   "创建时间": "Created",
@@ -1550,6 +1594,8 @@ const I18N_EN = {
   "全选": "Select all",
   "删除选中 (": "Delete selected (",
   "所有已生成并落盘的图片 / 视频 / 音频，可直接下载或把链接给下游项目使用。": "All generated images, videos and audio saved to disk. Download them directly or pass the links to downstream projects.",
+  "上一页": "Previous page",
+  "下一页": "Next page",
   "在线生图测试": "Image generation test",
   "真实调用 muse.ai 生成，图片约 10–30 秒返回。": "Calls muse.ai for real; images return in about 10–30 seconds.",
   "比例": "Aspect ratio",
@@ -1971,9 +2017,9 @@ const I18N_EN = {
   "目标时长（秒），常用 5、6、8、10；默认 6。": "Target duration in seconds; 5, 6, 8 and 10 are common; default 6.",
   "16:9 横屏或 9:16 竖屏。": "16:9 landscape or 9:16 portrait.",
   "画质描述，例如 720p。": "Quality description, for example 720p.",
-  "单张参考图，作为视频首帧。": "Single reference image used as the first frame.",
-  "旧版单图字段，作为首帧。": "Legacy single-image field used as the first frame.",
-  "多张参考图；第一张作为主要起始画面。": "Multiple reference images; the first one is the main starting frame.",
+  "单张参考图，作为视频首帧。": "Single reference image; follow the prompt for its role.",
+  "旧版单图字段，作为首帧。": "Legacy single-image field; follow the prompt for its role.",
+  "多张参考图；第一张作为主要起始画面。": "Multiple ordered reference images; roles follow the prompt.",
   "等待上限（秒），默认 600。": "Wait limit in seconds; default 600.",
   "默认 muse-voice。": "Defaults to muse-voice.",
   "要朗读的文本；只逐字朗读这段内容。": "Text to read; only this content is read verbatim.",
@@ -2808,12 +2854,20 @@ async function delAcc(id, label){
 }
 
 /* ================= 任务记录 ================= */
+// 任务只存账号 id：账号改了标签或已删掉时仍能看出是哪一个。
+function taskAccountCell(t){
+  if (!t.account) return '<span style="color:var(--muted)">—</span>';
+  const acc = accounts.find(a => a.id === t.account);
+  const name = (acc && acc.label) || t.account;
+  return `<span class="ellip" style="max-width:150px" title="${esc(t.account)}">${esc(name)}</span>`;
+}
+
 async function loadTasks(){
   try{
     const d = await api('/admin/tasks?limit=60');
     const ts = d.tasks || [];
     $('taskCount').textContent = ts.length;
-    if (!ts.length){ $('taskBody').innerHTML = '<tr><td colspan="8" class="empty">暂无任务记录</td></tr>'; return; }
+    if (!ts.length){ $('taskBody').innerHTML = '<tr><td colspan="9" class="empty">暂无任务记录</td></tr>'; return; }
     $('taskBody').innerHTML = ts.map(t => {
       const cls = (t.status === 'succeeded' || t.status === 'completed') ? 'ok' : t.status === 'failed' ? 'bad'
                 : t.status === 'processing' ? 'info' : 'warn';
@@ -2825,6 +2879,7 @@ async function loadTasks(){
       return `<tr>
         <td class="mono">${esc(t.id)}</td>
         <td><span class="badge info">${kindLabel}</span></td>
+        <td>${taskAccountCell(t)}</td>
         <td><span class="ellip" title="${esc(t.prompt)}">${esc(t.prompt)}</span></td>
         <td><span class="badge ${cls}">${esc(t.status)}</span></td>
         <td class="mono">${t.elapsed ? t.elapsed + 's' : '—'}</td>
@@ -2834,7 +2889,7 @@ async function loadTasks(){
       </tr>`;
     }).join('');
   }catch(e){
-    $('taskBody').innerHTML = `<tr><td colspan="8" class="empty">加载失败：${esc(e.message)}</td></tr>`;
+    $('taskBody').innerHTML = `<tr><td colspan="9" class="empty">加载失败：${esc(e.message)}</td></tr>`;
   }
 }
 async function delTask(id){
@@ -2850,8 +2905,12 @@ async function clearTasks(){
 }
 
 /* ================= 媒体库 ================= */
+// 真分页：每页只渲染一小批卡片，页码/上一页/下一页切换，不再随滚动自动追加。
+const MEDIA_PAGE = 48;
 let _allMedia = [];
 let _selectedMedia = new Set();
+let _mediaPage = 1;
+const _tileEls = new Map();              // name -> 卡片元素（只含当前页）
 
 function updateMediaSelectionUI(){
   const count = _selectedMedia.size;
@@ -2867,35 +2926,304 @@ function updateMediaSelectionUI(){
   if (btnSelAll) {
     btnSelAll.textContent = (total > 0 && count === total) ? '取消全选' : '全选';
   }
+}
 
-  document.querySelectorAll('.tile[data-name]').forEach(el => {
-    const name = el.getAttribute('data-name');
-    const chk = el.querySelector('.tile-check');
-    const isSel = _selectedMedia.has(name);
-    if (chk) chk.checked = isSel;
-    if (isSel) el.classList.add('selected');
-    else el.classList.remove('selected');
-  });
+function paintTileSelection(name, isSel){
+  const el = _tileEls.get(name);
+  if (!el) return;
+  el.classList.toggle('selected', isSel);
+  const chk = el.querySelector('.tile-check');
+  if (chk) chk.checked = isSel;
 }
 
 function toggleMediaSelect(name){
-  if (_selectedMedia.has(name)) {
-    _selectedMedia.delete(name);
-  } else {
-    _selectedMedia.add(name);
-  }
+  const isSel = !_selectedMedia.has(name);
+  if (isSel) _selectedMedia.add(name);
+  else _selectedMedia.delete(name);
+  paintTileSelection(name, isSel);
   updateMediaSelectionUI();
 }
 
 function toggleSelectAllMedia(){
   if (!_allMedia.length) return;
-  if (_selectedMedia.size === _allMedia.length) {
-    _selectedMedia.clear();
-  } else {
-    _selectedMedia = new Set(_allMedia.map(m => m.name));
-  }
+  const selectAll = _selectedMedia.size !== _allMedia.length;
+  if (selectAll) _selectedMedia = new Set(_allMedia.map(m => m.name));
+  else _selectedMedia.clear();
+  _tileEls.forEach((el, name) => {
+    el.classList.toggle('selected', selectAll);
+    const chk = el.querySelector('.tile-check');
+    if (chk) chk.checked = selectAll;
+  });
   updateMediaSelectionUI();
 }
+
+function mediaTileHTML(m){
+  const isSel = _selectedMedia.has(m.name);
+  let thumb;
+  let videoAttr = '';
+  if (m.kind === 'video') {
+    // 首帧由 IntersectionObserver 懒加载，这里只放占位和播放角标
+    videoAttr = ` data-video="${esc(m.url)}"`;
+    thumb = '<span class="playbadge">▶</span>';
+  } else if (m.kind === 'audio') {
+    thumb = `<button type="button" class="playbtn" data-preview="1" title="${esc(m.name)}">
+         <span class="picon">▶</span><span class="pkind">AUDIO</span>
+       </button>`;
+  } else {
+    thumb = `<img src="${esc(m.url)}" loading="lazy" decoding="async" alt="">`;
+  }
+  return `
+      <div class="tile ${isSel ? 'selected' : ''}" data-name="${esc(m.name)}">
+        <label class="check-tag" title="勾选以批量操作">
+          <input type="checkbox" class="tile-check" ${isSel ? 'checked' : ''}>
+        </label>
+        <div class="thumb" data-preview="1" role="button" tabindex="0"${videoAttr}>${thumb}</div>
+        <div class="meta">
+          <div class="nm" title="${esc(m.name)}">${esc(m.name)}</div>
+          <div style="margin-top:3px">${fmtBytes(m.bytes)} · ${fmtTime(m.mtime)}</div>
+          <div class="ac">
+            <a class="badge info" href="${esc(m.url)}" target="_blank">打开</a>
+            <a class="badge mute" href="${esc(m.url)}" download>下载</a>
+            <a class="badge bad" href="javascript:void(0)" data-del="1">删除</a>
+          </div>
+        </div>
+      </div>`;
+}
+
+/* 视频首帧按需挂载：靠近视口才创建 <video>，滚远后超出上限就释放，翻页再多也不会堆几百个播放器 */
+const MAX_THUMB_VIDEOS = 32;
+const _mountedThumbs = new Set();
+let _thumbObserver = null;
+
+function thumbObserver(){
+  if (_thumbObserver || typeof IntersectionObserver !== 'function') return _thumbObserver;
+  _thumbObserver = new IntersectionObserver(entries => {
+    for (const e of entries) {
+      if (e.isIntersecting) {
+        e.target.dataset.vis = '1';
+        mountThumbVideo(e.target);
+      } else {
+        delete e.target.dataset.vis;
+      }
+    }
+    trimThumbs();
+  }, { rootMargin: '300px 0px' });
+  return _thumbObserver;
+}
+
+// 超出上限时从最早挂载的开始释放，视口内的卡片保留首帧
+function trimThumbs(){
+  for (const box of _mountedThumbs) {
+    if (_mountedThumbs.size <= MAX_THUMB_VIDEOS) return;
+    if (box.dataset.vis === '1') continue;
+    unmountThumbVideo(box);
+  }
+}
+
+function mountThumbVideo(box){
+  if (box.dataset.mounted === '1' || box.dataset.videoBroken === '1') return;
+  const url = box.getAttribute('data-video');
+  if (!url) return;
+  box.dataset.mounted = '1';
+  const v = document.createElement('video');
+  v.muted = true;
+  v.playsInline = true;
+  v.preload = 'metadata';
+  v.addEventListener('error', () => {
+    v.remove();
+    box.dataset.mounted = '';
+    box.dataset.videoBroken = '1';       // 文件坏了就不再反复重试
+    _mountedThumbs.delete(box);
+  });
+  v.src = url;
+  box.prepend(v);
+  _mountedThumbs.add(box);
+}
+
+function unmountThumbVideo(box){
+  if (box.dataset.mounted !== '1') return;
+  const v = box.querySelector('video');
+  if (v) v.remove();
+  box.dataset.mounted = '';
+  _mountedThumbs.delete(box);
+}
+
+function observeMediaThumbs(root){
+  const obs = thumbObserver();
+  if (!obs) return;
+  root.querySelectorAll('.thumb[data-video]').forEach(el => obs.observe(el));
+}
+
+// 切换页码后先同步挂载视口内的首帧，IntersectionObserver 之后再接管滚动
+function mountVisibleThumbs(root){
+  const tab = $('tab-media');
+  if (!tab || !tab.classList.contains('active')) return;   // 隐藏时所有 rect 都是 0，交给 observer
+  const vh = window.innerHeight;
+  root.querySelectorAll('.thumb[data-video]').forEach(box => {
+    const r = box.getBoundingClientRect();
+    if (r.bottom > -300 && r.top < vh + 300) {
+      box.dataset.vis = '1';
+      mountThumbVideo(box);
+    }
+  });
+  trimThumbs();
+}
+
+function mediaPageCount(){
+  return Math.max(1, Math.ceil(_allMedia.length / MEDIA_PAGE));
+}
+
+// 当前页卡片整体重绘；翻页会先释放上一页的视频首帧
+function renderMediaPage(){
+  const grid = $('mediaGrid');
+  if (!grid) return;
+  const pages = mediaPageCount();
+  if (_mediaPage > pages) _mediaPage = pages;
+  if (_mediaPage < 1) _mediaPage = 1;
+
+  if (_thumbObserver) _thumbObserver.disconnect();
+  _mountedThumbs.clear();
+  _tileEls.clear();
+  grid.innerHTML = '';
+
+  const start = (_mediaPage - 1) * MEDIA_PAGE;
+  const batch = _allMedia.slice(start, start + MEDIA_PAGE);
+  if (!batch.length) {
+    grid.innerHTML = '<div class="empty">还没有生成任何媒体文件</div>';
+  } else {
+    const holder = document.createElement('div');
+    holder.innerHTML = batch.map(mediaTileHTML).join('');
+    const frag = document.createDocumentFragment();
+    for (const el of Array.from(holder.children)) {
+      _tileEls.set(el.getAttribute('data-name'), el);
+      frag.appendChild(el);
+    }
+    grid.appendChild(frag);
+    mountVisibleThumbs(grid);
+    observeMediaThumbs(grid);
+  }
+  renderMediaPager();
+}
+
+// 页码按钮：首尾固定，中间跟随当前页，距离远时用 … 折叠
+function mediaPageNumbers(current, pages){
+  if (pages <= 7) return Array.from({length: pages}, (_, i) => i + 1);
+  const out = [1];
+  const from = Math.max(2, Math.min(current - 1, pages - 4));
+  const to = Math.min(pages - 1, Math.max(current + 1, 5));
+  if (from > 2) out.push('…');
+  for (let p = from; p <= to; p++) out.push(p);
+  if (to < pages - 1) out.push('…');
+  out.push(pages);
+  return out;
+}
+
+function renderMediaPager(){
+  const pager = $('mediaPager');
+  if (!pager) return;
+  const total = _allMedia.length;
+  if (!total) { pager.style.display = 'none'; return; }
+  pager.style.display = 'flex';
+
+  const pages = mediaPageCount();
+  const start = (_mediaPage - 1) * MEDIA_PAGE + 1;
+  const end = Math.min(total, _mediaPage * MEDIA_PAGE);
+  $('mediaRange').textContent = `${start}–${end} / ${total}`;
+
+  const prev = $('mediaPrev'), next = $('mediaNext');
+  prev.disabled = _mediaPage <= 1;
+  next.disabled = _mediaPage >= pages;
+
+  const box = $('mediaPages');
+  box.innerHTML = '';
+  for (const p of mediaPageNumbers(_mediaPage, pages)) {
+    if (p === '…') {
+      const gap = document.createElement('span');
+      gap.className = 'pager-gap';
+      gap.textContent = '…';
+      box.appendChild(gap);
+      continue;
+    }
+    const btn = document.createElement('button');
+    btn.className = 'ghost mini';
+    btn.type = 'button';
+    btn.textContent = String(p);
+    if (p === _mediaPage) btn.setAttribute('aria-current', 'page');
+    btn.addEventListener('click', () => goMediaPage(p));
+    box.appendChild(btn);
+  }
+}
+
+function goMediaPage(page){
+  const pages = mediaPageCount();
+  const target = Math.min(Math.max(1, page), pages);
+  if (target === _mediaPage) return;
+  _mediaPage = target;
+  renderMediaPage();
+  const grid = $('mediaGrid');
+  if (grid) {
+    // 翻页后回到列表顶部，减掉吸顶栏高度
+    const top = grid.getBoundingClientRect().top + window.scrollY - 68;
+    window.scrollTo(0, Math.max(0, top));
+  }
+}
+
+/* 媒体预览弹层：整页只维持一个播放器 */
+function openMediaPreview(name){
+  const m = _allMedia.find(x => x.name === name);
+  if (!m) return;
+  closeMediaPreview();
+  const body = $('mViewBody');
+  let el;
+  if (m.kind === 'video' || m.kind === 'audio') {
+    el = document.createElement(m.kind);
+    el.controls = true;
+    el.autoplay = true;
+    if (m.kind === 'video') el.playsInline = true;
+  } else {
+    el = document.createElement('img');
+    el.alt = m.name;
+  }
+  el.src = m.url;                    // src 放在插入 DOM 之前，避免先发一次空请求
+  body.appendChild(el);
+  if (el.play) el.play().catch(() => {});   // 自动播放被拦截时保留手动播放按钮
+  $('mViewName').textContent = `${m.name} · ${fmtBytes(m.bytes)}`;
+  $('mViewOpen').href = m.url;
+  $('mView').classList.add('show');
+}
+
+function closeMediaPreview(){
+  const view = $('mView');
+  if (!view || !view.classList.contains('show')) return;
+  const body = $('mViewBody');
+  if (body) {
+    body.querySelectorAll('video, audio').forEach(p => { try { p.pause(); } catch (_) {} });
+    body.innerHTML = '';
+  }
+  view.classList.remove('show');
+}
+$('mView').addEventListener('click', e => { if (e.target.id === 'mView') closeMediaPreview(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMediaPreview(); });
+$('mediaGrid').addEventListener('click', e => {
+  const tile = e.target.closest('.tile[data-name]');
+  if (!tile) return;
+  const name = tile.getAttribute('data-name');
+  if (e.target.closest('.check-tag')) {          // label 的默认行为会再触发一次，这里统一处理
+    e.preventDefault();
+    toggleMediaSelect(name);
+    return;
+  }
+  if (e.target.closest('[data-del]')) { delSingleMedia(name); return; }
+  if (e.target.closest('[data-preview]')) openMediaPreview(name);
+});
+$('mediaGrid').addEventListener('keydown', e => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const thumb = e.target.closest('.thumb[data-preview]');
+  const tile = thumb && thumb.closest('.tile[data-name]');
+  if (!tile) return;
+  e.preventDefault();
+  openMediaPreview(tile.getAttribute('data-name'));
+});
 
 async function delSingleMedia(name){
   if (!confirm(`确定要删除媒体文件「${name}」？此操作无法撤销。`)) return;
@@ -2942,6 +3270,7 @@ async function delSelectedMedia(){
 }
 
 async function loadMedia(){
+  closeMediaPreview();
   try{
     const d = await api('/admin/media');
     const ms = d.media || [];
@@ -2952,36 +3281,17 @@ async function loadMedia(){
     }
     $('mediaCount').textContent = ms.length;
     $('sMedia').textContent = ms.length;
-    if (!ms.length){
-      $('mediaGrid').innerHTML = '<div class="empty">还没有生成任何媒体文件</div>';
-      updateMediaSelectionUI();
-      return;
-    }
-    $('mediaGrid').innerHTML = ms.map(m => {
-      const isSel = _selectedMedia.has(m.name);
-      return `
-      <div class="tile ${isSel ? 'selected' : ''}" data-name="${esc(m.name)}">
-        <label class="check-tag" title="勾选以批量操作" onclick="event.stopPropagation()">
-          <input type="checkbox" class="tile-check" ${isSel ? 'checked' : ''} onchange="toggleMediaSelect('${esc(m.name)}')">
-        </label>
-        <div class="thumb">${m.kind === 'video'
-          ? `<video src="${esc(m.url)}" muted playsinline preload="metadata"></video>`
-          : m.kind === 'audio'
-            ? `<div style="display:flex;align-items:center;justify-content:center;padding:10px 6px;width:100%;box-sizing:border-box"><audio src="${esc(m.url)}" controls preload="metadata" style="width:100%;min-width:0"></audio></div>`
-            : `<img src="${esc(m.url)}" loading="lazy" alt="">`}</div>
-        <div class="meta">
-          <div class="nm" title="${esc(m.name)}">${esc(m.name)}</div>
-          <div style="margin-top:3px">${fmtBytes(m.bytes)} · ${fmtTime(m.mtime)}</div>
-          <div class="ac">
-            <a class="badge info" href="${esc(m.url)}" target="_blank">打开</a>
-            <a class="badge mute" href="${esc(m.url)}" download>下载</a>
-            <a class="badge bad" href="javascript:void(0)" onclick="delSingleMedia('${esc(m.name)}')">删除</a>
-          </div>
-        </div>
-      </div>`;
-    }).join('');
+    _mediaPage = Math.min(_mediaPage || 1, mediaPageCount());
+    renderMediaPage();
     updateMediaSelectionUI();
-  }catch(e){ $('mediaGrid').innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
+  }catch(e){
+    _allMedia = [];
+    _tileEls.clear();
+    if (_thumbObserver) _thumbObserver.disconnect();
+    _mountedThumbs.clear();
+    $('mediaGrid').innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`;
+    $('mediaPager').style.display = 'none';
+  }
 }
 
 /* ================= 在线测试 ================= */

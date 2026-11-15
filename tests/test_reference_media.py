@@ -93,10 +93,15 @@ with tempfile.TemporaryDirectory() as home:
     prompt = app.build_video_prompt(req, kinds)
     assert "1 image, 1 video, 1 audio clip" in prompt and "first image" not in prompt
     assert "Attachment legend: [图1] is attachment 1 (image), [视频1] is attachment 2 (video), [音频1] is attachment 3 (audio)" in prompt
+    # 多张参考图：不再注入参考说明和图例，只留规格与用户文本段落
     tokens = app.build_video_prompt(app.VideoRequest(prompt="[图2] 走进 [图1]", images=["a", "b"]), ["image", "image"])
-    assert "[图2] is attachment 2 (image)" in tokens and "when unspecified use the first image" in tokens
+    assert "Attachment legend" not in tokens
+    assert "reference images attached to this request" not in tokens
+    assert "[图2] 走进 [图1]" in tokens
     plain = app.build_video_prompt(app.VideoRequest(prompt="x", images=["a", "b"]), ["image", "image"])
-    assert "Attachment legend" not in plain and "the first image is the main starting frame" in plain
+    assert "Attachment legend" not in plain
+    assert "reference images attached to this request" not in plain
+    assert "image-to-video clip" in plain and "<user>" not in plain and plain.rstrip().endswith("x")
     two_videos = app.build_video_prompt(app.VideoRequest(prompt="x", videos=["a", "b"]), ["video", "video"])
     assert "[视频2] is attachment 2 (video)" in two_videos
     assert "image-to-video" not in app.build_video_prompt(app.VideoRequest(prompt="x", videos=["v"], size="16:9"), ["video"])
@@ -108,8 +113,12 @@ with tempfile.TemporaryDirectory() as home:
     assert "[视频1] is attachment 1 (video)" in image_prompt
     image_tokens = app.build_image_prompt(app.ImageRequest(prompt="[图1] 穿上 [图2] 的衣服", images=["a", "b"]), ["image", "image"])
     assert "Attachment legend: [图1] is attachment 1 (image), [图2] is attachment 2 (image)" in image_tokens
+    image_plain = app.build_image_prompt(app.ImageRequest(prompt="x", images=["a", "b"]), ["image", "image"])
+    assert "2 reference images" in image_plain
+    assert "Attachment legend: [图1] is attachment 1 (image), [图2] is attachment 2 (image)" in image_plain
     legacy = app.build_video_prompt(app.VideoRequest(prompt="x", image="i"))
-    assert "first-frame reference" in legacy
+    assert "first-frame reference" not in legacy
+    assert "treat it as the starting frame only when the request text explicitly says so" in legacy
     print("PASS: ordered media fields, count limit and media-aware prompts")
 
     class FakeForm(dict):
