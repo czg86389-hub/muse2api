@@ -38,6 +38,13 @@ const I18N_EN = {
   '请先填服务地址': 'Please enter the service URL first',
   '请先填 API Key': 'Please enter the API Key first',
   '正在读取 muse.ai 的 Cookie…': 'Reading muse.ai cookies…',
+  '无法确认当前窗口的 Cookie 存储区。请在已登录 Muse 的窗口中打开扩展，并确认已允许扩展在无痕/InPrivate 模式运行。':
+    'Cannot identify the current window\'s cookie store. Open the extension in the window signed in to Muse, and allow it in Incognito/InPrivate mode if needed.',
+  '正在读取当前{window}窗口的 muse.ai Cookie…': 'Reading muse.ai cookies from the current {window} window…',
+  '无痕/InPrivate': 'Incognito/InPrivate',
+  '普通': 'regular',
+  '\nCookie 来源：当前{window}窗口。导入仅保存登录态，请到管理页测试账号。':
+    '\nCookie source: current {window} window. Import only saves the session; test the account on the admin page.',
   '没读到 muse.ai 的 Cookie。\n请先在这个浏览器里打开并登录 https://muse.ai/ ，再回来点一次。':
     'No muse.ai cookies found.\nOpen and log in to https://muse.ai/ in this browser first, then click again.',
   '读到 {n} 条 Cookie，但缺核心项：{missing}\n未读到登录会话，请检查当前浏览器的登录状态和扩展权限。':
@@ -149,15 +156,26 @@ async function saveCfg() {
 }
 
 async function grabCookies() {
-  const all = await chrome.cookies.getAll({ domain: 'muse.ai' });
-  const out = {}, exp = {};
+  // A spanning extension shares its regular context with incognito windows.
+  // Select the active tab's store explicitly; never guess or fall back.
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const stores = await chrome.cookies.getAllCookieStores();
+  const store = tab && stores.find((s) => s.tabIds.includes(tab.id));
+  if (!store) {
+    throw new Error(t('无法确认当前窗口的 Cookie 存储区。请在已登录 Muse 的窗口中打开扩展，并确认已允许扩展在无痕/InPrivate 模式运行。'));
+  }
+  const windowKind = t(tab.incognito ? '无痕/InPrivate' : '普通');
+  log(t('正在读取当前{window}窗口的 muse.ai Cookie…', { window: windowKind }));
+  // URL filtering excludes unrelated subdomains and paths. Chrome orders
+  // matches by longest path, then earliest creation time (as cookies.get does).
+  const all = await chrome.cookies.getAll({ url: 'https://muse.ai/api/session', storeId: store.id });
+  const out = Object.create(null), exp = Object.create(null);
   for (const c of all) {
-    const dom = (c.domain || '').replace(/^\./, '');
-    if (!dom.endsWith('muse.ai')) continue;
+    if (Object.prototype.hasOwnProperty.call(out, c.name)) continue;
     out[c.name] = c.value;
     if (c.expirationDate) exp[c.name] = Math.floor(c.expirationDate);
   }
-  return { cookies: out, expires: exp };
+  return { cookies: out, expires: exp, windowKind };
 }
 
 async function run() {
@@ -172,13 +190,13 @@ async function run() {
   log(t('正在读取 muse.ai 的 Cookie…'));
 
   try {
-    const { cookies, expires } = await grabCookies();
+    const { cookies, expires, windowKind } = await grabCookies();
     const names = Object.keys(cookies);
     if (!names.length) {
       return log(t('没读到 muse.ai 的 Cookie。\n请先在这个浏览器里打开并登录 '
                  + 'https://muse.ai/ ，再回来点一次。'), 'bad');
     }
-    const missing = ESSENTIAL.filter((n) => !(n in cookies));
+    const missing = ESSENTIAL.filter((n) => !cookies[n]);
     if (missing.length) {
       log(t('读到 {n} 条 Cookie，但缺核心项：{missing}\n'
           + '未读到登录会话，请检查当前浏览器的登录状态和扩展权限。',
@@ -218,6 +236,7 @@ async function run() {
           count: a.cookie_count || names.length,
           expires: a.expires_at ? new Date(a.expires_at * 1000).toLocaleString() : t('未知'),
         })
+        + t('\nCookie 来源：当前{window}窗口。导入仅保存登录态，请到管理页测试账号。', { window: windowKind })
         + (data.warning ? t('\n注意：{warning}', { warning: t(data.warning) }) : ''), 'ok');
   } catch (e) {
     log(t('出错了：{msg}\n\n常见原因：\n'

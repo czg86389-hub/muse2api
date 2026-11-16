@@ -1,19 +1,19 @@
 {
   "version": "1.6.10",
-  "updated_at": "2026-11-11",
+  "updated_at": "2026-11-13",
   "repo": "https://github.com/czg86389-hub/muse2api",
   "highlights": [
     "修复发送按钮误匹配侧栏历史、Send feedback 或 Resend 的问题，避免参考图和长提示词留在输入框未提交。",
     "首次发送、重试和发送状态检查统一定位当前输入区域，识别中英文标签、disabled、aria-disabled 和 inert 状态。",
     "继续校验实际发送及媒体成品；点击发送不等于任务完成，不把上传的参考素材当生成结果。",
     "核验仓库、管理面板及中英文界面的社区推广内容清理状态；感谢 @WXJJ0520 的 PR #48。",
-    "更新服务后请强制刷新管理页。插件仍为 1.0.2、油猴脚本仍为 1.1.2；当前版本无需重装，旧扩展仍需在各浏览器个人资料中手动升级。"
+    "扩展升级至 1.0.3：按当前普通或无痕窗口选择 Cookie 存储区，避免错导其它账号；请从本实例管理页下载并在每个浏览器个人资料中手动重新加载。油猴脚本仍为 1.1.2。"
   ],
   "highlights_en": [
     "Fix send-button matching against sidebar history, Send feedback and Resend, which could leave prompts and reference attachments unsubmitted.",
     "Initial sends, retries and readiness checks share one composer-scoped locator with localized labels and disabled, aria-disabled and inert handling.",
     "Keep actual submission and generated-media verification; clicking Send is not task completion, and uploaded references are not generated results.",
     "Verify repository and bilingual dashboard community-promotion cleanup. Thanks to @WXJJ0520 for PR #48.",
-    "Hard-refresh after updating. Extension remains 1.0.2 and userscript 1.1.2; current versions need no reinstall. Older extensions require a manual update in every browser profile."
+    "Extension 1.0.3 selects the current regular or Incognito window cookie store to prevent importing another account. Download from this instance and manually reload it in every browser profile. Userscript remains 1.1.2."
   ]
 }
