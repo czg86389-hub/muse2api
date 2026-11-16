@@ -60,3 +60,6 @@ Thumbs.db
 *.zip
 *.tar.gz
 *.tar
+
+# Independent generation queue settings
+data/generation-queue.json

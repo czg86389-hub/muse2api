@@ -329,6 +329,15 @@
       <div class="stat"><div class="k">媒体文件</div><div class="v" id="sMedia">0</div></div>
     </div>
 
+    <div class="card" id="generationQueuePanel">
+      <h3>排队与生成时限</h3>
+      <div class="hint">排队不占用生成时限。任务获得并发槽位和账号后开始计算生成时间；重试时等待账号也不计入。</div>
+      <form id="generationQueueForm" onsubmit="event.preventDefault();saveGenerationQueue()">
+        <div class="row"><div style="max-width:340px"><label for="generationQueueTimeout">独立排队时限（秒，0 为不限）</label><input id="generationQueueTimeout" type="number" min="0" max="86400" required value="3600"></div></div>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:12px"><button id="generationQueueSave" type="submit">保存排队设置</button><span class="hint" id="generationQueueSummary"></span></div>
+      </form>
+    </div>
+
     <div class="card">
       <h3>添加账号 <span class="tag">支持批量</span></h3>
       <div class="hint" data-i18n="add-account-hint">
@@ -799,6 +808,12 @@ function setLang(v){
 }
 /* 整句：中文 → 英文 */
 const I18N_EN = {
+  "排队与生成时限": "Queue and generation timeouts",
+  "排队不占用生成时限。任务获得并发槽位和账号后开始计算生成时间；重试时等待账号也不计入。": "Queue time does not consume the generation budget. Execution starts after acquiring a slot and account; retry account waits are excluded too.",
+  "独立排队时限（秒，0 为不限）": "Separate queue timeout (seconds; 0 = unlimited)",
+  "保存排队设置": "Save queue settings",
+  "排队设置已保存": "Queue settings saved",
+
   "代理配置已保存，账号浏览器状态待测试": "Proxy saved; account browser status still needs testing",
   "代理地址或完整链接": "Proxy address or full URL",
   "可直接粘贴包含用户名和密码的 HTTP、SOCKS5 或 SOCKS5h 链接，立即测试，无需先保存。": "Paste an HTTP, SOCKS5 or SOCKS5h URL including credentials and test it immediately, without saving.",
@@ -1973,11 +1988,11 @@ async function loadTasks(){
       if (t.result && t.result.url) out = `<a href="${esc(t.result.url)}" target="_blank">查看结果</a> <span class="mono">${fmtBytes(t.result.bytes)}</span>`;
       else if (t.error) out = `<span style="color:var(--bad)">${esc(t.error).slice(0,120)}</span>`;
       return `<tr>
-        <td class="mono">${esc(t.id)}</td>
+        <td class="mono">${esc(t.id)}${t.account ? `<br><small>${esc(t.account)} · #${t.attempt || 1}</small>` : ''}</td>
         <td>${t.kind === 'video' ? '<span class="badge info">视频</span>' : '<span class="badge info">图片</span>'}</td>
         <td><span class="ellip" title="${esc(t.prompt)}">${esc(t.prompt)}</span></td>
         <td><span class="badge ${cls}">${esc(t.status)}</span></td>
-        <td class="mono">${t.elapsed ? t.elapsed + 's' : '—'}</td>
+        <td class="mono">${taskDuration(t)}</td>
         <td class="mono">${fmtTime(t.created_at)}</td>
         <td>${out}</td>
         <td><button class="danger mini" onclick="delTask('${t.id}')">删</button></td>
@@ -2328,10 +2343,34 @@ async function upgradeNow(){
   }
 }
 
+let generationQueueLoaded = false;
+function renderGenerationQueue(settings, config) {
+  if (!settings) return;
+  if (!generationQueueLoaded) { $('generationQueueTimeout').value = settings.queue_timeout; generationQueueLoaded = true; }
+  $('generationQueueSummary').textContent = LANG === 'en'
+    ? `Execution budget: video ${config.video_timeout}s · image ${config.image_timeout}s`
+    : `实际生成时限：视频 ${config.video_timeout} 秒 · 图片 ${config.image_timeout} 秒`;
+}
+async function saveGenerationQueue() {
+  if (!$('generationQueueForm').reportValidity()) return;
+  const button=$('generationQueueSave');button.disabled=true;
+  try { await api('/admin/generation-queue',{method:'PUT',body:JSON.stringify({queue_timeout:Number($('generationQueueTimeout').value)})}); generationQueueLoaded=false;await loadStatus();toast('排队设置已保存','ok'); }
+  catch(e){toast(e.message,'bad');}finally{button.disabled=false;}
+}
+function taskDuration(task) {
+  if (task.total_elapsed == null && task.queue_elapsed == null) return task.elapsed ? `${task.elapsed}s` : '—';
+  const total = task.total_elapsed ?? Math.max(0, Date.now()/1000 - task.created_at);
+  const queue = task.status === 'queued' ? total : task.queue_elapsed || 0;
+  const generation = task.elapsed ?? (task.status === 'processing' ? Math.max(0, total - queue) : 0);
+  return `${LANG === 'en' ? 'Queue' : '排队'} ${queue.toFixed(1)}s<br>${LANG === 'en' ? 'Generate' : '生成'} ${generation.toFixed(1)}s<br>${LANG === 'en' ? 'Total' : '总计'} ${total.toFixed(1)}s`;
+}
+
+
 /* ================= 总览刷新 ================= */
 async function loadStatus(){
   try{
     const d = await api('/admin/status');
+    renderGenerationQueue(d.generation_queue, d.config);
     $('pSvc').className = 'pill on';
     $('pSvc').innerHTML = '<span class="led"></span>服务 <b>正常</b>';
     $('pBr').className = 'pill ' + (d.browser_running ? 'on' : 'off');

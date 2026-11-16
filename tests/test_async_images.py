@@ -84,6 +84,7 @@ async def check(source, home):
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    module.store.add_account({"hatch_sess": "scheduler-fixture"}, "scheduler-fixture")
     calls = []
     release = threading.Event()
     media = Path(module.CFG.media_dir) / "fixture.png"
@@ -104,7 +105,8 @@ async def check(source, home):
     if locked_impl:
         def assert_owned(*args, **kwargs):
             assert module.GEN_LOCK.locked(), "browser lock must cover retry/cleanup"
-            assert kwargs.get("deadline") is not None
+            assert kwargs.get("deadline") is None, "generation budget starts after account admission"
+            assert kwargs.get("queue_timeout") == module.QUEUE_POLICY.settings()["queue_timeout"]
             return {"fixture": True}, None
         module._run_generation_locked = assert_owned
         module._run_generation("lock fixture", "image", 1)
@@ -113,7 +115,7 @@ async def check(source, home):
         real_lock = module.GEN_LOCK
         class BusyLock:
             def acquire(self, timeout):
-                assert timeout == 1
+                assert timeout == module.QUEUE_POLICY.settings()["queue_timeout"]
                 return False
         module.GEN_LOCK = BusyLock()
         try:
