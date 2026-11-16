@@ -2001,11 +2001,13 @@ async function loadTasks(){
     $('taskBody').innerHTML = ts.map(t => {
       const cls = (t.status === 'succeeded' || t.status === 'completed') ? 'ok' : t.status === 'failed' ? 'bad'
                 : t.status === 'processing' ? 'info' : 'warn';
+      const accountLabel = accounts.find(a => a.id === t.account)?.label;
+      const accountText = accountLabel ? accountLabel + ' (' + t.account + ')' : t.account;
       let out = '—';
       if (t.result && t.result.url) out = `<a href="${esc(t.result.url)}" target="_blank">查看结果</a> <span class="mono">${fmtBytes(t.result.bytes)}</span>`;
       else if (t.error) out = `<span style="color:var(--bad)">${esc(t.error).slice(0,120)}</span>`;
       return `<tr>
-        <td class="mono">${esc(t.id)}${t.account ? `<br><small>${esc(t.account)} · #${t.attempt || 1}</small>` : ''}</td>
+        <td class="mono">${esc(t.id)}${t.account ? `<br><small>${esc(accountText)} · #${t.attempt || 1}</small>` : ''}</td>
         <td>${t.kind === 'video' ? '<span class="badge info">视频</span>' : '<span class="badge info">图片</span>'}</td>
         <td><span class="ellip" title="${esc(t.prompt)}">${esc(t.prompt)}</span></td>
         <td><span class="badge ${cls}">${esc(t.status)}</span></td>
@@ -2325,15 +2327,22 @@ async function loadRepoStatus(force){
     const lVer = 'v' + (s.local_version || '1.5.0');
     const rVer = 'v' + (s.remote_version || s.local_version || '1.5.0');
 
-    const state = s.has_update ? '有更新' : s.up_to_date === true ? '已是最新' : '版本状态待确认';
+    const state = LANG === 'en'
+      ? (s.has_update ? 'Update available' : s.up_to_date === true ? 'Up to date' : 'Version status unconfirmed')
+      : (s.has_update ? '有更新' : s.up_to_date === true ? '已是最新' : '版本状态待确认');
     badge.className = 'badge ' + (s.has_update ? 'warn' : s.up_to_date === true ? 'ok' : 'mute');
     badge.textContent = `${state} · ${lVer} (${s.local_sha || 'unknown'})`;
     topBtn.classList.toggle('updpill-alert', !!s.has_update);
     topBtn.innerHTML = `📦 <span id="repoTopTxt">${esc(lVer)} · ${esc(state)}</span>`;
-    banner.classList.remove('show');
-    desc.innerHTML = `当前已部署版本：<code>${esc(lVer)}</code>（Commit: <code>${esc(s.local_sha || '—')}</code>） · ` +
-      `更新来源：<a href="${esc(s.repo_url)}" target="_blank">${esc(s.repo_url)}</a> / <code>${esc(s.repo_ref || 'main')}</code><br>` +
-      `远端版本：<code>${esc(s.remote_version || '未知')}</code>（Commit: <code>${esc(s.remote_sha || '—')}</code>）` +
+    const bannerHighlights = LANG === 'en' ? (s.highlights_en || s.highlights) : s.highlights;
+    $('updBannerVer').textContent = rVer + ' (' + (s.remote_sha || 'unknown') + ')';
+    $('updBannerMsg').textContent = s.managed_deployment
+      ? (LANG === 'en' ? 'Rebuild and switch the configured image to update.' : '请从配置的仓库分支重建并切换镜像。')
+      : ((bannerHighlights || [])[0] || s.remote_msg || state);
+    banner.classList.toggle('show', !!s.has_update && !!s.remote_sha && s.remote_sha !== _dismissedSha);
+    desc.innerHTML = `${LANG === 'en' ? 'Installed version: ' : '当前已部署版本：'}<code>${esc(lVer)}</code>（Commit: <code>${esc(s.local_sha || '—')}</code>） · ` +
+      `${LANG === 'en' ? 'Update source: ' : '更新来源：'}<a href="${esc(s.repo_url)}" target="_blank">${esc(s.repo_url)}</a> / <code>${esc(s.repo_ref || 'main')}</code><br>` +
+      `${LANG === 'en' ? 'Remote version: ' : '远端版本：'}<code>${esc(s.remote_version || '未知')}</code>（Commit: <code>${esc(s.remote_sha || '—')}</code>）` +
       (s.check_error ? `<br>${esc(s.check_error)}` : '') +
       (s.managed_deployment ? '<br>此实例通过镜像部署，更新需从上述分支构建并切换容器。' : '');
     for (const id of ['btnRepoPull', 'btnBannerUpgrade']) {
@@ -2361,7 +2370,10 @@ async function loadRepoStatus(force){
 
 async function upgradeNow(){
   if (_lastRepoStatus?.managed_deployment) return toast('此实例通过镜像部署，请从配置的仓库分支更新容器', 'warn');
-  if (!confirm(`确定从 ${_lastRepoStatus?.repo_url || ''} / ${_lastRepoStatus?.repo_ref || 'main'} 更新并重启服务吗？`)) return;
+  const upgradePrompt = (LANG === 'en' ? 'Update and restart from ' : '确定从 ')
+    + (_lastRepoStatus?.repo_url || '') + ' / ' + (_lastRepoStatus?.repo_ref || 'main')
+    + (LANG === 'en' ? '?' : ' 更新并重启服务吗？');
+  if (!confirm(upgradePrompt)) return;
   const btn1 = $('btnRepoPull'), btn2 = $('btnBannerUpgrade');
   if (btn1) { btn1.disabled = true; btn1.innerHTML = '<span class="spin"></span>正在在线更新…'; }
   if (btn2) { btn2.disabled = true; btn2.innerHTML = '<span class="spin"></span>正在在线更新…'; }
