@@ -146,9 +146,11 @@ Upload one product photo and get talking-head sales videos, story-style ad short
 
 ### 方式三：Windows 裸机部署（Win10 / Win11）
 
-1. **安装 Python 3.10+**：官网安装包，安装时勾选 *Add python.exe to PATH*。浏览器 Chrome / Edge 任装其一即可，程序会自动探测（也可通过 `MUSE2API_CHROMIUM` 手动指定路径）。
+> 脚本本身只用 ASCII 字符，菜单与输出为英文，因此在任何语言的 Windows 控制台上都不会乱码；说明文字见本节。
 
-2. **创建虚拟环境并安装依赖**（PowerShell / CMD）：
+1. **安装 Python 3.10+**：官网安装包，安装时勾选 *Add python.exe to PATH*。浏览器装 Chrome 或 Edge 其一即可，程序会自动探测（也可用 `MUSE2API_CHROMIUM` 指定路径）。
+
+2. **创建虚拟环境并安装依赖**（CMD 或 PowerShell）：
    ```bat
    git clone https://github.com/czg86389-hub/muse2api.git
    cd muse2api
@@ -157,20 +159,37 @@ Upload one product photo and get talking-head sales videos, story-style ad short
    copy .env.example .env
    ```
 
-3. **一键启动 / 停止（推荐）**：双击 `deploy\windows\muse2api.bat`，菜单式控制启动、停止、重启、状态查看与日志查看。启动时日志自动写入仓库根目录 `server.log`；停止时会一并清理服务拉起的浏览器残留进程，不影响你自己打开的浏览器窗口。
+3. **用控制脚本启动（推荐）**：
 
-4. **手动命令行启动**：
+   双击 `deploy\windows\muse2api.bat` 打开菜单，或带参数直接执行：
+
+   ```bat
+   deploy\windows\muse2api.bat start      :: 启动并在浏览器打开管理面板
+   deploy\windows\muse2api.bat stop       :: 停止（含本实例浏览器残留清理）
+   deploy\windows\muse2api.bat restart    :: 重启
+   deploy\windows\muse2api.bat status     :: 查看状态（进程、归属、健康检查）
+   ```
+
+   `muse2api.bat` 只是包装器，实际逻辑在同目录的 `muse2api.ps1`（PowerShell 5.1，Windows 10 自带）。脚本会从 `.env` 读取 `MUSE2API_PORT`、`MUSE2API_CDP_PORT`、`MUSE2API_HOST`、`MUSE2API_PROFILE_ROOT`、`MUSE2API_KEY`，未配置时用默认值。
+
+4. **手动命令行启动**（不使用脚本时）：
    ```bat
    venv\Scripts\python.exe -m uvicorn app:app --host 127.0.0.1 --port 18610
    ```
-   提示：改用 `venv\Scripts\pythonw.exe -m uvicorn ...` 启动不会有控制台黑框（脚本已默认如此，日志重定向到 `server.log`）。
+   用 `venv\Scripts\pythonw.exe` 代替 `python.exe` 可避免控制台黑框（脚本默认就是这样启动的，日志写入仓库根目录 `server.log`）。
 
-5. **访问管理面板**：打开浏览器访问 `http://127.0.0.1:18610/admin`
+5. **访问管理面板**：`http://127.0.0.1:18610/admin`（脚本会自动带上 `?key=`）。
 
-Windows 注意事项：
-- `MUSE2API_CHROMIUM` 留空时自动探测 Chrome / Edge 常见安装路径（含 `msedge.exe`）。
-- 浏览器 profile 默认在 `%USERPROFILE%\muse2api-profiles`，浏览器相关报错时可整个删除后重试。
-- 账号导入扩展同样适用于 Edge：在 `edge://extensions` 开发者模式加载 `extension/` 目录。
+**进程归属规则**（脚本防止误杀他人进程）：
+
+- 判断“本仓库的服务”时，要求监听该端口的进程命令行是 `uvicorn app:app` 且端口匹配，并且该进程或其祖先进程是本仓库 `venv\Scripts` 下的解释器（Windows 的 venv 解释器是启动器，真正的监听进程是它的子进程，因此按祖先链判断）。
+- 端口被别的程序占用时，`start` 与 `stop` 都只报告占用者（PID / 进程名 / 路径 / 命令行）并退出，不会动它。
+- 端口上跑着 muse2api 但不是本脚本启动的（例如你手动敲过命令），`stop` 会拒绝并提示；确认无误后可用 `muse2api.bat stop -Force`。
+- 浏览器清理只匹配**同时**带有本实例 profile 完整路径与 `--remote-debugging-port=<本实例 CDP 端口>` 的进程，所以另一个 checkout 的实例、以及你自己的浏览器窗口都不会被牵连。
+
+**多实例并存**：不同 checkout 若要同时运行，请给每个实例配置不同的 `MUSE2API_PORT` 与 `MUSE2API_CDP_PORT`，并各自指定独立的 `MUSE2API_PROFILE_ROOT`（默认值 `%USERPROFILE%\muse2api-profiles` 是共享的）。
+
+**其它注意**：浏览器 profile 默认在 `%USERPROFILE%\muse2api-profiles`，浏览器相关报错时可整个删除后重试。账号导入扩展在 Edge 上同样可用（`edge://extensions` 开发者模式加载 `extension/` 目录）。
 
 ---
 
