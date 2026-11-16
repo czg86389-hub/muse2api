@@ -25,7 +25,7 @@ class VersionReportingTests(unittest.TestCase):
         def get(url,**kwargs):
             body={'version':'1.6.10'} if 'raw.githubusercontent' in url else [{'sha':'abcdef01234','commit':{'message':'fix','committer':{'date':'2026-11-13'}}}]
             return SimpleNamespace(raise_for_status=lambda:None,json=lambda:body)
-        with patch.object(app,'_read_local_version',return_value={'version':'1.6.9'}),patch.dict(os.environ,{'MUSE2API_BUILD_SHA':'1234567890'}),patch('requests.get',side_effect=get),patch.object(app,'_silent_upgrade_worker') as upgrade:
+        with patch.object(app,'_read_local_version',return_value={'version':'1.6.9'}),patch.dict(os.environ,{'MUSE2API_BUILD_SHA':'1234567890'}),patch('requests.get',side_effect=get),patch.object(app,'_upgrade_from_github_sync') as upgrade:
             result=app._check_update_sync(force=True)
         self.assertEqual(result['local_version'],'1.6.9');self.assertEqual(result['remote_version'],'1.6.10')
         self.assertEqual(result['local_sha'],'1234567');self.assertTrue(result['has_update']);self.assertFalse(result['up_to_date'])

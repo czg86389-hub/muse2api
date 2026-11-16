@@ -37,6 +37,17 @@ Upload one product photo and get talking-head sales videos, story-style ad short
 
 ---
 
+
+## v1.6.11 升级事项
+
+- **扩展必须手动升级至 1.0.3**：先更新服务，从管理页下载本实例的扩展包，替换原扩展目录后在浏览器扩展管理页重新加载；不同浏览器个人资料分别升级。无痕/InPrivate 使用时，需允许扩展在无痕窗口运行。导入只表示保存登录态，请继续测试账号。
+- **检查更新不会自动改动代码或重启**：面板显示真实已安装版本和远端状态，由管理员手动确认升级；已有排队或运行任务时拒绝升级。镜像部署可设置 MUSE2API_MANAGED_DEPLOYMENT=1，通过重建镜像更新。
+- **排队与生成分开计时**：管理页可设置独立排队时限，默认 3600 秒，0 表示不限；图片长任务仍推荐异步任务接口。
+- **视频库使用缩略图**：源码部署需安装 FFmpeg；Docker 用户请重建镜像。仅更新 Python 源码不会为旧容器安装系统依赖。
+
+Extension 1.0.3 requires a manual reload in every browser profile. Update checks are read-only; confirm upgrades explicitly. Rebuild Docker images for FFmpeg thumbnail support.
+
+
 ## 🌟 核心特性
 
 - 💬 **标准对话接口（Chat Completions & Responses API）**
@@ -439,6 +450,9 @@ python tests/test_ref_image_safety.py
 - [@Roins-hub](https://github.com/Roins-hub)：新版 Muse 输入区兼容、视频/音频/文档参考素材（PR #40）。
 
 - [@WXJJ0520](https://github.com/WXJJ0520)：限定当前输入区域的发送按钮，修复侧栏历史误匹配并增加真实 Chromium 回归（PR [#48](https://github.com/czg86389-hub/muse2api/pull/48)）。
+
+- [@Yeadon8888](https://github.com/Yeadon8888)：保留未分配会话响应中的 Cookie 轮换，避免后续继续使用失效旧值（PR [#60](https://github.com/czg86389-hub/muse2api/pull/60)）。
+- [@ALight777](https://github.com/ALight777)：当前窗口 Cookie 存储区隔离、独立排队预算、真实版本报告与只读更新检查、视频缩略图（PR [#58](https://github.com/czg86389-hub/muse2api/pull/58)、[#55](https://github.com/czg86389-hub/muse2api/pull/55)、[#57](https://github.com/czg86389-hub/muse2api/pull/57)、[#51](https://github.com/czg86389-hub/muse2api/pull/51)）。
 
 欢迎大家提交 PR 与 Issue，共同把项目打磨得更强更好用！
 

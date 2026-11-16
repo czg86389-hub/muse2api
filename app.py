@@ -69,7 +69,7 @@ if not log.handlers:
     log.addHandler(_h)
 
 CFG.ensure_dirs()
-app = FastAPI(title="muse2api", version="1.6.10")
+app = FastAPI(title="muse2api", version="1.6.11")
 
 # Cookie 助手脚本从 muse.ai 页面发起导入请求，需要放行该来源；
 # 浏览器扩展从 chrome-extension:// 发起，也一并放行。
@@ -82,7 +82,7 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 app.add_middleware(CORSMiddleware,
                    allow_origins=["*"],
-                   allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+                   allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
                    allow_headers=["*"],
                    expose_headers=["*"],
                    max_age=600)
@@ -395,9 +395,7 @@ def _renew_and_persist(acc_id: str, wake_vm: bool = True, force: bool = False) -
 
 def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
                      timeout: int, account_id: str | None):
-    """在独立线程中执行 chat_stream 并持有 GEN_LOCK，通过 Queue 往外吐。
-    无论下游客户端何时断连、异常或超时，stop_event + finally 块保证 100% 立即释放 GEN_LOCK，绝不死锁。
-    若首字前遇到单账号 VM 卡死或会话异常，自动切换下一个健康账号重试一次。"""
+    """Acquire a generation slot before the account lease; release both after cleanup."""
     import queue
     q = queue.Queue(maxsize=100)
     stop_event = threading.Event()
@@ -408,7 +406,12 @@ def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
         cur_exp = expires
         last_exc = None
         leased_id = None
+        slot_acquired = False
         try:
+            slot_acquired = GEN_LOCK.acquire(timeout=timeout)
+            if not slot_acquired:
+                q.put(("error", MuseGenerationError("等待对话并发槽位超时")))
+                return
             for attempt in range(2):
                 if stop_event.is_set():
                     return
@@ -441,18 +444,17 @@ def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
                         if refreshed:
                             cur_cookies = refreshed["cookies"]
                             cur_exp = refreshed.get("cookies_exp")
-                    with GEN_LOCK:
+                    if stop_event.is_set():
+                        return
+                    engine.start()
+                    for chunk in engine.chat_stream(
+                        cur_cookies, prompt, cur_exp, timeout,
+                        account_id=cur_id, stop_event=stop_event
+                    ):
+                        yielded = True
+                        q.put(("data", chunk))
                         if stop_event.is_set():
                             return
-                        engine.start()
-                        for chunk in engine.chat_stream(
-                            cur_cookies, prompt, cur_exp, timeout,
-                            account_id=cur_id, stop_event=stop_event
-                        ):
-                            yielded = True
-                            q.put(("data", chunk))
-                            if stop_event.is_set():
-                                return
                     if cur_id:
                         store.mark(cur_id, True, "")
                         _sync_cookies(cur_id)
@@ -474,12 +476,22 @@ def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
                         break
             if last_exc is not None:
                 q.put(("error", last_exc))
+        except Exception as exc:
+            q.put(("error", exc))
         finally:
-            if leased_id:
-                ACCOUNT_POOL.release(leased_id)
-            engine.close_current_page()
-            _clear_account_proxy()
-            q.put(("done", None))
+            try:
+                if leased_id:
+                    ACCOUNT_POOL.release(leased_id)
+                engine.close_current_page()
+            except Exception as exc:
+                log.warning("对话清理失败: %s", type(exc).__name__)
+            finally:
+                try:
+                    _clear_account_proxy()
+                finally:
+                    if slot_acquired:
+                        GEN_LOCK.release()
+                    q.put(("done", None))
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -2619,6 +2631,7 @@ REPO_URL = f"https://github.com/{REPO_SLUG}"
 MANAGED_DEPLOYMENT = os.environ.get("MUSE2API_MANAGED_DEPLOYMENT", "0") == "1"
 TRACKED_REPO_PATHS = [
     "app.py", "engine.py", "store.py", "cdp.py", "config.py", "proxy.py",
+    "generation_timing.py", "thumbnails.py", "GENERATION_QUEUE.md", "VERSION_REPORTING.md",
     "admin.html", "README.md", "version.json", "requirements.txt",
     "Dockerfile", "docker-compose.yml", ".env.example", ".gitignore",
     "LICENSE", "extension", "deploy", "tools",
@@ -2685,34 +2698,6 @@ def _ensure_git_repo(token: str = ""):
     _git(["config", "user.email", "czg86389-hub@users.noreply.github.com"])
 
 
-_SILENT_UPGRADE_LOCK = threading.Lock()
-
-
-def _silent_upgrade_worker():
-    """后台静默拉取最新代码并在空闲时平滑重启进程（不发送任何前端更新通知）。"""
-    if not _SILENT_UPGRADE_LOCK.acquire(blocking=False):
-        return
-    try:
-        res = _upgrade_from_github_sync()
-        if res.get("ok"):
-            for _ in range(180):
-                with ACCOUNT_POOL.cond:
-                    busy = bool(ACCOUNT_POOL.busy_accounts)
-                if not busy:
-                    break
-                time.sleep(1)
-            time.sleep(0.5)
-            try:
-                engine.stop()
-            except Exception:
-                pass
-            os._exit(0)
-    except Exception:
-        pass
-    finally:
-        _SILENT_UPGRADE_LOCK.release()
-
-
 def _check_update_sync(force: bool = False, _auto_upgrade: bool = False) -> dict:
     """A check is read-only. Report installed files and remote state separately."""
     now = time.time()
@@ -2723,7 +2708,7 @@ def _check_update_sync(force: bool = False, _auto_upgrade: bool = False) -> dict
     local = _read_local_version()
     local_version = str(local.get("version") or "unknown")
     local_sha = os.environ.get("MUSE2API_BUILD_SHA", "").strip()
-    has_git = os.path.isdir(os.path.join(BASE_DIR, ".git"))
+    has_git = os.path.exists(os.path.join(BASE_DIR, ".git"))
     if not local_sha and has_git:
         result = _git(["rev-parse", "HEAD"])
         if result.returncode == 0:
@@ -2744,17 +2729,6 @@ def _check_update_sync(force: bool = False, _auto_upgrade: bool = False) -> dict
         headers["Authorization"] = f"Bearer {token}"
     try:
         response = requests.get(
-            f"https://raw.githubusercontent.com/{REPO_SLUG}/{quote(REPO_REF, safe='')}/version.json",
-            timeout=6)
-        response.raise_for_status()
-        remote = response.json()
-        remote_version = str(remote.get("version") or "")
-        highlights = list(remote.get("highlights") or [])
-        highlights_en = list(remote.get("highlights_en") or [])
-    except Exception:
-        errors.append("远端版本文件读取失败")
-    try:
-        response = requests.get(
             f"https://api.github.com/repos/{REPO_SLUG}/commits",
             params={"sha": REPO_REF, "per_page": 5}, headers=headers, timeout=6)
         response.raise_for_status()
@@ -2769,6 +2743,18 @@ def _check_update_sync(force: bool = False, _auto_upgrade: bool = False) -> dict
             remote_sha, remote_msg, remote_time = (commits[0][k] for k in ("sha", "message", "date"))
     except Exception:
         errors.append("远端提交读取失败")
+    # Pin release notes and version to the same commit as the reported remote SHA.
+    try:
+        response = requests.get(
+            f"https://raw.githubusercontent.com/{REPO_SLUG}/{quote(remote_commit or REPO_REF, safe='')}/version.json",
+            timeout=6)
+        response.raise_for_status()
+        remote = response.json()
+        remote_version = str(remote.get("version") or "")
+        highlights = list(remote.get("highlights") or [])
+        highlights_en = list(remote.get("highlights_en") or [])
+    except Exception:
+        errors.append("远端版本文件读取失败")
     verified = bool(local_sha and remote_sha and remote_version)
     has_update = bool((local_sha and remote_sha and local_sha != remote_sha) or
                       (remote_version and local_version != remote_version))

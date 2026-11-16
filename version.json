@@ -1,19 +1,23 @@
 {
-  "version": "1.6.10",
-  "updated_at": "2026-11-13",
+  "version": "1.6.11",
+  "updated_at": "2026-11-15",
   "repo": "https://github.com/czg86389-hub/muse2api",
   "highlights": [
-    "修复发送按钮误匹配侧栏历史、Send feedback 或 Resend 的问题，避免参考图和长提示词留在输入框未提交。",
-    "首次发送、重试和发送状态检查统一定位当前输入区域，识别中英文标签、disabled、aria-disabled 和 inert 状态。",
-    "继续校验实际发送及媒体成品；点击发送不等于任务完成，不把上传的参考素材当生成结果。",
-    "核验仓库、管理面板及中英文界面的社区推广内容清理状态；感谢 @WXJJ0520 的 PR #48。",
-    "扩展升级至 1.0.3：按当前普通或无痕窗口选择 Cookie 存储区，避免错导其它账号；请从本实例管理页下载并在每个浏览器个人资料中手动重新加载。油猴脚本仍为 1.1.2。"
+    "修复工作区暂未分配时丢弃新 Cookie 的问题；保存轮换后的登录态，但不把未确认会话标成成功。",
+    "浏览器插件升级至 1.0.3：按当前普通/无痕窗口读取 Cookie，避免导入另一个窗口的账号；找不到存储区时停止导入。",
+    "图片和视频采用独立排队时限（默认 3600 秒，0 为不限）；排队不消耗生成预算，失败记录保留账号、尝试次数和原始错误。",
+    "检查更新只读：如实区分本地版本/提交与远端状态；有更新时提醒，由管理员手动确认升级，任务排队或运行期间拒绝更新。",
+    "媒体库只加载视频缩略图，点击后才加载所选视频，关闭预览释放播放器；源部署需 FFmpeg，Docker 用户请重建镜像。",
+    "组合修复聊天与媒体的资源获取顺序、排队设置跨域 PUT 和固定提交版本读取；继续保留独立代理、轮询及会话健康检查。",
+    "请先更新服务，再手动升级插件 1.0.3：替换原目录并重新加载；每个浏览器个人资料分别升级，无痕模式还需允许扩展运行。油猴脚本仍为 1.1.2。"
   ],
   "highlights_en": [
-    "Fix send-button matching against sidebar history, Send feedback and Resend, which could leave prompts and reference attachments unsubmitted.",
-    "Initial sends, retries and readiness checks share one composer-scoped locator with localized labels and disabled, aria-disabled and inert handling.",
-    "Keep actual submission and generated-media verification; clicking Send is not task completion, and uploaded references are not generated results.",
-    "Verify repository and bilingual dashboard community-promotion cleanup. Thanks to @WXJJ0520 for PR #48.",
-    "Extension 1.0.3 selects the current regular or Incognito window cookie store to prevent importing another account. Download from this instance and manually reload it in every browser profile. Userscript remains 1.1.2."
+    "Preserve cookies rotated by unassigned-workspace responses without marking an unconfirmed session healthy.",
+    "Extension 1.0.3 reads the active regular/incognito window cookie store and stops instead of importing from another store when identification fails.",
+    "Image/video queue waits have a separate budget (3600 seconds by default; 0 means unlimited). Failed tasks retain account, attempt and original error.",
+    "Update checks are read-only and report installed provenance separately. Updates notify administrators and require explicit confirmation; queued/running work blocks upgrades.",
+    "The media library lazily loads video thumbnails and requests a video only on playback. Source deployments need FFmpeg; Docker users should rebuild images.",
+    "Integration fixes align chat/media resource acquisition, allow queue-setting PUT preflights and bind remote version metadata to one commit.",
+    "Update the service, then manually upgrade extension 1.0.3 in every browser profile by replacing files and reloading. Allow the extension in Incognito/InPrivate when needed. Userscript remains 1.1.2."
   ]
 }
