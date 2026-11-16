@@ -57,6 +57,8 @@ from engine import MuseProxyError, MuseSessionUnavailable
 from store import Store, account_expiry, min_expiry
 from generation_timing import QueuePolicy, QueueSettings, TaskTiming
 from proxy import normalize_server, request_proxy_context, split_proxy_url
+from thumbnails import (VIDEO_FORMATS, ThumbnailUnavailable, clear_thumbnail,
+                        source_version, video_thumbnail)
 
 import sys
 log = logging.getLogger("muse2api")
@@ -1893,6 +1895,27 @@ def save_generation_queue(req: QueueSettings, _=Depends(auth)):
     QUEUE_POLICY.save(req)
     return QUEUE_POLICY.settings()
 
+@app.get("/v1/media/{name}/thumbnail")
+def get_media_thumbnail(name: str):
+    try:
+        path = video_thumbnail(CFG.media_dir, os.path.join(CFG.data_dir, "thumbnails"), name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except FileNotFoundError:
+        raise HTTPException(404, "文件不存在")
+    except ThumbnailUnavailable:
+        raise HTTPException(503, "视频缩略图暂不可用")
+    return FileResponse(path, media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
+def _clear_media_thumbnail(name: str):
+    try:
+        clear_thumbnail(os.path.join(CFG.data_dir, "thumbnails"), name)
+    except OSError:
+        log.warning("Could not remove cached thumbnail for %s", name)
+
+
 # ------------------------- 管理：总览 -------------------------
 @app.get("/admin/status")
 def admin_status(_=Depends(auth)):
@@ -2325,9 +2348,14 @@ def admin_media(_=Depends(auth)):
             if not os.path.isfile(p):
                 continue
             ext = os.path.splitext(name)[1].lower()
-            items.append({"name": name, "url": media_url(name), "bytes": os.path.getsize(p),
-                          "mtime": int(os.path.getmtime(p)),
-                          "kind": "video" if ext in (".mp4", ".webm", ".mov") else "image"})
+            stat = os.stat(p)
+            is_video = ext in VIDEO_FORMATS
+            item = {"name": name, "url": media_url(name), "bytes": stat.st_size,
+                    "mtime": int(stat.st_mtime), "kind": "video" if is_video else "image"}
+            if is_video:
+                from urllib.parse import quote
+                item["thumbnail_url"] = f"/v1/media/{quote(name, safe='')}/thumbnail?v={source_version(stat)}"
+            items.append(item)
     items.sort(key=lambda x: x["mtime"], reverse=True)
     return {"media": items, "count": len(items)}
 
@@ -2350,6 +2378,7 @@ def delete_media(payload: dict = Body(default={}), _=Depends(auth)):
         if os.path.isfile(p):
             try:
                 os.remove(p)
+                _clear_media_thumbnail(name)
                 removed += 1
             except OSError as e:
                 errors.append(f"{name}: {str(e)}")
@@ -2365,6 +2394,7 @@ def delete_single_media(name: str, _=Depends(auth)):
         raise HTTPException(404, "文件不存在")
     try:
         os.remove(p)
+        _clear_media_thumbnail(name)
         return {"status": "ok", "deleted": name}
     except OSError as e:
         raise HTTPException(500, f"删除失败: {e}")
