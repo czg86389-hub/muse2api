@@ -53,7 +53,7 @@ from engine import (ESSENTIAL_COOKIES, MAX_REFERENCE_IMAGE_BYTES,
                     MAX_REFERENCE_IMAGES, MAX_REFERENCE_TOTAL_BYTES,
                     REFERENCE_MIME_EXT, MuseAuthError, MuseEngine, MuseGenerationError,
                     MuseModelRefusalError, RefImageSafetyError, reference_kind)
-from engine import MuseProxyError
+from engine import MuseProxyError, MuseSessionUnavailable
 from store import Store, account_expiry, min_expiry
 from proxy import normalize_server, request_proxy_context, split_proxy_url
 
@@ -331,6 +331,23 @@ def auth(authorization: str | None = Header(default=None)):
 
 # ------------------------- 请求模型 -------------------------
 
+def _persist_session_cookies(acc_id: str, cookies: dict, cookies_exp: dict | None) -> None:
+    """Merge cookies rotated by muse.ai into storage without confirming the session."""
+    acc = store.get_account(acc_id)
+    if not acc or not cookies:
+        return
+    merged = {**(acc.get("cookies") or {}), **{k: v for k, v in cookies.items() if v}}
+    exps = {**(acc.get("cookies_exp") or {}),
+            **{k: v for k, v in (cookies_exp or {}).items() if v}}
+    if merged == (acc.get("cookies") or {}) and exps == (acc.get("cookies_exp") or {}):
+        return
+    # synced_at / last_keepalive mean "session confirmed"; rotation alone does not.
+    store.update_account(acc_id, cookies=merged, cookies_exp=exps)
+
+
+engine.cookie_sink = _persist_session_cookies
+
+
 def _renew_and_persist(acc_id: str, wake_vm: bool = True, force: bool = False) -> dict | None:
     """调用 /api/session 续签账号 cookie 并写回 store，返回最新账号 dict。
     近期（10分钟内）已续签且状态正常的账号直接复用，避免每次请求阻塞 2~3 秒 HTTP 往返。"""
@@ -361,6 +378,12 @@ def _renew_and_persist(acc_id: str, wake_vm: bool = True, force: bool = False) -
         raise
     except MuseProxyError:
         raise
+    except MuseSessionUnavailable as exc:
+        _persist_session_cookies(acc_id, exc.cookies, exc.cookies_exp)
+        # The page load right after must not renew again with the pre-rotation cookie.
+        engine._last_http_renew[acc_id] = now
+        log.warning("HTTP 预续签账号 %s 未分配工作区%s: %s", acc_id,
+                    "（已保存轮换后的 cookie）" if exc.rotated else "", exc)
     except Exception as exc:
         log.warning("HTTP 预续签账号 %s 异常: %s", acc_id, exc)
     return store.get_account(acc_id)
@@ -1963,6 +1986,9 @@ def test_account_proxy(aid: str, req: ProxyTestRequest | None = None, _=Depends(
             result.update(session_ok=False, message="代理可连接，但 Muse 会话认证失败，请重新导入 Cookie")
         except MuseProxyError as exc:
             result["message"] = str(exc)
+        except MuseSessionUnavailable as exc:
+            _persist_session_cookies(aid, exc.cookies, exc.cookies_exp)
+            result.update(session_ok=False, message=str(exc))
         except MuseGenerationError as exc:
             result.update(session_ok=False, message=str(exc))
         except (requests.RequestException, ValueError, KeyError, TypeError):
@@ -2384,6 +2410,10 @@ def _probe_account_sync(aid: str, check_quota: bool = False) -> dict:
     except MuseAuthError as exc:
         store.touch_keepalive(aid, False, f"保活认证失败: {str(exc)[:200]}")
         return {"ok": False, "id": aid, "error": str(exc)}
+    except MuseSessionUnavailable as exc:
+        _persist_session_cookies(aid, exc.cookies, exc.cookies_exp)
+        store.touch_keepalive(aid, None, f"保活未确认（保留账号状态）: {str(exc)[:200]}")
+        return {"ok": False, "id": aid, "error": str(exc), "cookies_rotated": exc.rotated}
     except Exception as exc:
         store.touch_keepalive(aid, None, f"保活未确认（保留账号状态）: {str(exc)[:200]}")
         return {"ok": False, "id": aid, "error": str(exc)}
