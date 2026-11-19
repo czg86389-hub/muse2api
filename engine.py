@@ -1800,15 +1800,32 @@ class MuseEngine:
         }
     """
 
-    _FILE_INPUT_JS = "(function(){" + _COMPOSER_ROOTS_JS + """
+    _FILE_INPUT_JS = "(function(allowLinkedOutside){" + _COMPOSER_ROOTS_JS + """
+        var excluded = 'aside,nav,header,footer,dialog,[role="dialog"],[role="navigation"],' +
+                       '.chat-user-bubble,[class*="group/msg"],[class*="hatch-chat-groupable-bubble"]';
+        var roots = __composerRoots().filter(function(root) {
+            return !root.matches('main,[role="main"]') && !root.closest(excluded);
+        });
+        var scope = roots[roots.length - 1];
+        if (!scope) return 'composer_missing';
         var inputs = Array.from(document.querySelectorAll('input[type="file"]'));
-        var roots = __composerRoots();
-        for (var r of roots) {
-            var hit = inputs.find(function(x){ return r.contains(x); });
-            if (hit) return hit;
+        var linked = new Set();
+        for (var control of scope.querySelectorAll('label[for],button[aria-controls],[role="button"][aria-controls]')) {
+            if (control.closest(excluded + ',[inert],:disabled')) continue;
+            var ids = (control.getAttribute('aria-controls') || '').trim().split(/\s+/);
+            var targets = control.control ? [control.control] : ids.map(id => document.getElementById(id));
+            for (var target of targets) {
+                if (inputs.includes(target)) linked.add(target);
+            }
         }
-        return null;
-    })()"""
+        var scoped = inputs.filter(input => scope.contains(input) && !input.closest(excluded));
+        if (linked.size > 1 || (!linked.size && scoped.length > 1)) return 'ambiguous';
+        var input = linked.size ? linked.values().next().value : scoped[0];
+        if (!input) return inputs.length ? 'unrelated' : 'missing';
+        if (input.matches(':disabled') || input.closest('[inert]')) return 'disabled';
+        if (!scope.contains(input) && !allowLinkedOutside) return 'linked_outside';
+        return input;
+    })"""
 
     _ATTACHED_COUNT_JS = "(function(){" + _COMPOSER_ROOTS_JS + """
         var rx = /remove\\s*attachment|移除附件|删除附件/i;
@@ -1823,17 +1840,49 @@ class MuseEngine:
         return 0;
     })()"""
 
-    def _set_input_files(self, paths: list[str]):
-        """用 CDP 直接把磁盘文件交给上传控件（大视频不再经 base64 注入页面）。"""
-        res = self.page.send("Runtime.evaluate", {
-            "expression": self._FILE_INPUT_JS, "returnByValue": False})
-        object_id = (res.get("result", {}).get("result", {}) or {}).get("objectId")
-        if not object_id:
-            raise MuseGenerationError("找不到上传控件，已停止生成")
-        self.page.send("DOM.setFileInputFiles",
-                       {"files": paths, "objectId": object_id}, timeout=60)
+    _UPLOAD_CONTROL_WAIT = 5.0
 
-    def _attach_images(self, image_data: list[str]) -> dict | None:
+    def _set_input_files(self, paths: list[str], *, wait_timeout: float = _UPLOAD_CONTROL_WAIT) -> float:
+        """Use the current composer's file input and return the time spent waiting for it."""
+        started = time.monotonic()
+        deadline = started + wait_timeout
+        waited = False
+        while True:
+            result = self.page.send("Runtime.evaluate", {
+                "expression": self._FILE_INPUT_JS + "(false)", "returnByValue": False})
+            match = result["result"]["result"]
+            outside = match.get("value") == "linked_outside"
+            if outside:
+                result = self.page.send("Runtime.evaluate", {
+                    "expression": self._FILE_INPUT_JS + "(true)", "returnByValue": False})
+                match = result["result"]["result"]
+            object_id = match.get("objectId")
+            elapsed = time.monotonic() - started
+            if object_id:
+                self.page.send("DOM.setFileInputFiles",
+                               {"files": paths, "objectId": object_id}, timeout=60)
+                if waited or outside:
+                    log.info("Reference upload control resolved: delayed=%s linked_outside=%s wait_ms=%d",
+                             waited, outside, round(elapsed * 1000))
+                return elapsed if waited else 0.0
+            state = match.get("value")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                reasons = {
+                    "composer_missing": "当前对话输入区未就绪",
+                    "missing": "等待上传控件超时",
+                    "disabled": "上传控件仍不可用",
+                    "ambiguous": "无法确认上传控件属于当前输入区（多个候选）",
+                    "unrelated": "无法确认上传控件属于当前输入区",
+                }
+                log.info("Reference upload control unavailable: state=%s wait_ms=%d",
+                         state, round(elapsed * 1000))
+                reason = reasons.get(state, "无法识别上传控件状态")
+                raise MuseGenerationError(f"找不到上传控件，{reason}，已停止生成")
+            waited = True
+            time.sleep(min(0.1, remaining))
+
+    def _attach_images(self, image_data: list[str], *, deadline: float | None = None) -> dict | None:
         """逐个附加参考素材（图片/视频/音频/文档），并确认全部进入输入框。
 
         返回 {"dir": 临时目录, "hashes": 素材 sha256 集合}；调用方在生成结束后
@@ -1867,6 +1916,7 @@ class MuseEngine:
         os.makedirs(self.cfg.profile_dir, exist_ok=True)
         upload_dir = tempfile.mkdtemp(prefix="muse2api-refs-", dir=self.cfg.profile_dir)
         hashes = set()
+        wait_budget = self._UPLOAD_CONTROL_WAIT
         try:
             for index, data, mime in files:
                 path = os.path.join(
@@ -1874,7 +1924,14 @@ class MuseEngine:
                 with open(path, "wb") as f:
                     f.write(data)
                 hashes.add(hashlib.sha256(data).hexdigest())
-                self._set_input_files([path])
+                wait_timeout = wait_budget
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise MuseGenerationError("任务准备超时，已停止发送")
+                    wait_timeout = min(wait_timeout, remaining)
+                waited = self._set_input_files([path], wait_timeout=wait_timeout)
+                wait_budget = max(0.0, wait_budget - waited)
                 time.sleep(0.35)
         except MuseGenerationError:
             shutil.rmtree(upload_dir, ignore_errors=True)
@@ -1915,7 +1972,7 @@ class MuseEngine:
         self.reset_thread(for_chat=False)
         self._scroll_bottom()
         refs = list(reference_images or ([] if not reference_image else [reference_image]))
-        upload = self._attach_images(refs) if refs else None
+        upload = self._attach_images(refs, deadline=deadline) if refs else None
         if not refs:
             self._clear_attachments()
         try:

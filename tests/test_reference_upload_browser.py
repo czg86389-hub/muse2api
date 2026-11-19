@@ -1,6 +1,7 @@
 """Actual Chromium regression: composer scoping and CDP file uploads. No Muse login."""
 import argparse
 import ast
+import base64
 import importlib.util
 import json
 import os
@@ -91,6 +92,52 @@ with tempfile.TemporaryDirectory(prefix="muse-upload-check-", dir=Path.home()) a
             assert response["result"]["result"]["value"] == upload.read_text(), response
             assert page.js("document.querySelector('.chat-user-bubble input').files.length") == 0
             print("PASS: old/new layouts, history exclusion, correct input and actual file bytes", flush=True)
+
+            def set_composer(markup="", outside=""):
+                page.js("document.body.innerHTML=" + json.dumps(
+                    f"<main><section><textarea></textarea>{markup}</section>{outside}</main>"))
+
+            set_composer()
+            assert page.js("!document.querySelector('input[type=file]')")
+            page.js("""setTimeout(() => {
+                document.querySelector('section').insertAdjacentHTML(
+                    'beforeend', '<input id="delayed" type="file">');
+            }, 450); true""")
+            engine._set_input_files([str(upload)])
+            assert page.js("document.querySelector('#delayed').files.length") == 1
+            print("PASS: delayed uploader gets the file", flush=True)
+
+            set_composer('<label for="linked">Add attachment</label>',
+                         '<input id="linked" type="file"><aside><input id="other" type="file"></aside>')
+            engine._set_input_files([str(upload)])
+            assert page.js("document.querySelector('#linked').files.length") == 1
+            assert page.js("document.querySelector('#other').files.length") == 0
+            print("PASS: the linked uploader outside the composer gets the file", flush=True)
+
+            engine._UPLOAD_CONTROL_WAIT = 0.3
+            engine.ensure_page = lambda *_args, **_kwargs: page
+            engine.reset_thread = lambda **_kwargs: None
+            engine._scroll_bottom = lambda: None
+
+            def reject_prompt_submission(*_args, **_kwargs):
+                raise AssertionError("a task without all references should never submit a prompt")
+
+            engine._generate_attached = reject_prompt_submission
+            png = ("data:image/png;base64," + base64.b64encode(
+                bytes.fromhex("89504e470d0a1a0a")).decode())
+            for case, outside, reason in (
+                ("missing", "", "等待上传控件超时"),
+                ("unrelated", '<input id="other" type="file">', "无法确认上传控件属于当前输入区"),
+            ):
+                set_composer(outside=outside)
+                try:
+                    engine.generate({}, "upload test", reference_images=[png])
+                except module.MuseGenerationError as exc:
+                    assert reason in str(exc), (case, str(exc))
+                else:
+                    raise AssertionError(f"{case}: should not upload")
+                assert page.js("Array.from(document.querySelectorAll('input[type=file]')).every(i=>!i.files.length)")
+                print(f"PASS: {case} uploader stops safely with its own reason", flush=True)
     finally:
         if page:
             try:
