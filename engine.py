@@ -1647,6 +1647,77 @@ class MuseEngine:
             time.sleep(2)
         raise MuseGenerationError(f"未能取回生成结果: {last}")
 
+    # ---------------- 原图（#62）----------------
+    # muse.ai 2026-11-19 起聊天气泡里只画一张约 498px 宽的缩略图（blob:，usage=thumbnail），
+    # 原图要等用户点开图片查看器时才经网关取回。图片任务在这里点开查看器、取更大的那张，再关掉。
+    # 只对看起来是缩略图的结果做（长边 < 1000）；查看器打不开或没有更大的图就退回缩略图并记日志。
+    _OPEN_VIEWER_JS = r"""(function(src){
+      var img=[...document.querySelectorAll('img')].find(function(m){return (m.currentSrc||m.src||'')===src;});
+      if(!img) return 'no-thumbnail';
+      var box=img.closest('[data-testid^="hatch-chat-attachment-presentation-"]');
+      var b=img.closest('button,[role=button]');
+      if(!b||!box||!box.contains(b)) return 'no-button';
+      if(b.disabled||b.getAttribute('aria-disabled')==='true') return 'disabled';
+      b.click(); return 'clicked';
+    })(%s)"""
+    _VIEWER_IMG_JS = r"""(function(src, minW){
+      var best=null;
+      document.querySelectorAll('img').forEach(function(m){
+        var s=m.currentSrc||m.src||'';
+        if(!s||s===src||!m.complete||!(m.naturalWidth>minW)) return;
+        if(m.closest('[data-testid^="hatch-chat-attachment-presentation-"]')) return;
+        var area=m.naturalWidth*m.naturalHeight;
+        if(!best||area>best.area) best={src:s,w:m.naturalWidth,h:m.naturalHeight,area:area,
+          dialog:!!m.closest('[role=dialog],[aria-modal=true]')};
+      });
+      return JSON.stringify(best);
+    })(%s, %s)"""
+    _CLOSE_VIEWER_JS = (
+        "(function(){var t=document.activeElement||document.body;"
+        "['keydown','keyup'].forEach(function(k){t.dispatchEvent(new KeyboardEvent(k,"
+        "{key:'Escape',code:'Escape',keyCode:27,which:27,bubbles:true,cancelable:true}));});return 1;})()"
+    )
+
+    def _full_image_src(self, att: dict, timeout: float = 20.0) -> dict | None:
+        """{src, w, h} of the full-size picture behind a chat thumbnail, or None (keep the thumbnail)."""
+        src = att.get("src") or ""
+        w, h = int(att.get("w") or 0), int(att.get("h") or 0)
+        if not src or not w or max(w, h) >= 1000:
+            return None
+        try:
+            opened = self.page.js(self._OPEN_VIEWER_JS % json.dumps(src))
+        except Exception as exc:  # noqa: BLE001
+            opened = "error: %s" % type(exc).__name__
+        if opened != "clicked":
+            log.warning("图片只有 %sx%s 缩略图，没能打开查看器取原图（%s），先返回缩略图", w, h, opened)
+            return None
+        best, stable = None, 0
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(0.5)
+            try:
+                raw = self.page.js(self._VIEWER_IMG_JS % (json.dumps(src), w))
+                cur = json.loads(raw) if raw else None
+            except Exception:  # noqa: BLE001
+                cur = None
+            if not cur:
+                continue
+            if best and cur["src"] == best["src"]:
+                stable += 1
+            else:
+                best, stable = cur, 0
+            if stable >= 2:     # the same larger picture for about a second: fully loaded
+                break
+        if not best:
+            log.warning("查看器里没有出现比 %sx%s 更大的图片，先返回缩略图", w, h)
+        return best
+
+    def _close_viewer(self):
+        try:
+            self.page.js(self._CLOSE_VIEWER_JS)
+        except Exception:  # noqa: BLE001
+            pass
+
     # ---------------- 下载兜底 ----------------
     def _download_fallback(self, src: str, timeout: int = 180) -> str | None:
         directory = self.download_dir
@@ -1952,8 +2023,20 @@ class MuseEngine:
 
             data = mime = url = None
             selected_src = (att.get("vSrc") if expect == "video" else None) or att.get("src") or ""
+            out_w, out_h = att.get("w"), att.get("h")
+            full = self._full_image_src(att) if expect == "image" else None
+            if full:
+                try:
+                    data, mime, url = self.extract_bytes(full["src"], expect=expect)
+                    out_w, out_h = full["w"], full["h"]
+                    log.info("取到原图 %sx%s（聊天里的缩略图 %sx%s）", full["w"], full["h"], att.get("w"), att.get("h"))
+                except Exception:  # noqa: BLE001
+                    data = mime = url = None
+                    log.warning("原图读取失败，改用缩略图")
+                self._close_viewer()
             try:
-                data, mime, url = self.extract_bytes(selected_src, expect=expect)
+                if not data:
+                    data, mime, url = self.extract_bytes(selected_src, expect=expect)
             except Exception:  # noqa: BLE001
                 self._debug_dump("extract-fail")
 
@@ -1975,7 +2058,7 @@ class MuseEngine:
                 return {"path": dst, "filename": name, "size": len(data), "ext": ext, "mime": mime,
                         "kind": kind,
                         "via": "blob", "attachment": att.get("tid"),
-                        "w": att.get("w"), "h": att.get("h")}
+                        "w": out_w, "h": out_h}
 
             path = self._download_fallback(selected_src)
             if not path:

@@ -38,6 +38,13 @@ Upload one product photo and get talking-head sales videos, story-style ad short
 ---
 
 
+## v1.6.12 升级事项
+
+- **生成的图片恢复原图尺寸（#62）**：muse.ai 从 2026-11-19 起聊天里只显示约 498px 的缩略图，原图要点开图片查看器才会加载。图片任务现在会自动打开查看器取原图（实测 1344x1792）；取不到时仍返回缩略图，并在服务日志写一条提示。只更新服务即可，插件不用升级。
+
+Generated images are full size again (#62): image tasks open muse.ai's image viewer to fetch the original instead of the ~498px chat thumbnail. Update the service only; the extension is unchanged.
+
+
 ## v1.6.11 升级事项
 
 - **扩展必须手动升级至 1.0.3**：先更新服务，从管理页下载本实例的扩展包，替换原扩展目录后在浏览器扩展管理页重新加载；不同浏览器个人资料分别升级。无痕/InPrivate 使用时，需允许扩展在无痕窗口运行。导入只表示保存登录态，请继续测试账号。

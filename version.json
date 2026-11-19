@@ -1,23 +1,13 @@
 {
-  "version": "1.6.11",
-  "updated_at": "2026-11-15",
+  "version": "1.6.12",
+  "updated_at": "2026-11-19",
   "repo": "https://github.com/czg86389-hub/muse2api",
   "highlights": [
-    "修复工作区暂未分配时丢弃新 Cookie 的问题；保存轮换后的登录态，但不把未确认会话标成成功。",
-    "浏览器插件升级至 1.0.3：按当前普通/无痕窗口读取 Cookie，避免导入另一个窗口的账号；找不到存储区时停止导入。",
-    "图片和视频采用独立排队时限（默认 3600 秒，0 为不限）；排队不消耗生成预算，失败记录保留账号、尝试次数和原始错误。",
-    "检查更新只读：如实区分本地版本/提交与远端状态；有更新时提醒，由管理员手动确认升级，任务排队或运行期间拒绝更新。",
-    "媒体库只加载视频缩略图，点击后才加载所选视频，关闭预览释放播放器；源部署需 FFmpeg，Docker 用户请重建镜像。",
-    "组合修复聊天与媒体的资源获取顺序、排队设置跨域 PUT 和固定提交版本读取；继续保留独立代理、轮询及会话健康检查。",
-    "请先更新服务，再手动升级插件 1.0.3：替换原目录并重新加载；每个浏览器个人资料分别升级，无痕模式还需允许扩展运行。油猴脚本仍为 1.1.2。"
+    "修复 #62：muse.ai 从 2026-11-19 起聊天里只显示约 498px 的缩略图，生成的图片因此变小。现在图片任务会打开 muse.ai 的图片查看器取原图（实测 1344x1792），取不到时仍返回缩略图并在日志里提示。",
+    "只影响图片任务；视频、对话与参考素材上传不变。无需升级浏览器插件。"
   ],
   "highlights_en": [
-    "Preserve cookies rotated by unassigned-workspace responses without marking an unconfirmed session healthy.",
-    "Extension 1.0.3 reads the active regular/incognito window cookie store and stops instead of importing from another store when identification fails.",
-    "Image/video queue waits have a separate budget (3600 seconds by default; 0 means unlimited). Failed tasks retain account, attempt and original error.",
-    "Update checks are read-only and report installed provenance separately. Updates notify administrators and require explicit confirmation; queued/running work blocks upgrades.",
-    "The media library lazily loads video thumbnails and requests a video only on playback. Source deployments need FFmpeg; Docker users should rebuild images.",
-    "Integration fixes align chat/media resource acquisition, allow queue-setting PUT preflights and bind remote version metadata to one commit.",
-    "Update the service, then manually upgrade extension 1.0.3 in every browser profile by replacing files and reloading. Allow the extension in Incognito/InPrivate when needed. Userscript remains 1.1.2."
+    "Fix #62: since 2026-11-19 muse.ai shows only a ~498px thumbnail in the chat, so generated images came back small. Image tasks now open muse.ai's image viewer and return the full-size picture (measured 1344x1792); if it cannot be opened the thumbnail is still returned and a warning is logged.",
+    "Images only; video, chat and reference uploads are unchanged. No extension upgrade is needed."
   ]
 }
