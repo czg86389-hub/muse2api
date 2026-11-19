@@ -114,6 +114,20 @@ with tempfile.TemporaryDirectory(prefix="muse-upload-check-", dir=Path.home()) a
             assert page.js("document.querySelector('#other').files.length") == 0
             print("PASS: the linked uploader outside the composer gets the file", flush=True)
 
+            avatar = ('<form aria-label="Profile photo"><label for="avatar">Profile photo</label>'
+                      '<input id="avatar" type="file"></form>')
+
+            def with_avatar(chat_upload=""):
+                page.js("document.body.innerHTML=" + json.dumps(
+                    '<main><div><section><div><textarea></textarea>'
+                    + chat_upload + '</div></section>' + avatar + '</div></main>'))
+
+            with_avatar('<input id="chat-upload" type="file">')
+            engine._set_input_files([str(upload)])
+            assert page.js("document.querySelector('#chat-upload').files.length") == 1
+            assert page.js("document.querySelector('#avatar').files.length") == 0
+            print("PASS: the chat uploader wins over the sibling avatar form", flush=True)
+
             engine._UPLOAD_CONTROL_WAIT = 0.3
             engine.ensure_page = lambda *_args, **_kwargs: page
             engine.reset_thread = lambda **_kwargs: None
@@ -128,8 +142,12 @@ with tempfile.TemporaryDirectory(prefix="muse-upload-check-", dir=Path.home()) a
             for case, outside, reason in (
                 ("missing", "", "等待上传控件超时"),
                 ("unrelated", '<input id="other" type="file">', "无法确认上传控件属于当前输入区"),
+                ("avatar", avatar, "无法确认上传控件属于当前输入区"),
             ):
-                set_composer(outside=outside)
+                if case == "avatar":
+                    with_avatar()
+                else:
+                    set_composer(outside=outside)
                 try:
                     engine.generate({}, "upload test", reference_images=[png])
                 except module.MuseGenerationError as exc:

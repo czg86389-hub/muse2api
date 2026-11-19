@@ -1803,22 +1803,24 @@ class MuseEngine:
     _FILE_INPUT_JS = "(function(allowLinkedOutside){" + _COMPOSER_ROOTS_JS + """
         var excluded = 'aside,nav,header,footer,dialog,[role="dialog"],[role="navigation"],' +
                        '.chat-user-bubble,[class*="group/msg"],[class*="hatch-chat-groupable-bubble"]';
-        var roots = __composerRoots().filter(function(root) {
-            return !root.matches('main,[role="main"]') && !root.closest(excluded);
-        });
-        var scope = roots[roots.length - 1];
-        if (!scope) return 'composer_missing';
+        // Outer layout ancestors can contain independent upload forms.
+        var scope = __composerRoots()[0];
+        if (!scope || scope.matches('main,[role="main"]') || scope.closest(excluded)) {
+            return 'composer_missing';
+        }
+        var composerForm = scope.closest('form');
         var inputs = Array.from(document.querySelectorAll('input[type="file"]'));
         var linked = new Set();
         for (var control of scope.querySelectorAll('label[for],button[aria-controls],[role="button"][aria-controls]')) {
-            if (control.closest(excluded + ',[inert],:disabled')) continue;
+            if (control.closest(excluded + ',[inert],:disabled') || control.closest('form') !== composerForm) continue;
             var ids = (control.getAttribute('aria-controls') || '').trim().split(/\s+/);
             var targets = control.control ? [control.control] : ids.map(id => document.getElementById(id));
             for (var target of targets) {
-                if (inputs.includes(target)) linked.add(target);
+                if (inputs.includes(target) && (!target.form || target.form === composerForm)) linked.add(target);
             }
         }
-        var scoped = inputs.filter(input => scope.contains(input) && !input.closest(excluded));
+        var scoped = inputs.filter(input => scope.contains(input) &&
+            !input.closest(excluded) && input.form === composerForm);
         if (linked.size > 1 || (!linked.size && scoped.length > 1)) return 'ambiguous';
         var input = linked.size ? linked.values().next().value : scoped[0];
         if (!input) return inputs.length ? 'unrelated' : 'missing';

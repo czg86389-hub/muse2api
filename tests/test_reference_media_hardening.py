@@ -66,7 +66,7 @@ with tempfile.TemporaryDirectory() as home:
     print("PASS: ten original uploads are skipped before delivering the actual result")
 
     engine._clear_attachments = lambda: None
-    engine._set_input_files = lambda paths: None
+    engine._set_input_files = lambda paths, *, wait_timeout: 0.0
     def disconnect(_):
         raise RuntimeError("synthetic CDP disconnect")
     engine.page = SimpleNamespace(js=disconnect)
