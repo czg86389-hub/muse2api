@@ -555,10 +555,21 @@ class MuseEngine:
         with request_proxy_context(proxy) as proxy_options:
             cur_cookies = dict(cookies or {})
             cur_exp = dict(expires or {})
+            import platform
+            is_win = platform.system() == "Windows"
+            ua = (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                if is_win else
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            )
+            sec_platform = '"Windows"' if is_win else '"Linux"'
             headers = {
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+                "User-Agent": ua,
                 "Origin": "https://muse.ai",
                 "Referer": "https://muse.ai/thread/new",
+                "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": sec_platform,
                 "Sec-Fetch-Site": "same-origin",
                 "Sec-Fetch-Mode": "cors",
                 "Sec-Fetch-Dest": "empty",
