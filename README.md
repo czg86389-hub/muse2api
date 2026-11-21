@@ -544,3 +544,17 @@ python tests/test_session_health.py
 缺失或损坏的时长信息会被拒绝。PDF 页数、文档解析和账号权限仍由 Muse 上游校验，
 本项目的附件确认只表示文件进入输入区，不保证上游能够读取每一种文件。
 Chromium 与服务必须能访问同一份素材文件；临时素材位于浏览器 profile 目录并在任务结束后清理。
+
+
+### 接入 Claude Code / Cursor (Anthropic Messages API)
+
+本项目原生兼容 Anthropic `/v1/messages` 接口规范。无需中转转换，可直接为 **Claude Code CLI** 或 **Cursor** 提供服务：
+
+```bash
+# 环境变量配置 (指向本地 muse2api 服务)
+export ANTHROPIC_BASE_URL=http://localhost:18610
+export ANTHROPIC_API_KEY=your-api-key   # 若未配置 CFG.api_key 可填任意值
+
+# 启动 Claude Code
+claude
+```
