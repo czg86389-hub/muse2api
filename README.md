@@ -422,6 +422,9 @@ Nginx 反代需把 `client_max_body_size` 调到 200M 左右，否则大素材�
 | `MUSE2API_BUSY_RETRIES` | `3` | muse.ai 回复“视频/图片服务过载、503、暂时不可用”时额外重试的次数（0 = 不重试）；拒绝生成、地区不支持、额度不足不重试 |
 | `MUSE2API_BUSY_RETRY_DELAY` | `20` | 上述重试前的等待秒数 |
 | `MUSE2API_BUSY_RETRY_MIN_REMAINING` | `180` | 剩余生成时限少于该秒数（加等待时间）时不再重试，直接返回失败 |
+| `MUSE2API_VIDEO_HEDGE` | `1` | muse.ai 最近出现过“过载/503”时，视频同时在 2 个空闲账号上生成，先出片者为准，另一路立即取消；设为 `0` 关闭。只影响视频，且要求至少 2 个空闲账号和 1 个空闲并发槽位 |
+| `MUSE2API_VIDEO_HEDGE_WINDOW` | `1200` | 最近一次过载回复后多少秒内保持并行模式（重启后会从最近的任务记录恢复） |
+| `MUSE2API_VIDEO_HEDGE_LEASE_TIMEOUT` | `5` | 第二路等待空闲账号的最长秒数，等不到就只跑一路 |
 | `MUSE2API_REF_IMAGE_LOCAL_FILES` | `0` | 默认禁止读取服务器本地路径；仅可信单用户部署可显式设为 `1` 恢复 |
 | `MUSE2API_REF_IMAGE_PRIVATE_FETCH` | `0` | 默认仅允许公网 URL，并逐跳检查 DNS/重定向、固定已检查 IP、不使用环境代理；显式设为 `1` 才允许私网/本机 URL |
 

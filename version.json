@@ -1,13 +1,13 @@
 {
-  "version": "1.6.13",
+  "version": "1.6.14",
   "updated_at": "2026-11-24",
   "repo": "https://github.com/czg86389-hub/muse2api",
   "highlights": [
-    "1.6.13 修复：2026-11-24 起 muse.ai 的视频服务时常返回“过载（503）/暂时不可用”，以前这种回复被当成模型拒绝，任务直接失败。现在会识别为临时故障，等待 20 秒后换号重试（默认最多再试 3 次，受生成时限约束）；重试仍失败时返回“Muse 媒体服务暂时不可用”而不是笼统的超时。",
-    "真正的拒绝（内容政策、地区不支持、额度不足）仍立即失败，不换号。新增环境变量 MUSE2API_BUSY_RETRIES / MUSE2API_BUSY_RETRY_DELAY / MUSE2API_BUSY_RETRY_MIN_REMAINING。无需升级浏览器插件。"
+    "1.6.14：muse.ai 过载时视频更快出结果。muse.ai 过载时，一次失败的视频要等 6~7 分钟才会说“503”，再换号重试又是一轮。现在只要最近 20 分钟内出现过过载回复，新的视频任务会同时在 2 个空闲账号上生成，先出片者为准，另一路立即取消（不记为账号异常、不再重试）。",
+    "muse.ai 正常时行为不变（单账号）；图片任务、指定账号的任务不并行。代价：过载期间每个视频消耗 2 个账号的额度。可用 MUSE2API_VIDEO_HEDGE=0 关闭，MUSE2API_VIDEO_HEDGE_WINDOW 调整时长。服务重启后会从最近的任务记录恢复并行状态。无需升级浏览器插件。"
   ],
   "highlights_en": [
-    "1.6.13 fix: since 2026-11-24 muse.ai's video service often answers \"overloaded (503) / temporarily unavailable\". That reply used to be treated as a model refusal and failed the task at once. It is now recognised as a temporary outage and retried on another account after 20 s (up to 3 extra attempts by default, within the generation time limit). If the retries still fail, the task reports the outage instead of a generic timeout.",
-    "Real refusals (content policy, unsupported region, no credits) still fail immediately without rotating. New settings: MUSE2API_BUSY_RETRIES / MUSE2API_BUSY_RETRY_DELAY / MUSE2API_BUSY_RETRY_MIN_REMAINING. No extension upgrade is needed."
+    "1.6.14: faster videos while muse.ai is overloaded. A failed video turn takes 6-7 minutes before muse.ai reports the 503, and the retry is another full round. For 20 minutes after any overload reply, new video tasks now run on two idle accounts at once; the first finished video wins and the other attempt is cancelled at once (not booked as an account fault, not retried).",
+    "Nothing changes while muse.ai is healthy (one account); image tasks and tasks pinned to an account never run in parallel. Cost: during an overload each video uses two accounts' allowance. MUSE2API_VIDEO_HEDGE=0 turns it off, MUSE2API_VIDEO_HEDGE_WINDOW sets the duration. After a restart the state is restored from recent task records. No extension upgrade is needed."
   ]
 }
