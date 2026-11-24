@@ -119,6 +119,13 @@ class Config:
     tool_protocol: bool = field(
         default_factory=lambda: _env("MUSE2API_TOOL_PROTOCOL", "0").strip() != "0")
 
+    # 用量估算（默认关闭）。muse.ai 网页不返回 token 数，所以 usage 默认全是 0。
+    # 设 MUSE2API_ESTIMATE_USAGE=1 后，对话类接口（/v1/chat/completions、/v1/responses）
+    # 按字符粗估 token：CJK 字符每字算 1，其余每 4 个字符算 1；响应头带
+    # X-Muse2api-Usage: estimated，提醒下游这是估算值，不是上游计量。
+    estimate_usage: bool = field(
+        default_factory=lambda: _env("MUSE2API_ESTIMATE_USAGE", "0").strip() == "1")
+
     # 保活设置：是否对已禁用的账号执行自动保活，**默认关闭**。
     # 开启后，被管理员在后台手动禁用的账号仍会由后台守护进程执行自动保活与 VM 唤醒，
     # 保持会话活性不失效，但依然不会参与正常业务生图、生视频与对话轮转调度。
