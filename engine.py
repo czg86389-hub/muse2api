@@ -325,6 +325,15 @@ class MuseEngine:
         self.browser: CDP | None = None
         self._local = threading.local()
         self._start_lock = threading.Lock()
+        # ---- session slots：按 bot+thread 键分槽钉住生成会话（A' 规格 §2）----
+        self._page_slots: dict[str, dict] = {}
+        self._key_local = threading.local()
+        self._slot_locks: dict[str, threading.Lock] = {}
+        self._slot_locks_guard = threading.Lock()
+        try:
+            self._session_ttl = float(os.getenv("MUSE2API_SESSION_TTL_SECONDS", "3600") or 0)
+        except Exception:
+            self._session_ttl = 3600.0
         self._active_contexts: set[str] = set()
         self._contexts_lock = threading.Lock()
         self._proxy_relays: set[HTTPProxyRelay] = set()
@@ -341,29 +350,101 @@ class MuseEngine:
             self._local = local
         return local
 
+    # ---------------- session slots（按 bot+thread 键钉住生成会话） ----------------
+    # 无键（default）路径一律走上面的 thread-local，语义与上游逐字节一致；
+    # 带键路径把 page / acc / ctx / born / proxy 存在 self._page_slots[key] 里，
+    # 键本身用线程本地保存（self._key_local），避免全局"当前键"被并发请求互相覆盖。
+    def _active_key(self) -> str:
+        return getattr(self._key_local, "key", None) or "default"
+
+    def use_key(self, key: str | None):
+        self._key_local.key = key or None
+
+    def _slot(self) -> dict:
+        return self._page_slots.setdefault(self._active_key(), {})
+
+    def pinned_acc(self, key: str | None):
+        if not key:
+            return None
+        slot = self._page_slots.get(key) or {}
+        return slot.get("acc")
+
+    def session_lock(self, key: str) -> threading.Lock:
+        with self._slot_locks_guard:
+            lk = self._slot_locks.get(key)
+            if lk is None:
+                lk = threading.Lock()
+                self._slot_locks[key] = lk
+            return lk
+
+    def _proxy_config_matches(self, proxy) -> bool:
+        """页面所属路由是否与本次请求一致：无键看原 thread-local，带键看槽位快照。
+        v1.6.12 的 ensure_page 复用门新增了 proxy_config 条件，而 proxy_config 是
+        thread-local：带键请求每次换线程，必须改成读槽位，否则带代理的账号每个请求都重建。"""
+        if self._active_key() == "default":
+            return getattr(self._ensure_local(), "proxy_config", None) == proxy
+        return self._slot().get("proxy") == proxy
+
+    def _set_proxy_config(self, proxy):
+        if self._active_key() == "default":
+            self._ensure_local().proxy_config = proxy
+        else:
+            self._slot()["proxy"] = proxy
+
+    def expire_stale_slot(self):
+        """槽位年龄超 TTL 时在下一次带键请求前关页重建（A' 规格 §2.5 时长轮换）。"""
+        key = self._active_key()
+        if key == "default" or self._session_ttl <= 0:
+            return
+        slot = self._page_slots.get(key) or {}
+        born = slot.get("born") or 0
+        if slot.get("page") is not None and born and (time.time() - born > self._session_ttl):
+            log.info("[session] expire key=%s age=%.0fs ttl=%.0fs", key, time.time() - born, self._session_ttl)
+            self._close_page()
+            self._page_slots.pop(key, None)
+
     @property
     def page(self) -> CDP | None:
-        return getattr(self._ensure_local(), "page", None)
+        if self._active_key() == "default":
+            return getattr(self._ensure_local(), "page", None)
+        return self._slot().get("page")
 
     @page.setter
     def page(self, val: CDP | None):
-        self._ensure_local().page = val
+        if self._active_key() == "default":
+            self._ensure_local().page = val
+            return
+        slot = self._slot()
+        prev = slot.get("page")
+        slot["page"] = val
+        if val is not None and prev is None:
+            slot["born"] = time.time()
 
     @property
     def current_acc_id(self) -> str | None:
-        return getattr(self._ensure_local(), "current_acc_id", None)
+        if self._active_key() == "default":
+            return getattr(self._ensure_local(), "current_acc_id", None)
+        return self._slot().get("acc")
 
     @current_acc_id.setter
     def current_acc_id(self, val: str | None):
-        self._ensure_local().current_acc_id = val
+        if self._active_key() == "default":
+            self._ensure_local().current_acc_id = val
+            return
+        self._slot()["acc"] = val
 
     @property
     def current_context_id(self) -> str | None:
-        return getattr(self._ensure_local(), "current_context_id", None)
+        if self._active_key() == "default":
+            return getattr(self._ensure_local(), "current_context_id", None)
+        return self._slot().get("ctx")
 
     @current_context_id.setter
     def current_context_id(self, val: str | None):
-        self._ensure_local().current_context_id = val
+        if self._active_key() == "default":
+            self._ensure_local().current_context_id = val
+            return
+        self._slot()["ctx"] = val
 
     # ---------------- 浏览器生命周期 ----------------
     def _debug_url(self):
@@ -528,6 +609,7 @@ class MuseEngine:
             self.current_context_id = ctx_id
             with self._contexts_lock:
                 self._active_contexts.add(ctx_id)
+            log.info("[session] context_open key=%s ctx=%s", self._active_key(), ctx_id)
             t_res = self.browser.send("Target.createTarget", {
                 "url": "about:blank", "browserContextId": ctx_id,
             })
@@ -807,13 +889,17 @@ class MuseEngine:
         proxy = copy.deepcopy(local.proxy_snapshot if hasattr(local, "proxy_snapshot")
                               else resolver(account_id) if resolver and account_id else None)
         if (self.page is not None
-                and getattr(self._ensure_local(), "proxy_config", None) == proxy
+                and self._proxy_config_matches(proxy)
                 and (account_id is None or getattr(self, "current_acc_id", None) == account_id)):
             try:
                 if self.page.js("!!document.querySelector('textarea')") and self._wait_ws_ready(self.page, timeout=8.0):
+                    log.info("[session] reuse key=%s acc=%s", self._active_key(), account_id)
                     return self.page
             except Exception:
                 pass
+        if self.page is not None:
+            log.info("[session] rebuild key=%s slot_acc=%s req_acc=%s",
+                     self._active_key(), self.current_acc_id, account_id)
         self._close_page()
         # 仅当距离上次 HTTP 续签超过 10 分钟时才在主链路调用 /api/session，避免每次切号重复阻塞
         last_map = getattr(self, "_last_http_renew", None)
@@ -848,7 +934,7 @@ class MuseEngine:
 
         page = self._open_page(proxy=proxy) if proxy else self._open_page()
         self.page = page  # Cleanup must also own pages that never become ready.
-        self._ensure_local().proxy_config = proxy
+        self._set_proxy_config(proxy)
         self._apply_cookies(page, cookies, expires)
         page.send("Page.navigate", {"url": "https://muse.ai/thread/new"})
         if self._wait_ws_ready(page, timeout=self.cfg.login_wait):

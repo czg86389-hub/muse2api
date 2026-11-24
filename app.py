@@ -444,13 +444,26 @@ def _renew_and_persist(acc_id: str, wake_vm: bool = True, force: bool = False) -
 
 
 def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
-                     timeout: int, account_id: str | None):
+                     timeout: int, account_id: str | None,
+                     session_key: str | None = None):
     """Acquire a generation slot before the account lease; release both after cleanup."""
     import queue
     q = queue.Queue(maxsize=100)
     stop_event = threading.Event()
 
     def worker():
+        # 带键请求：本线程认领该键并持有本键锁到底（同键串行、异键并行）；
+        # 无键请求完全不进这段，保持上游原语义。
+        _keyed = bool(session_key)
+        _key_lock = None
+        if _keyed:
+            engine.use_key(session_key)
+            _key_lock = engine.session_lock(session_key)
+            _key_lock.acquire()
+            try:
+                engine.expire_stale_slot()
+            except Exception:
+                pass
         cur_id = account_id
         cur_cookies = cookies
         cur_exp = expires
@@ -532,7 +545,11 @@ def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
             try:
                 if leased_id:
                     ACCOUNT_POOL.release(leased_id)
-                engine.close_current_page()
+                if _keyed:
+                    # 带键：保槽不关页（下次同键复用），只解除本线程的键绑定
+                    engine.use_key(None)
+                else:
+                    engine.close_current_page()
             except Exception as exc:
                 log.warning("对话清理失败: %s", type(exc).__name__)
             finally:
@@ -541,6 +558,8 @@ def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
                 finally:
                     if slot_acquired:
                         GEN_LOCK.release()
+                    if _key_lock is not None:
+                        _key_lock.release()
                     q.put(("done", None))
 
     threading.Thread(target=worker, daemon=True).start()
@@ -614,6 +633,7 @@ class ChatRequest(BaseModel):
     temperature: float | None = None
     max_tokens: int | None = None
     timeout: int | None = None
+    user: str | None = None        # 会话键：按 bot+thread 钉住生成会话；不带 = legacy
     prompt: str | None = None       # 兼容把 prompt 直接放顶层的客户端
     # 下面这些声明出来只是为了「能读到」，muse.ai 端不做对应处理
     tools: list | None = None
@@ -1829,7 +1849,12 @@ async def chat_completions(req: ChatRequest, _=Depends(auth)):
 
     model = resolve_model(req.model, default="muse-spark")
     timeout = int(req.timeout or CFG.chat_timeout)
-    acc = store.pick_account(rotate=True)
+    # 会话键（OpenAI 标准 user 字段）：带键 → 严格钉住该键已钉住的账号（rotate=False，
+    # 不越过 sticky）；钉住账号不健康时 store 回落到健康账号，ensure_page 随即重钉。
+    # 不带键 → 原样走上游的 rotate=True 选号。
+    _pinned = engine.pinned_acc(req.user)
+    acc = (store.pick_account(rotate=False, preferred_id=_pinned) if _pinned
+           else store.pick_account(rotate=True))
     if not acc:
         raise HTTPException(400, "没有可用账号，请先在管理页面导入 cookie")
 
@@ -1854,7 +1879,8 @@ async def chat_completions(req: ChatRequest, _=Depends(auth)):
                 # 握手建立瞬间立即发送 role: assistant 首包，让下游客户端秒级捕获光标
                 yield _sse(_chat_chunk(cid, created, model, {"role": "assistant"}))
 
-                stream_gen = safe_chat_stream(cookies, prompt, expires, timeout, account_id=acc_id)
+                stream_gen = safe_chat_stream(cookies, prompt, expires, timeout, account_id=acc_id,
+                                              session_key=req.user)
                 if not tool_note:
                     for chunk in stream_gen:
                         for piece in _pace_text(chunk):
@@ -1916,7 +1942,8 @@ async def chat_completions(req: ChatRequest, _=Depends(auth)):
         return StreamingResponse(sync_stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
     def run() -> str:
-        return "".join(safe_chat_stream(cookies, prompt, expires, timeout, account_id=acc_id))
+        return "".join(safe_chat_stream(cookies, prompt, expires, timeout, account_id=acc_id,
+                                        session_key=req.user))
 
     try:
         text = await asyncio.to_thread(run)
