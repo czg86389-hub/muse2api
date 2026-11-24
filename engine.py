@@ -241,6 +241,14 @@ class MuseModelRefusalError(MuseGenerationError):
     """Muse completed the turn with text instead of the requested media."""
 
 
+class MuseServiceBusyError(MuseGenerationError):
+    """Muse's own media backend reported a temporary outage (overload / HTTP 503).
+
+    Unlike a refusal this says nothing about the prompt or the account, so the
+    generation is retried after a short pause while the time budget allows.
+    """
+
+
 class RefImageSafetyError(MuseGenerationError):
     """A reference image source is forbidden by the configured input policy."""
 
@@ -1389,6 +1397,9 @@ class MuseEngine:
                         last_txt, txt_stable = cur_txt, 0
                     if txt_stable >= 15 and elapsed > 8.0:
                         clean = self._clean_model_text(cur_txt)
+                        if self._media_service_busy(cur_txt):
+                            raise MuseServiceBusyError(
+                                f"Muse 媒体服务暂时不可用（上游过载/503），本次未生成媒体: {clean}")
                         raise MuseModelRefusalError(
                             f"模型未生成媒体，仅返回文本: {clean}")
                 else:
@@ -1439,6 +1450,29 @@ class MuseEngine:
             r"\b(?:generated|created|rendered|completed|ready)\b|"
             r"\b(?:generated|created|rendered|completed)\b[^.\n]{0,32}"
             r"\b(?:video|clip|image|picture|animation)\b", text, re.I))
+
+    # Muse's agent reports its own media-backend outages in prose, e.g.
+    # "视频服务那边暂时过载了（503）" / "视频生成服务暂时不可用" / "video service is overloaded".
+    _SERVICE_BUSY_RE = re.compile(
+        r"(?:\b50[234]\b|过载|超载|繁忙|拥挤|"
+        r"(?:服务|接口|后端|那边)[^。！？!?\n]{0,12}(?:暂时)?(?:不可用|无法使用|出错|返回(?:了)?(?:错误|不可用))|"
+        r"暂时不可用|暂不可用|"
+        r"\boverload(?:ed)?\b|\btemporarily unavailable\b|\bservice unavailable\b|"
+        r"\b(?:service|server|backend)\b[^.\n]{0,40}\b(?:unavailable|down|busy|error)\b)",
+        re.I)
+    # Content/policy/region problems are not transient even if the reply also says "try again".
+    _SERVICE_BUSY_EXCLUDE_RE = re.compile(
+        r"国家|地区|country|region|违规|政策|policy|安全|safety|不允许|not allowed|"
+        r"额度|积分|credits?\b|quota|上限|limit reached",
+        re.I)
+
+    @classmethod
+    def _media_service_busy(cls, text: str) -> bool:
+        """True only when the reply blames a temporary outage of Muse's media service."""
+        clean = cls._clean_model_text(text, limit=2000)
+        if not clean or cls._SERVICE_BUSY_EXCLUDE_RE.search(clean):
+            return False
+        return bool(cls._SERVICE_BUSY_RE.search(clean))
 
     @classmethod
     def _media_refusal_text(cls, text: str, expect: str) -> str:

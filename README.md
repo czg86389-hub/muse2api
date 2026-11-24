@@ -419,6 +419,9 @@ Nginx 反代需把 `client_max_body_size` 调到 200M 左右，否则大素材�
 | `MUSE2API_IMAGE_TIMEOUT` | `240` | 生图超时上限（秒） |
 | `MUSE2API_VIDEO_TIMEOUT` | `600` | 生视频超时上限（秒） |
 | `MUSE2API_CHAT_TIMEOUT` | `300` | 对话生成超时上限（秒） |
+| `MUSE2API_BUSY_RETRIES` | `3` | muse.ai 回复“视频/图片服务过载、503、暂时不可用”时额外重试的次数（0 = 不重试）；拒绝生成、地区不支持、额度不足不重试 |
+| `MUSE2API_BUSY_RETRY_DELAY` | `20` | 上述重试前的等待秒数 |
+| `MUSE2API_BUSY_RETRY_MIN_REMAINING` | `180` | 剩余生成时限少于该秒数（加等待时间）时不再重试，直接返回失败 |
 | `MUSE2API_REF_IMAGE_LOCAL_FILES` | `0` | 默认禁止读取服务器本地路径；仅可信单用户部署可显式设为 `1` 恢复 |
 | `MUSE2API_REF_IMAGE_PRIVATE_FETCH` | `0` | 默认仅允许公网 URL，并逐跳检查 DNS/重定向、固定已检查 IP、不使用环境代理；显式设为 `1` 才允许私网/本机 URL |
 

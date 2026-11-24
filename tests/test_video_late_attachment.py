@@ -16,12 +16,17 @@ ROOT = Path(__file__).resolve().parents[1]
 def load_waiter(path):
     tree = ast.parse(Path(path).read_text(encoding="utf-8"))
     engine = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "MuseEngine")
-    names = {"_wait_attachment", "_clean_model_text", "_media_refusal_text", "_media_status_pending"}
-    methods = [n for n in engine.body if isinstance(n, ast.FunctionDef) and n.name in names]
+    names = {"_wait_attachment", "_clean_model_text", "_media_refusal_text", "_media_status_pending",
+             "_media_service_busy"}
+    methods = [n for n in engine.body if (isinstance(n, ast.FunctionDef) and n.name in names) or (
+        isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id.startswith("_SERVICE_BUSY")
+                                          for t in n.targets))]
     module = ast.Module(body=[
         ast.ClassDef(name="MuseGenerationError", bases=[ast.Name(id="RuntimeError", ctx=ast.Load())],
                      keywords=[], body=[ast.Pass()], decorator_list=[]),
         ast.ClassDef(name="MuseModelRefusalError", bases=[ast.Name(id="MuseGenerationError", ctx=ast.Load())],
+                     keywords=[], body=[ast.Pass()], decorator_list=[]),
+        ast.ClassDef(name="MuseServiceBusyError", bases=[ast.Name(id="MuseGenerationError", ctx=ast.Load())],
                      keywords=[], body=[ast.Pass()], decorator_list=[]),
         ast.ClassDef(name="Waiter", bases=[], keywords=[], body=methods, decorator_list=[]),
     ], type_ignores=[])

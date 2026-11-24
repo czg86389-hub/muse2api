@@ -1,13 +1,13 @@
 {
-  "version": "1.6.12",
-  "updated_at": "2026-11-19",
+  "version": "1.6.13",
+  "updated_at": "2026-11-24",
   "repo": "https://github.com/czg86389-hub/muse2api",
   "highlights": [
-    "修复 #62：muse.ai 从 2026-11-19 起聊天里只显示约 498px 的缩略图，生成的图片因此变小。现在图片任务会打开 muse.ai 的图片查看器取原图（实测 1344x1792），取不到时仍返回缩略图并在日志里提示。",
-    "只影响图片任务；视频、对话与参考素材上传不变。无需升级浏览器插件。"
+    "1.6.13 修复：2026-11-24 起 muse.ai 的视频服务时常返回“过载（503）/暂时不可用”，以前这种回复被当成模型拒绝，任务直接失败。现在会识别为临时故障，等待 20 秒后换号重试（默认最多再试 3 次，受生成时限约束）；重试仍失败时返回“Muse 媒体服务暂时不可用”而不是笼统的超时。",
+    "真正的拒绝（内容政策、地区不支持、额度不足）仍立即失败，不换号。新增环境变量 MUSE2API_BUSY_RETRIES / MUSE2API_BUSY_RETRY_DELAY / MUSE2API_BUSY_RETRY_MIN_REMAINING。无需升级浏览器插件。"
   ],
   "highlights_en": [
-    "Fix #62: since 2026-11-19 muse.ai shows only a ~498px thumbnail in the chat, so generated images came back small. Image tasks now open muse.ai's image viewer and return the full-size picture (measured 1344x1792); if it cannot be opened the thumbnail is still returned and a warning is logged.",
-    "Images only; video, chat and reference uploads are unchanged. No extension upgrade is needed."
+    "1.6.13 fix: since 2026-11-24 muse.ai's video service often answers \"overloaded (503) / temporarily unavailable\". That reply used to be treated as a model refusal and failed the task at once. It is now recognised as a temporary outage and retried on another account after 20 s (up to 3 extra attempts by default, within the generation time limit). If the retries still fail, the task reports the outage instead of a generic timeout.",
+    "Real refusals (content policy, unsupported region, no credits) still fail immediately without rotating. New settings: MUSE2API_BUSY_RETRIES / MUSE2API_BUSY_RETRY_DELAY / MUSE2API_BUSY_RETRY_MIN_REMAINING. No extension upgrade is needed."
   ]
 }

@@ -53,7 +53,7 @@ from engine import (ESSENTIAL_COOKIES, MAX_REFERENCE_IMAGE_BYTES,
                     MAX_REFERENCE_IMAGES, MAX_REFERENCE_TOTAL_BYTES,
                     REFERENCE_MIME_EXT, MuseAuthError, MuseEngine, MuseGenerationError,
                     MuseModelRefusalError, RefImageSafetyError, reference_kind)
-from engine import MuseProxyError, MuseSessionUnavailable
+from engine import MuseProxyError, MuseServiceBusyError, MuseSessionUnavailable
 from store import Store, account_expiry, min_expiry
 from generation_timing import QueuePolicy, QueueSettings, TaskTiming
 from proxy import normalize_server, request_proxy_context, split_proxy_url
@@ -62,6 +62,11 @@ from thumbnails import (VIDEO_FORMATS, ThumbnailUnavailable, clear_thumbnail,
 
 import sys
 log = logging.getLogger("muse2api")
+
+# Muse media-backend outages ("视频服务过载（503）") are retried; see _run_generation_locked.
+BUSY_RETRIES = max(0, int(os.environ.get("MUSE2API_BUSY_RETRIES", "3")))
+BUSY_RETRY_DELAY = max(0.0, float(os.environ.get("MUSE2API_BUSY_RETRY_DELAY", "20")))
+BUSY_RETRY_MIN_REMAINING = max(0.0, float(os.environ.get("MUSE2API_BUSY_RETRY_MIN_REMAINING", "180")))
 log.setLevel(logging.INFO)
 if not log.handlers:
     _h = logging.StreamHandler(sys.stdout)
@@ -1192,12 +1197,31 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
     try:
         if on_acquired:
             on_acquired()
-        for attempt in range(2):
+        # Two attempts for ordinary failures; a temporary Muse media outage
+        # (MuseServiceBusyError) earns up to BUSY_RETRIES extra attempts after a pause.
+        attempt_limit, busy_used, attempt, first_busy = 2, 0, -1, None
+        while True:
+            attempt += 1
+            busy = isinstance(last_exc, MuseServiceBusyError)
+            if busy:
+                first_busy = first_busy or last_exc
+            if busy and busy_used < BUSY_RETRIES:
+                busy_used += 1
+                attempt_limit += 1
+            if attempt >= attempt_limit:
+                break
             # Preserve the original failure, including a refusal at the deadline boundary.
             if isinstance(last_exc, MuseModelRefusalError) or time.monotonic() >= deadline:
                 if last_exc is not None:
-                    raise last_exc
+                    break
                 raise MuseGenerationError("生成时限已到（不含排队时间），已停止等待")
+            if busy:
+                # Each Muse turn already retries internally for minutes; only start
+                # another one when it can still finish inside the generation budget.
+                if deadline - time.monotonic() < BUSY_RETRY_DELAY + BUSY_RETRY_MIN_REMAINING:
+                    break
+                log.warning("Muse 媒体服务暂时不可用，%.0f 秒后第 %d 次重试", BUSY_RETRY_DELAY, attempt + 1)
+                time.sleep(BUSY_RETRY_DELAY)
             if attempt > 0:
                 old_id = cur_acc["id"] if cur_acc else None
                 if old_id:
@@ -1208,7 +1232,8 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
                 except (MuseAuthError, MuseGenerationError):
                     raise last_exc
                 cur_acc = alt
-                if not alt or (old_id and alt["id"] == old_id):
+                # An outage is not tied to the account, so the same one may retry it.
+                if not alt or (old_id and alt["id"] == old_id and not busy):
                     break
             _generation_callback(on_account, cur_acc["id"], attempt + 1)
             try:
@@ -1253,6 +1278,10 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
                 last_exc = MuseGenerationError(f"生成失败: {exc}")
             if on_error:
                 on_error(str(last_exc))
+        # A retry that only ran out of time says less than the outage that caused it.
+        if first_busy is not None and not isinstance(last_exc, (MuseServiceBusyError, MuseModelRefusalError,
+                                                                 MuseAuthError)):
+            raise first_busy
         raise last_exc
     finally:
         if cur_acc:
