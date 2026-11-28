@@ -503,12 +503,12 @@ python tests/test_ref_image_safety.py
 - 🌟 **[@Yeadon8888](https://github.com/Yeadon8888)** (PR [#32](https://github.com/czg86389-hub/muse2api/pull/32)) —— 增加有序多参考图生图、编辑与图生视频支持
 - 🌟 **[@pandalaohe](https://github.com/pandalaohe)** (PR [#24](https://github.com/czg86389-hub/muse2api/pull/24)) —— 提供参考图本地文件与私网 URL 安全策略、重定向复查和 DNS 重绑定防护
 - 🌟 **[@QuartzWarrior](https://github.com/QuartzWarrior)** (PR [#25](https://github.com/czg86389-hub/muse2api/pull/25)) —— 贡献账号独立 HTTP 代理基础、认证转接、配置界面与隔离回归测试
-- [@Roins-hub](https://github.com/Roins-hub)：新版 Muse 输入区兼容、视频/音频/文档参考素材（PR #40）。
-
-- [@WXJJ0520](https://github.com/WXJJ0520)：限定当前输入区域的发送按钮，修复侧栏历史误匹配并增加真实 Chromium 回归（PR [#48](https://github.com/czg86389-hub/muse2api/pull/48)）。
-
-- [@Yeadon8888](https://github.com/Yeadon8888)：保留未分配会话响应中的 Cookie 轮换，避免后续继续使用失效旧值（PR [#60](https://github.com/czg86389-hub/muse2api/pull/60)）。
-- [@ALight777](https://github.com/ALight777)：当前窗口 Cookie 存储区隔离、独立排队预算、真实版本报告与只读更新检查、视频缩略图（PR [#58](https://github.com/czg86389-hub/muse2api/pull/58)、[#55](https://github.com/czg86389-hub/muse2api/pull/55)、[#57](https://github.com/czg86389-hub/muse2api/pull/57)、[#51](https://github.com/czg86389-hub/muse2api/pull/51)）。
+- 🌟 **[@Roins-hub](https://github.com/Roins-hub)** (PR [#40](https://github.com/czg86389-hub/muse2api/pull/40)) —— 新版 Muse 输入区兼容、视频/音频/文档参考素材支持
+- 🌟 **[@WXJJ0520](https://github.com/WXJJ0520)** (PR [#48](https://github.com/czg86389-hub/muse2api/pull/48)) —— 限定当前输入区域的发送按钮，修复侧栏历史误匹配并增加真实 Chromium 回归
+- 🌟 **[@Yeadon8888](https://github.com/Yeadon8888)** (PR [#60](https://github.com/czg86389-hub/muse2api/pull/60)) —— 保留未分配会话响应中的 Cookie 轮换，避免后续继续使用失效旧值
+- 🌟 **[@ALight777](https://github.com/ALight777)** (PR [#51](https://github.com/czg86389-hub/muse2api/pull/51), [#55](https://github.com/czg86389-hub/muse2api/pull/55), [#57](https://github.com/czg86389-hub/muse2api/pull/57), [#58](https://github.com/czg86389-hub/muse2api/pull/58)) —— 当前窗口 Cookie 存储区隔离、独立排队预算、真实版本报告与只读更新检查、视频缩略图
+- 🌟 **[@Aster110](https://github.com/Aster110)** (PR [#66](https://github.com/czg86389-hub/muse2api/pull/66), [#67](https://github.com/czg86389-hub/muse2api/pull/67)) —— 补充小内存 VPS 与前置双 Key 网关部署要点，新增可选的对话用量估算（`MUSE2API_ESTIMATE_USAGE`）及离线单测
+- 🌟 **[@hikenshi](https://github.com/hikenshi)** (Issue [#68](https://github.com/czg86389-hub/muse2api/issues/68)) —— 排查并定位 Docker 环境下 Chromium / `chrome_crashpad` 僵尸进程累积问题并提供根因修复方案
 
 欢迎大家提交 PR 与 Issue，共同把项目打磨得更强更好用！
 
