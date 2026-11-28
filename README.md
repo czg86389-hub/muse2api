@@ -57,8 +57,8 @@ Extension 1.0.3 requires a manual reload in every browser profile. Update checks
 
 ## 🌟 核心特性
 
-- 💬 **标准对话接口（Chat Completions & Responses API）**
-  - 完全兼容 `/v1/chat/completions` 与新版 Codex 默认使用的 `/v1/responses` 标准协议。
+- 💬 **标准对话接口（Chat Completions、Responses & Anthropic Messages API）**
+  - 兼容 `/v1/chat/completions`、新版 Codex 默认使用的 `/v1/responses`，以及 Anthropic `/v1/messages`（纯文本对话，支持 `x-api-key` 鉴权；不支持结构化工具调用）。
   - 原生支持 SSE 流式打字机输出（`stream=True`）与同步完整返回，内置热标签页与 Noise WebSocket 隧道亲和复用，**连续对话首字延迟仅需 2~3 秒**。
   - 支持多轮对话上下文、System Prompt 设定。
   - 内置模型智能别名映射，`gpt-4o`、`gpt-5`、`claude-sonnet-4`、`deepseek-chat` 等常用模型名自动路由。
@@ -293,6 +293,7 @@ Authorization: Bearer <MUSE2API_KEY>
 ```http
 Authorization: Bearer <你的MUSE2API_KEY>
 ```
+也支持 Anthropic 协议客户端常用的 `x-api-key: <你的MUSE2API_KEY>` 请求头。
 
 ### 1. 对话补全（Chat Completions）
 
@@ -307,6 +308,32 @@ curl -X POST "http://localhost:18610/v1/chat/completions" \
     ],
     "stream": false
   }'
+```
+
+### 1.1 Anthropic Messages API（`/v1/messages`）
+
+提供 Anthropic `/v1/messages` 兼容端点，支持流式（SSE）与非流式返回，鉴权支持 `x-api-key` 或 `Authorization: Bearer` 请求头。
+
+> **能力边界说明**：与 `/v1/responses` 一致，`/v1/messages` **仅支持纯文本对话，不支持结构化工具调用**。请求中的历史 `tool_use` / `tool_result` 内容块仅会被扁平化为纯文本上下文，不会处理 `tools` 定义，输出也固定返回纯文本块（`text` / `text_delta`）与 `stop_reason: "end_turn"`。因此**不适用于依赖结构化 `tool_use` 闭环的 Agent 场景**（如 Claude Code / Cursor Agent 的工具执行流程），仅适合纯文本对话场景。
+
+```bash
+curl -X POST "http://localhost:18610/v1/messages" \
+  -H "x-api-key: m2a_your_secret_key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "用三句话介绍 FastAPI"}
+    ],
+    "stream": false
+  }'
+```
+
+离线回归检查（无需真实账号与网络）：
+
+```bash
+python tests/test_anthropic_messages.py
 ```
 
 ### 2. 文生图（Image Generation）
@@ -469,7 +496,7 @@ Nginx 反代需把 `client_max_body_size` 调到 200M 左右，否则大素材�
 | `MUSE2API_VIDEO_HEDGE_LEASE_TIMEOUT` | `5` | 第二路等待空闲账号的最长秒数，等不到就只跑一路 |
 | `MUSE2API_REF_IMAGE_LOCAL_FILES` | `0` | 默认禁止读取服务器本地路径；仅可信单用户部署可显式设为 `1` 恢复 |
 | `MUSE2API_REF_IMAGE_PRIVATE_FETCH` | `0` | 默认仅允许公网 URL，并逐跳检查 DNS/重定向、固定已检查 IP、不使用环境代理；显式设为 `1` 才允许私网/本机 URL |
-| `MUSE2API_ESTIMATE_USAGE` | `0` | 对话接口（chat / responses）的 `usage` 默认全 0（muse.ai 网页不给 token 数）；设为 `1` 时按字符粗估（CJK 每字 1，其余每 4 字符 1），并加响应头 `X-Muse2api-Usage: estimated`。只是估算，不是上游计量 |
+| `MUSE2API_ESTIMATE_USAGE` | `0` | 对话接口（chat / responses / messages）的 `usage` 默认全 0（muse.ai 网页不给 token 数）；设为 `1` 时按字符粗估（CJK 每字 1，其余每 4 字符 1），并加响应头 `X-Muse2api-Usage: estimated`。只是估算，不是上游计量 |
 
 两个开关默认均为 `0`：所有生图、图像编辑、图片任务及视频接口都禁止服务器本地路径和私网/本机 URL。Data URL、有效 Base64 和公网 URL 正常使用。只有确认调用方可信且确有需要时，才显式设为 `1` 恢复对应旧能力。
 策略拒绝、下载失败、MIME 或大小不合规都会在提交任务前返回 HTTP 400，不会创建一个随后才失败的后台任务。

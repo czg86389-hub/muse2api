@@ -120,7 +120,7 @@ class Config:
         default_factory=lambda: _env("MUSE2API_TOOL_PROTOCOL", "0").strip() != "0")
 
     # 用量估算（默认关闭）。muse.ai 网页不返回 token 数，所以 usage 默认全是 0。
-    # 设 MUSE2API_ESTIMATE_USAGE=1 后，对话类接口（/v1/chat/completions、/v1/responses）
+    # 设 MUSE2API_ESTIMATE_USAGE=1 后，对话类接口（/v1/chat/completions、/v1/responses、/v1/messages）
     # 按字符粗估 token：CJK 字符每字算 1，其余每 4 个字符算 1；响应头带
     # X-Muse2api-Usage: estimated，提醒下游这是估算值，不是上游计量。
     estimate_usage: bool = field(

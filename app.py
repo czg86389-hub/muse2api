@@ -371,15 +371,18 @@ def resolve_model(name: str | None, default: str = "muse-image") -> str:
 
 
 # ------------------------- 鉴权 -------------------------
-def auth(authorization: str | None = Header(default=None)):
+def auth(authorization: str | None = Header(default=None),
+         x_api_key: str | None = Header(default=None, alias="x-api-key")):
     if not CFG.api_key:
         return True
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(401, "缺少 Authorization: Bearer <key>")
-    parts = authorization.split(None, 1)
-    token = parts[1].strip() if len(parts) > 1 else ""
+    token = ""
+    if x_api_key and x_api_key.strip():
+        token = x_api_key.strip()
+    elif authorization and authorization.lower().startswith("bearer "):
+        parts = authorization.split(None, 1)
+        token = parts[1].strip() if len(parts) > 1 else ""
     if not token or token != CFG.api_key:
-        raise HTTPException(401, "API key 无效")
+        raise HTTPException(401, "API key 无效或缺失 (需提供 x-api-key 或 Authorization: Bearer)")
     return True
 
 
@@ -2104,6 +2107,168 @@ async def responses_api(req: ResponsesRequest, response: Response = None, _=Depe
     if response is not None:
         response.headers.update(_usage_headers())
     return envelope("completed", text)
+
+
+class AnthropicMessagesRequest(BaseModel):
+    model: str = "claude-3-5-sonnet-20241022"
+    messages: list[dict] = Field(default_factory=list)
+    system: Any = None
+    max_tokens: int | None = 4096
+    stream: bool = False
+    temperature: float | None = None
+    tools: list[dict] | None = None
+
+
+@app.post("/v1/messages")
+async def anthropic_messages(req: AnthropicMessagesRequest, response: Response = None, _=Depends(auth)):
+    """Anthropic Messages API 兼容端点 —— 仅支持纯文本对话（含流式事件）。
+
+    只实现纯文本子集：文本进 → 文本出（历史 tool_use / tool_result 块仅
+    扁平化为纯文本上下文，不处理 req.tools，也不会返回结构化的 tool_use，
+    固定输出 text_delta 与 stop_reason: "end_turn"）。
+    关于工具调用的边界见 README。
+    """
+    system_text = ""
+    if isinstance(req.system, str):
+        system_text = req.system.strip()
+    elif isinstance(req.system, list):
+        parts = []
+        for item in req.system:
+            if isinstance(item, dict) and item.get("text"):
+                parts.append(str(item["text"]))
+            elif isinstance(item, str):
+                parts.append(item)
+        system_text = "\n".join(parts).strip()
+
+    turns = []
+    for m in req.messages:
+        role = (m.get("role") or "").strip().lower()
+        content = m.get("content")
+        text = ""
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            text_blocks = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text":
+                        text_blocks.append(str(block.get("text") or ""))
+                    elif block.get("type") == "tool_result":
+                        content_sub = block.get("content")
+                        if isinstance(content_sub, list):
+                            sub_texts = [str(x.get("text") or "") for x in content_sub if isinstance(x, dict)]
+                            text_blocks.append("【工具结果】\n" + "\n".join(sub_texts))
+                        else:
+                            text_blocks.append("【工具结果】\n" + str(content_sub or ""))
+                    elif block.get("type") == "tool_use":
+                        text_blocks.append(f"【调用工具 {block.get('name')}】: {json.dumps(block.get('input') or {}, ensure_ascii=False)}")
+                elif isinstance(block, str):
+                    text_blocks.append(block)
+            text = "\n".join(text_blocks)
+        if text.strip():
+            turns.append((role, text.strip()))
+
+    full_parts = []
+    if system_text:
+        full_parts.append(f"【系统设定】\n{system_text}\n")
+    for r, t in turns:
+        r_name = "User" if r == "user" else "Assistant"
+        full_parts.append(f"{r_name}: {t}")
+    prompt = "\n\n".join(full_parts)
+    if not turns or not prompt:
+        raise HTTPException(400, "messages 为空")
+
+    model = resolve_model(req.model, default="muse-spark")
+    acc = store.pick_account(rotate=True)
+    if not acc:
+        raise HTTPException(400, "没有可用账号，请先在管理页面导入 cookie")
+
+    msg_id = "msg_" + uuid.uuid4().hex[:24]
+    acc_id, cookies, expires = acc["id"], acc["cookies"], acc.get("cookies_exp")
+    timeout = int(CFG.chat_timeout)
+
+    if req.stream:
+        def sync_stream():
+            try:
+                start_usage = _chat_usage(prompt, "")
+                yield _sse_event("message_start", {
+                    "type": "message_start",
+                    "message": {
+                        "id": msg_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "model": model,
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {
+                            "input_tokens": start_usage["prompt_tokens"],
+                            "output_tokens": 0,
+                        },
+                    },
+                })
+                yield _sse_event("content_block_start", {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                })
+                raw_out: list[str] = []
+                for chunk in safe_chat_stream(cookies, prompt, expires, timeout, account_id=acc_id):
+                    raw_out.append(chunk)
+                    for piece in _pace_text(chunk):
+                        yield _sse_event("content_block_delta", {
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {"type": "text_delta", "text": piece},
+                        })
+                yield _sse_event("content_block_stop", {"type": "content_block_stop", "index": 0})
+                final_usage = _chat_usage(prompt, "".join(raw_out))
+                yield _sse_event("message_delta", {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                    "usage": {"output_tokens": final_usage["completion_tokens"]},
+                })
+                yield _sse_event("message_stop", {"type": "message_stop"})
+            except MuseAuthError as exc:
+                yield _sse_event("error", {"type": "error", "error": {"type": "authentication_error", "message": str(exc)}})
+            except MuseGenerationError as exc:
+                yield _sse_event("error", {"type": "error", "error": {"type": "api_error", "message": str(exc)}})
+            except Exception as exc:  # noqa: BLE001
+                log.warning("anthropic messages 流式失败: %s", exc)
+                yield _sse_event("error", {"type": "error", "error": {"type": "api_error", "message": str(exc)}})
+
+        return StreamingResponse(
+            sync_stream(),
+            media_type="text/event-stream; charset=utf-8",
+            headers=_usage_headers(_SSE_HEADERS),
+        )
+
+    def run() -> str:
+        return "".join(safe_chat_stream(cookies, prompt, expires, timeout, account_id=acc_id))
+
+    try:
+        text = await asyncio.to_thread(run)
+    except MuseAuthError as exc:
+        raise HTTPException(401, str(exc))
+    except MuseGenerationError as exc:
+        raise HTTPException(502, str(exc))
+
+    usage = _chat_usage(prompt, text)
+    if response is not None:
+        response.headers.update(_usage_headers())
+    return {
+        "id": msg_id,
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [{"type": "text", "text": text}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": usage["prompt_tokens"],
+            "output_tokens": usage["completion_tokens"],
+        },
+    }
 
 
 @app.get("/v1/media/{name}")
