@@ -43,7 +43,7 @@ import time
 import uuid
 import zipfile
 
-from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                Response, StreamingResponse)
@@ -1779,6 +1779,33 @@ def _want_usage(stream_options) -> bool:
     return False
 
 
+_CJK_CHARS = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]")
+_ZERO_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
+def estimate_tokens(text: str | None) -> int:
+    """粗估 token：CJK 字符每字 1 个，其余每 4 个字符 1 个（向上取整）。不是真实计量。"""
+    if not text:
+        return 0
+    cjk = len(_CJK_CHARS.findall(text))
+    return cjk + -(-(len(text) - cjk) // 4)
+
+
+def _chat_usage(prompt: str, completion: str) -> dict:
+    """MUSE2API_ESTIMATE_USAGE=1 时返回估算用量，否则保持原来的全 0。"""
+    if not CFG.estimate_usage:
+        return dict(_ZERO_USAGE)
+    p, c = estimate_tokens(prompt), estimate_tokens(completion)
+    return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c}
+
+
+def _usage_headers(headers: dict | None = None) -> dict:
+    out = dict(headers or {})
+    if CFG.estimate_usage:
+        out["X-Muse2api-Usage"] = "estimated"
+    return out
+
+
 def _pace_text(text: str, chunk_size: int = 2, delay: float = 0.012):
     """把大块文本平滑切分为仿原生 LLM 打字机的微流式 Token。
     若传入文本本身微小（<= 3 字），直接秒级放行，零延迟；
@@ -1803,7 +1830,7 @@ _SSE_HEADERS = {
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(req: ChatRequest, _=Depends(auth)):
+async def chat_completions(req: ChatRequest, response: Response = None, _=Depends(auth)):
     """OpenAI 兼容的对话接口 —— 各类智能体客户端都能接。
 
     说明：muse.ai 网页是**自动路由**的 agent，界面上没有模型选择器，所有请求
@@ -1854,7 +1881,14 @@ async def chat_completions(req: ChatRequest, _=Depends(auth)):
                 # 握手建立瞬间立即发送 role: assistant 首包，让下游客户端秒级捕获光标
                 yield _sse(_chat_chunk(cid, created, model, {"role": "assistant"}))
 
-                stream_gen = safe_chat_stream(cookies, prompt, expires, timeout, account_id=acc_id)
+                raw_out: list[str] = []
+
+                def _tee(gen):
+                    for piece in gen:
+                        raw_out.append(piece)
+                        yield piece
+
+                stream_gen = _tee(safe_chat_stream(cookies, prompt, expires, timeout, account_id=acc_id))
                 if not tool_note:
                     for chunk in stream_gen:
                         for piece in _pace_text(chunk):
@@ -1898,7 +1932,7 @@ async def chat_completions(req: ChatRequest, _=Depends(auth)):
                     yield _sse({"id": cid, "object": "chat.completion.chunk",
                                 "created": created, "model": model,
                                 "choices": [],
-                                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}})
+                                "usage": _chat_usage(prompt, "".join(raw_out))})
                 yield "data: [DONE]\n\n"
                 store.mark(acc_id, True, "")
             except MuseAuthError as exc:
@@ -1913,7 +1947,8 @@ async def chat_completions(req: ChatRequest, _=Depends(auth)):
                 yield _sse({"error": {"message": str(exc), "type": "server_error", "code": 502}})
             except Exception as exc:
                 yield _sse({"error": {"message": f"内部错误: {exc}", "type": "server_error", "code": 500}})
-        return StreamingResponse(sync_stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
+        return StreamingResponse(sync_stream(), media_type="text/event-stream",
+                                 headers=_usage_headers(_SSE_HEADERS))
 
     def run() -> str:
         return "".join(safe_chat_stream(cookies, prompt, expires, timeout, account_id=acc_id))
@@ -1925,7 +1960,9 @@ async def chat_completions(req: ChatRequest, _=Depends(auth)):
     except MuseGenerationError as exc:
         raise HTTPException(502, str(exc))
 
-    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    usage = _chat_usage(prompt, text)
+    if response is not None:
+        response.headers.update(_usage_headers())
     if tool_note:
         calls, rest = parse_tool_calls(text)
         if calls:
@@ -1979,7 +2016,7 @@ def _sse_event(event: str, data: dict) -> str:
 
 
 @app.post("/v1/responses")
-async def responses_api(req: ResponsesRequest, _=Depends(auth)):
+async def responses_api(req: ResponsesRequest, response: Response = None, _=Depends(auth)):
     """OpenAI Responses API —— 新版 Codex 默认走这个端点。
 
     只实现 Codex 实际用到的子集：文本进 → 文本出（含流式事件）。
@@ -2002,14 +2039,16 @@ async def responses_api(req: ResponsesRequest, _=Depends(auth)):
 
     def envelope(status: str, text: str = "") -> dict:
         done = status == "completed"
+        u = _chat_usage(prompt, text) if done else _ZERO_USAGE
         return {"id": rid, "object": "response", "created_at": created,
                 "status": status, "model": model,
                 "output": [{"type": "message", "id": mid, "role": "assistant",
                             "status": "completed" if done else "in_progress",
                             "content": ([{"type": "output_text", "text": text,
                                           "annotations": []}] if text else [])}],
-                "usage": {"input_tokens": 0, "output_tokens": 0,
-                          "total_tokens": 0}}
+                "usage": {"input_tokens": u["prompt_tokens"],
+                          "output_tokens": u["completion_tokens"],
+                          "total_tokens": u["total_tokens"]}}
 
     if req.stream:
         def sync_stream():
@@ -2049,7 +2088,8 @@ async def responses_api(req: ResponsesRequest, _=Depends(auth)):
                 yield _sse_event("response.failed", {
                     "type": "response.failed",
                     "response": envelope("failed")})
-        return StreamingResponse(sync_stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
+        return StreamingResponse(sync_stream(), media_type="text/event-stream",
+                                 headers=_usage_headers(_SSE_HEADERS))
 
     def run() -> str:
         return "".join(safe_chat_stream(cookies, prompt, expires, timeout, account_id=acc_id))
@@ -2061,6 +2101,8 @@ async def responses_api(req: ResponsesRequest, _=Depends(auth)):
     except MuseGenerationError as exc:
         raise HTTPException(502, str(exc))
 
+    if response is not None:
+        response.headers.update(_usage_headers())
     return envelope("completed", text)
 
 
