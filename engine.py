@@ -407,6 +407,9 @@ class MuseEngine:
                     except Exception:
                         pass
 
+            if self.proc is not None or getattr(self, "_log", None) is not None:
+                self._reap_proc()
+
             os.makedirs(self.cfg.data_dir, exist_ok=True)
             self._log = open(os.path.join(self.cfg.data_dir, "chromium.log"), "ab", buffering=0)
             cwd_dir = self.cfg.home_dir if (self.cfg.home_dir and os.path.isdir(self.cfg.home_dir)) else None
@@ -421,7 +424,32 @@ class MuseEngine:
                 except Exception as exc:  # noqa: BLE001
                     last = exc
                     time.sleep(1)
+            self._reap_proc()
             raise MuseGenerationError(f"Chromium 启动失败: {last}")
+
+    def _reap_proc(self, terminate_timeout: float = 10, kill_timeout: float = 5):
+        proc = self.proc
+        self.proc = None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=terminate_timeout)
+            except Exception:  # noqa: BLE001
+                try:
+                    proc.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    proc.wait(timeout=kill_timeout)
+                except Exception:  # noqa: BLE001
+                    pass
+        log_f = getattr(self, "_log", None)
+        self._log = None
+        if log_f is not None:
+            try:
+                log_f.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def stop(self):
         with self._start_lock:
@@ -439,13 +467,7 @@ class MuseEngine:
                 except Exception:
                     pass
                 self.browser = None
-            if self.proc and self.proc.poll() is None:
-                self.proc.terminate()
-                try:
-                    self.proc.wait(timeout=10)
-                except Exception:  # noqa: BLE001
-                    self.proc.kill()
-            self.proc = None
+            self._reap_proc()
             with self._contexts_lock:
                 relays = list(self._proxy_relays)
                 self._proxy_relays.clear()

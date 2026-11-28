@@ -5,6 +5,7 @@ services:
     build: .
     image: muse2api:latest
     container_name: muse2api
+    init: true
     restart: always
     ports:
       - "18610:18610"

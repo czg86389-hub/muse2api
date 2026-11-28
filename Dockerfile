@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-wqy-zenhei \
     fonts-freefont-ttf \
     procps \
+    tini \
     curl \
     git \
     ca-certificates \
@@ -44,4 +45,5 @@ VOLUME ["/app/data"]
 
 EXPOSE 18610
 
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "18610"]
